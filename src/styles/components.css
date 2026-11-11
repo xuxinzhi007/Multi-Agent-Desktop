@@ -1,0 +1,232 @@
+/* 通用组件样式。命名空间前缀 c-（component）。
+   全部走 token，禁止硬编码色值。 */
+
+/* ---------- 按钮 ---------- */
+.c-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 7px 13px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.c-btn--primary {
+  background: var(--accent-primary);
+  color: #fff;
+}
+.c-btn--primary:hover {
+  background: var(--accent-hover);
+}
+.c-btn--primary:active {
+  background: var(--accent-active);
+}
+
+.c-btn--secondary {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+}
+.c-btn--secondary:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-strong);
+}
+
+.c-btn--ghost {
+  color: var(--text-tertiary);
+}
+.c-btn--ghost:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface-hover);
+}
+
+.c-btn--danger {
+  background: var(--danger-dim);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+}
+.c-btn--danger:hover {
+  background: rgba(229, 87, 93, 0.2);
+}
+
+.c-btn--success {
+  background: var(--success-dim);
+  border: 1px solid var(--success-border);
+  color: var(--success);
+}
+.c-btn--success:hover {
+  background: rgba(62, 207, 142, 0.2);
+}
+
+.c-btn:disabled {
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.c-btn--sm {
+  padding: 4px 9px;
+  font-size: var(--text-xs);
+}
+
+.c-btn--full {
+  width: 100%;
+}
+
+/* ---------- 图标按钮 ---------- */
+.c-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.c-icon-btn:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.c-icon-btn--danger:hover {
+  color: var(--danger);
+}
+.c-icon-btn--active {
+  background: var(--bg-surface-active);
+  color: var(--text-primary);
+}
+
+/* ---------- 状态点 ---------- */
+.c-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+.c-dot--idle {
+  background: var(--text-disabled);
+}
+.c-dot--running {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px var(--warning-dim);
+}
+.c-dot--done {
+  background: var(--success);
+}
+.c-dot--error {
+  background: var(--danger);
+}
+.c-dot--connected {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+/* ---------- 徽章 ---------- */
+.c-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  border: 1px solid var(--border-default);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.c-badge--accent {
+  border-color: var(--accent-border);
+  color: var(--accent-bright);
+  background: var(--accent-dim);
+}
+.c-badge--success {
+  border-color: var(--success-border);
+  color: var(--success);
+  background: var(--success-dim);
+}
+.c-badge--warning {
+  border-color: var(--warning-border);
+  color: var(--warning);
+  background: var(--warning-dim);
+}
+.c-badge--danger {
+  border-color: var(--danger-border);
+  color: var(--danger);
+  background: var(--danger-dim);
+}
+
+/* ---------- 面板/分区标题 ---------- */
+.c-section-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+/* ---------- 空状态 ---------- */
+.c-empty {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--text-disabled);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  padding: var(--space-8) var(--space-4);
+}
+
+/* ---------- 分栏容器 ---------- */
+.c-shell {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+.c-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.c-divider-v {
+  width: 1px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
+/* ---------- 消息气泡内的代码块 ---------- */
+.c-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+/* ---------- 进度条 ---------- */
+.c-progress {
+  height: 3px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.c-progress__fill {
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: var(--radius-full);
+  transition: width var(--dur-base) var(--ease);
+}

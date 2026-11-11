@@ -1,16 +1,124 @@
+/* ============================================================
+   设计 token
+   命名规律参考 Cursor / Grok Bot:
+     --{semantic}-{primary|secondary|tertiary|quaternary}  层级递进
+     --{semantic}-{hover|active|bright}                     交互态
+   组件禁止硬编码色值，一律走 token。
+   ============================================================ */
+
 :root {
-  --bg: #0d0f14;
-  --panel: #14171e;
-  --panel-2: #1a1e27;
-  --border: #252a35;
-  --text: #e4e7ee;
-  --muted: #868d9e;
-  --dim: #4a5162;
-  --accent: #5b9dff;
-  --green: #3ecf8e;
-  --amber: #e8a33d;
-  --red: #e5484d;
-  --purple: #c47aff;
+  /* --- 中性色阶（背景：越靠上层越亮）--- */
+  --bg-base: #0a0c10;        /* 应用最底层 */
+  --bg-chrome: #101318;      /* 侧栏 / 顶栏 */
+  --bg-surface: #151920;     /* 卡片 / 面板 */
+  --bg-surface-hover: #1a1f28;
+  --bg-surface-active: #1f2530;
+  --bg-elevated: #212734;    /* 弹窗 / 下拉 */
+  --bg-inset: #0d1015;       /* 输入框 / 代码块（比面板更暗）*/
+
+  /* --- 边框 --- */
+  --border-subtle: #1d222c;
+  --border-default: #262d3a;
+  --border-strong: #333c4d;
+  --border-focus: #4d8cf0;
+
+  /* --- 文字 --- */
+  --text-primary: #e8ebf1;
+  --text-secondary: #a4adbd;
+  --text-tertiary: #6e7789;
+  --text-disabled: #454d5c;
+  --text-inverse: #0a0c10;
+
+  /* --- 强调色（品牌蓝）--- */
+  --accent-primary: #4d8cf0;
+  --accent-secondary: #3d74cc;
+  --accent-hover: #5f9bf5;
+  --accent-active: #3a6fc4;
+  --accent-bright: #7bb0ff;
+  --accent-dim: rgba(77, 140, 240, 0.12);
+  --accent-border: rgba(77, 140, 240, 0.4);
+
+  /* --- 语义色 --- */
+  --success: #3ecf8e;
+  --success-dim: rgba(62, 207, 142, 0.12);
+  --success-border: rgba(62, 207, 142, 0.38);
+
+  --warning: #e8a33d;
+  --warning-dim: rgba(232, 163, 61, 0.12);
+  --warning-border: rgba(232, 163, 61, 0.38);
+
+  --danger: #e5575d;
+  --danger-dim: rgba(229, 87, 93, 0.12);
+  --danger-border: rgba(229, 87, 93, 0.38);
+
+  --info: #4dc9e0;
+  --info-dim: rgba(77, 201, 224, 0.12);
+
+  --purple: #b07cf5;
+  --purple-dim: rgba(176, 124, 245, 0.12);
+
+  /* --- diff --- */
+  --diff-add-bg: rgba(62, 207, 142, 0.1);
+  --diff-add-text: #7ee2b8;
+  --diff-del-bg: rgba(229, 87, 93, 0.1);
+  --diff-del-text: #f09095;
+
+  /* --- agent 身份色（每个会话一个）--- */
+  --agent-1: #4d8cf0;
+  --agent-2: #3ecf8e;
+  --agent-3: #e8a33d;
+  --agent-4: #b07cf5;
+  --agent-5: #e5575d;
+  --agent-6: #4dc9e0;
+
+  /* --- 间距（4px 基准）--- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* --- 字号 --- */
+  --text-xs: 10.5px;
+  --text-sm: 11.5px;
+  --text-base: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+
+  /* --- 行高 --- */
+  --leading-tight: 1.4;
+  --leading-normal: 1.65;
+  --leading-relaxed: 1.8;
+
+  /* --- 圆角 --- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 9px;
+  --radius-xl: 12px;
+  --radius-full: 999px;
+
+  /* --- 阴影 --- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  /* --- 字体 --- */
+  --font-sans: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+
+  /* --- 尺寸 --- */
+  --sidebar-w: 232px;
+  --inspector-w: 340px;
+  --header-h: 46px;
+  --composer-min-h: 76px;
+
+  /* --- 动效 --- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 0.12s;
+  --dur-base: 0.18s;
 }
 
 * {
@@ -27,10 +135,11 @@ body,
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
-  font-size: 13px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -41,6 +150,7 @@ button {
   border: none;
   background: none;
   color: inherit;
+  padding: 0;
 }
 
 input,
@@ -48,23 +158,33 @@ textarea,
 select {
   font-family: inherit;
   font-size: inherit;
-  color: inherit;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 7px 10px;
   outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
 }
 
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-disabled);
+}
+
+.mono {
+  font-family: var(--font-mono);
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
 }
 
 ::-webkit-scrollbar-track {
@@ -72,16 +192,19 @@ select:focus {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2b3140;
-  border-radius: 4px;
+  background: var(--border-default);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a4152;
+  background: var(--border-strong);
+  background-clip: content-box;
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+::selection {
+  background: var(--accent-dim);
 }
 
 @keyframes pulse-dot {
@@ -90,18 +213,38 @@ select:focus {
     opacity: 1;
   }
   50% {
-    opacity: 0.35;
+    opacity: 0.3;
   }
 }
 
 @keyframes fade-up {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(3px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
   }
 }
 
@@ -110,5 +253,9 @@ select:focus {
 }
 
 .fade-up {
-  animation: fade-up 0.16s ease-out;
+  animation: fade-up var(--dur-base) var(--ease);
+}
+
+.slide-in {
+  animation: slide-in var(--dur-base) var(--ease);
 }

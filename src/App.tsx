@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import AgentView from './components/AgentView'
+import Inspector, { type InspectorTab } from './components/Inspector'
 import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import { useSidecar } from './lib/useSidecar'
@@ -11,6 +12,8 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [shellOpen, setShellOpen] = useState(false)
+  const [inspectorOpen, setInspectorOpen] = useState(true)
+  const [tab, setTab] = useState<InspectorTab>('changes')
 
   useEffect(() => {
     if (!activeId && s.agents.length > 0) setActiveId(s.agents[0].id)
@@ -24,12 +27,13 @@ export default function App() {
   const err = activeId ? s.errors[activeId] : undefined
 
   return (
-    <div style={{ display: 'flex', height: '100vh', width: '100vw', overflow: 'hidden' }}>
+    <div className="c-shell">
       <Sidebar
         agents={s.agents}
         activeId={activeId}
         connected={s.connected}
         version={s.version}
+        provider={s.llm.provider}
         onSelect={setActiveId}
         onCreate={(name, role) => s.send('agent.create', { name, role })}
         onDelete={(id) => s.send('agent.delete', { id })}
@@ -47,10 +51,21 @@ export default function App() {
           setShellOpen(true)
           s.send('shell.run', { agentId: active?.id ?? '', command })
         }}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen((v) => !v)}
       />
 
-      {shellOpen && (
-        <ShellPanel logs={s.shell} onClose={() => setShellOpen(false)} />
+      {shellOpen && <ShellPanel logs={s.shell} onClose={() => setShellOpen(false)} />}
+
+      {inspectorOpen && (
+        <Inspector
+          tab={tab}
+          onTab={setTab}
+          changes={s.changes}
+          todos={s.todos}
+          tools={s.tools}
+          onClose={() => setInspectorOpen(false)}
+        />
       )}
 
       <SettingsModal

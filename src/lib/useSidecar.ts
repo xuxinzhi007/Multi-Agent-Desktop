@@ -6,8 +6,9 @@ import {
   type Connection,
   type Envelope,
   type LLMConfig,
+  type ShellLog,
 } from './ws'
-import type { ShellLog } from './ws'
+import type { FileChange, TodoItem, ToolCall } from '../components/Inspector'
 
 type State = {
   connected: boolean
@@ -18,6 +19,9 @@ type State = {
   streaming: Record<string, string>
   errors: Record<string, string>
   shell: ShellLog[]
+  changes: FileChange[]
+  todos: TodoItem[]
+  tools: ToolCall[]
 }
 
 const EMPTY: State = {
@@ -29,6 +33,9 @@ const EMPTY: State = {
   streaming: {},
   errors: {},
   shell: [],
+  changes: [],
+  todos: [],
+  tools: [],
 }
 
 export function useSidecar() {
@@ -106,10 +113,7 @@ function reduce(s: State, e: Envelope): State {
         agents: s.agents.map((a) =>
           a.id === d.id ? { ...a, messages: [...a.messages, d.message] } : a,
         ),
-        streaming:
-          d.message?.role === 'assistant'
-            ? omit(s.streaming, d.id)
-            : s.streaming,
+        streaming: d.message?.role === 'assistant' ? omit(s.streaming, d.id) : s.streaming,
       }
 
     case 'agent.error':
@@ -122,11 +126,56 @@ function reduce(s: State, e: Envelope): State {
     case 'llm.config':
       return { ...s, llm: (d.cfg ?? d) as LLMConfig }
 
+    case 'workdir':
+      return { ...s, workDir: d.dir }
+
+    /* ---------- 检查器事件（W3 后端接入前由 mock 驱动）---------- */
+    case 'file.change':
+      return {
+        ...s,
+        changes: upsertChange(s.changes, d as FileChange),
+      }
+
+    case 'todo.update':
+      return {
+        ...s,
+        todos: d.items as TodoItem[],
+      }
+
+    case 'tool.start':
+      return {
+        ...s,
+        tools: [
+          {
+            id: d.id,
+            tool: d.tool,
+            target: d.target,
+            status: 'running',
+            at: Date.now(),
+          } as ToolCall,
+          ...s.tools,
+        ].slice(0, 40),
+      }
+
+    case 'tool.result':
+      return {
+        ...s,
+        tools: s.tools.map((t) =>
+          t.id === d.id
+            ? { ...t, status: d.status ?? 'ok', detail: d.detail }
+            : t,
+        ),
+      }
+
     case 'shell.start':
       return {
         ...s,
         shell: [
-          { id: `${e.ts}-${Math.random().toString(36).slice(2, 7)}`, command: d.command, at: Date.now() },
+          {
+            id: `${e.ts}-${Math.random().toString(36).slice(2, 7)}`,
+            command: d.command,
+            at: Date.now(),
+          },
           ...s.shell,
         ].slice(0, 40),
       }
@@ -139,12 +188,17 @@ function reduce(s: State, e: Envelope): State {
         ),
       }
 
-    case 'workdir':
-      return { ...s, workDir: d.dir }
-
     default:
       return s
   }
+}
+
+function upsertChange(list: FileChange[], next: FileChange): FileChange[] {
+  const i = list.findIndex((c) => c.path === next.path)
+  if (i === -1) return [next, ...list]
+  const out = [...list]
+  out[i] = next
+  return out
 }
 
 function omit<T extends Record<string, unknown>>(obj: T, key: string): T {

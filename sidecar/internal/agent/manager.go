@@ -165,6 +165,11 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusRunning})
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
 
+	// mock provider 下推一组检查器事件，让改动/任务/工具面板有真实结构
+	if m.LLMConfig().Provider == "" || m.LLMConfig().Provider == "mock" {
+		m.demoTrail(a.ID, a.Name)
+	}
+
 	go func() {
 		defer cancel()
 

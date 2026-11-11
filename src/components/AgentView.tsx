@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Agent } from '../lib/ws'
+import type { Agent, Message } from '../lib/ws'
 
 type Props = {
   agent: Agent | null
@@ -9,11 +9,13 @@ type Props = {
   onPrompt: (text: string) => void
   onStop: () => void
   onShell: (command: string) => void
+  onToggleInspector: () => void
+  inspectorOpen: boolean
 }
 
 export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
-  const [shellMode, setShellMode] = useState(false)
+  const [mode, setMode] = useState<'chat' | 'shell'>('chat')
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
 
@@ -24,28 +26,17 @@ export default function AgentView(p: Props) {
 
   useEffect(() => {
     taRef.current?.focus()
-  }, [p.agent?.id, shellMode])
+  }, [p.agent?.id, mode])
 
   if (!p.agent) {
     return (
-      <div
-        style={{
-          flex: 1,
-          display: 'grid',
-          placeItems: 'center',
-          color: 'var(--dim)',
-          fontSize: 12.5,
-          lineHeight: 2,
-          textAlign: 'center',
-        }}
-      >
-        <div>
-          <div style={{ fontSize: 28, marginBottom: 14, opacity: 0.25 }}>◇</div>
-          左侧新建一个 agent，或点击已有会话
-          <br />
-          <span style={{ fontSize: 11, opacity: 0.7 }}>
-            多个 agent 可以同时运行，互不干扰
-          </span>
+      <div className="c-col" style={{ flex: 1 }}>
+        <div className="c-empty" style={{ flex: 1 }}>
+          <div style={{ fontSize: 32, opacity: 0.18, marginBottom: 'var(--space-4)' }}>◇</div>
+          左侧新建 agent，或点击已有会话
+          <div style={{ fontSize: 'var(--text-xs)', marginTop: 'var(--space-3)' }}>
+            多个 agent 可同时运行，各自隔离
+          </div>
         </div>
       </div>
     )
@@ -54,11 +45,8 @@ export default function AgentView(p: Props) {
   const submit = () => {
     const text = input.trim()
     if (!text) return
-    if (shellMode) {
-      p.onShell(text)
-    } else {
-      p.onPrompt(text)
-    }
+    if (mode === 'shell') p.onShell(text)
+    else p.onPrompt(text)
     setInput('')
   }
 
@@ -66,103 +54,114 @@ export default function AgentView(p: Props) {
   const visible = p.agent.messages.filter((m) => m.role !== 'system')
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
+    <div className="c-col" style={{ flex: 1 }}>
+      {/* 头部 */}
       <header
         style={{
-          padding: '12px 20px',
-          borderBottom: '1px solid var(--border)',
+          height: 'var(--header-h)',
           display: 'flex',
           alignItems: 'center',
-          gap: 11,
+          gap: 'var(--space-2)',
+          padding: '0 var(--space-4)',
+          borderBottom: '1px solid var(--border-subtle)',
           flexShrink: 0,
         }}
       >
         <span
           style={{
-            width: 3,
-            height: 26,
-            borderRadius: 2,
+            width: 24,
+            height: 24,
+            borderRadius: 'var(--radius-sm)',
             background: p.agent.color,
+            color: 'var(--bg-base)',
+            display: 'grid',
+            placeItems: 'center',
+            fontSize: 12,
+            fontWeight: 700,
             flexShrink: 0,
           }}
-        />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13.5 }}>{p.agent.name}</div>
+        >
+          {p.agent.name.slice(0, 1).toUpperCase()}
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 'var(--text-md)', fontWeight: 600, lineHeight: 1.3 }}>
+            {p.agent.name}
+          </div>
           <div
             style={{
-              fontSize: 11,
-              color: 'var(--muted)',
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-tertiary)',
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
+              maxWidth: 300,
             }}
           >
             {p.agent.role}
           </div>
         </div>
-        {running && (
+
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          {running && (
+            <button className="c-btn c-btn--danger c-btn--sm" onClick={p.onStop}>
+              停止
+            </button>
+          )}
+          <StatusBadge status={p.agent.status} />
           <button
-            onClick={p.onStop}
-            style={{
-              background: 'rgba(229,72,77,0.12)',
-              border: '1px solid rgba(229,72,77,0.4)',
-              color: 'var(--red)',
-              padding: '5px 12px',
-              borderRadius: 5,
-              fontSize: 11.5,
-            }}
+            className={`c-icon-btn ${p.inspectorOpen ? 'c-icon-btn--active' : ''}`}
+            onClick={p.onToggleInspector}
+            title={p.inspectorOpen ? '收起检查器' : '展开检查器'}
           >
-            停止
+            ◫
           </button>
-        )}
-        <StatusPill status={p.agent.status} />
+        </div>
       </header>
 
-      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '18px 20px' }}>
+      {/* 消息流 */}
+      <div
+        ref={scrollRef}
+        style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-2)' }}
+      >
         {visible.length === 0 && !p.streaming && (
-          <div style={{ color: 'var(--dim)', fontSize: 12, lineHeight: 1.9 }}>
-            会话已就绪。发一条消息试试：
-            <div
-              className="mono"
-              style={{
-                marginTop: 10,
-                background: 'var(--panel)',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                padding: 10,
-                fontSize: 11.5,
-                color: 'var(--muted)',
-              }}
-            >
-              给我一个这个项目的重构建议
-            </div>
-          </div>
+          <EmptyChat color={p.agent.color} name={p.agent.name} />
         )}
 
         {visible.map((m, i) => (
-          <Bubble key={i} role={m.role} content={m.content} color={p.agent!.color} />
+          <Bubble key={i} m={m} color={p.agent!.color} />
         ))}
 
-        {p.streaming && (
-          <Bubble role="assistant" content={p.streaming} color={p.agent.color} live />
-        )}
+        {p.streaming && <Bubble m={{ role: 'assistant', content: p.streaming }} color={p.agent.color} live />}
 
         {running && !p.streaming && (
-          <div style={{ color: 'var(--muted)', fontSize: 12, padding: '6px 0' }}>
-            <span className="blink">●</span> 正在思考…
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 7,
+              color: 'var(--text-tertiary)',
+              fontSize: 'var(--text-sm)',
+              padding: '4px 0',
+            }}
+          >
+            <span className="blink" style={{ color: 'var(--warning)' }}>
+              ●
+            </span>
+            正在思考…
           </div>
         )}
 
         {p.error && (
           <div
             style={{
-              marginTop: 12,
-              background: 'rgba(229,72,77,0.09)',
-              border: '1px solid rgba(229,72,77,0.35)',
-              borderRadius: 6,
+              marginTop: 'var(--space-3)',
+              background: 'var(--danger-dim)',
+              border: '1px solid var(--danger-border)',
+              borderRadius: 'var(--radius-md)',
               padding: '9px 12px',
-              fontSize: 11.5,
-              color: '#ff9a9e',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--danger)',
+              lineHeight: 'var(--leading-normal)',
             }}
           >
             {p.error}
@@ -170,52 +169,24 @@ export default function AgentView(p: Props) {
         )}
       </div>
 
-      <div style={{ padding: '10px 20px 16px', flexShrink: 0, borderTop: '1px solid var(--border)' }}>
-        <div style={{ display: 'flex', gap: 7, marginBottom: 7, alignItems: 'center' }}>
-          <button
-            onClick={() => setShellMode(false)}
-            style={{
-              padding: '3px 10px',
-              borderRadius: 4,
-              fontSize: 11,
-              background: !shellMode ? 'var(--panel-2)' : 'transparent',
-              color: !shellMode ? 'var(--text)' : 'var(--dim)',
-              border: `1px solid ${!shellMode ? 'var(--border)' : 'transparent'}`,
-            }}
-          >
-            对话
-          </button>
-          <button
-            onClick={() => setShellMode(true)}
-            style={{
-              padding: '3px 10px',
-              borderRadius: 4,
-              fontSize: 11,
-              background: shellMode ? 'var(--panel-2)' : 'transparent',
-              color: shellMode ? 'var(--text)' : 'var(--dim)',
-              border: `1px solid ${shellMode ? 'var(--border)' : 'transparent'}`,
-            }}
-          >
-            终端
-          </button>
-          <span
-            className="mono"
-            style={{
-              marginLeft: 'auto',
-              fontSize: 10.5,
-              color: 'var(--dim)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              maxWidth: 300,
-            }}
-            title={p.workDir}
-          >
-            {p.workDir || '—'}
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+      {/* 输入区 */}
+      <div
+        style={{
+          padding: 'var(--space-3) var(--space-6) var(--space-5)',
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-lg)',
+            overflow: 'hidden',
+            transition: 'border-color var(--dur-fast) var(--ease)',
+          }}
+          onFocusCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-focus)')}
+          onBlurCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-default)')}
+        >
           <textarea
             ref={taRef}
             value={input}
@@ -227,114 +198,236 @@ export default function AgentView(p: Props) {
               }
             }}
             placeholder={
-              shellMode ? '输入 shell 命令，回车执行' : '给这个 agent 发消息，Enter 发送 / Shift+Enter 换行'
+              mode === 'shell'
+                ? '输入 shell 命令，回车执行'
+                : `给 ${p.agent.name} 发消息…`
             }
             rows={2}
-            className={shellMode ? 'mono' : ''}
+            className={mode === 'shell' ? 'mono' : ''}
             style={{
-              flex: 1,
+              width: '100%',
               resize: 'none',
-              lineHeight: 1.6,
-              background: 'var(--panel)',
-              fontSize: shellMode ? 12 : 13,
+              border: 'none',
+              background: 'transparent',
+              padding: '11px 13px 4px',
+              lineHeight: 'var(--leading-normal)',
+              fontSize: 'var(--text-md)',
             }}
           />
-          <button
-            onClick={submit}
-            disabled={!input.trim()}
+
+          <div
             style={{
-              background: input.trim() ? 'var(--accent)' : 'var(--panel-2)',
-              color: input.trim() ? '#fff' : 'var(--dim)',
-              padding: '9px 18px',
-              borderRadius: 6,
-              fontWeight: 500,
-              fontSize: 12.5,
-              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '5px 8px 7px',
             }}
           >
-            {shellMode ? '执行' : '发送'}
-          </button>
+            <ModeBtn active={mode === 'chat'} onClick={() => setMode('chat')}>
+              对话
+            </ModeBtn>
+            <ModeBtn active={mode === 'shell'} onClick={() => setMode('shell')}>
+              终端
+            </ModeBtn>
+
+            <span
+              className="mono"
+              style={{
+                marginLeft: 'auto',
+                fontSize: 'var(--text-xs)',
+                color: 'var(--text-disabled)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                maxWidth: 260,
+                marginRight: 6,
+              }}
+              title={p.workDir}
+            >
+              {p.workDir || '—'}
+            </span>
+
+            <button
+              className="c-btn c-btn--primary c-btn--sm"
+              onClick={submit}
+              disabled={!input.trim()}
+            >
+              {mode === 'shell' ? '执行' : '发送'}
+            </button>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'flex',
+            gap: 'var(--space-3)',
+            marginTop: 6,
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-disabled)',
+          }}
+        >
+          <span>Enter 发送 · Shift+Enter 换行</span>
         </div>
       </div>
     </div>
   )
 }
 
-function StatusPill({ status }: { status: string }) {
-  const map: Record<string, { c: string; t: string }> = {
-    idle: { c: 'var(--dim)', t: '空闲' },
-    running: { c: 'var(--amber)', t: '运行中' },
-    done: { c: 'var(--green)', t: '已完成' },
-    error: { c: 'var(--red)', t: '出错' },
-  }
-  const s = map[status] ?? map.idle
+function ModeBtn({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
   return (
-    <span
+    <button
+      onClick={onClick}
       style={{
-        fontSize: 10.5,
-        color: s.c,
-        border: `1px solid ${s.c}`,
-        borderRadius: 20,
-        padding: '2px 9px 2px 7px',
-        opacity: 0.85,
-        flexShrink: 0,
+        padding: '4px 10px',
+        borderRadius: 'var(--radius-sm)',
+        fontSize: 'var(--text-xs)',
+        fontWeight: active ? 600 : 400,
+        color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+        background: active ? 'var(--bg-surface-active)' : 'transparent',
+        transition: 'all var(--dur-fast) var(--ease)',
       }}
     >
-      ● {s.t}
-    </span>
+      {children}
+    </button>
   )
 }
 
-function Bubble({
-  role,
-  content,
-  color,
-  live,
-}: {
-  role: string
-  content: string
-  color: string
-  live?: boolean
-}) {
-  const isUser = role === 'user'
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { cls: string; t: string }> = {
+    idle: { cls: '', t: '空闲' },
+    running: { cls: 'c-badge--warning', t: '运行中' },
+    done: { cls: 'c-badge--success', t: '完成' },
+    error: { cls: 'c-badge--danger', t: '出错' },
+  }
+  const s = map[status] ?? map.idle
+  return <span className={`c-badge ${s.cls}`}>{s.t}</span>
+}
+
+function EmptyChat({ color, name }: { color: string; name: string }) {
+  const hints = [
+    '这个模块有什么风险？',
+    '给我一个最小可行实现',
+    '看下 query 能不能优化',
+  ]
   return (
-    <div
-      className="fade-up"
-      style={{
-        marginBottom: 16,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: isUser ? 'flex-end' : 'flex-start',
-      }}
-    >
+    <div style={{ paddingTop: 'var(--space-6)' }}>
       <div
         style={{
-          fontSize: 10,
-          color: isUser ? 'var(--dim)' : color,
-          marginBottom: 5,
-          letterSpacing: 0.4,
-          textTransform: 'uppercase',
+          width: 34,
+          height: 34,
+          borderRadius: 'var(--radius-md)',
+          background: color,
+          color: 'var(--bg-base)',
+          display: 'grid',
+          placeItems: 'center',
+          fontSize: 16,
+          fontWeight: 700,
+          marginBottom: 'var(--space-4)',
         }}
       >
-        {isUser ? '你' : 'Agent'}
-        {live && <span className="blink" style={{ marginLeft: 6 }}>●</span>}
+        {name.slice(0, 1).toUpperCase()}
+      </div>
+      <div style={{ fontSize: 'var(--text-lg)', fontWeight: 600, marginBottom: 6 }}>
+        {name} 已就绪
       </div>
       <div
         style={{
-          maxWidth: '82%',
-          background: isUser ? 'var(--panel-2)' : 'var(--panel)',
-          border: `1px solid ${isUser ? 'var(--border)' : 'var(--border)'}`,
-          borderLeft: isUser ? undefined : `2px solid ${color}`,
-          borderRadius: 8,
-          padding: '10px 13px',
-          fontSize: 12.8,
-          lineHeight: 1.75,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-          color: isUser ? 'var(--text)' : '#d5dae5',
+          fontSize: 'var(--text-sm)',
+          color: 'var(--text-tertiary)',
+          lineHeight: 'var(--leading-relaxed)',
+          marginBottom: 'var(--space-5)',
         }}
       >
-        {content}
+        这个会话是独立的，不影响其他 agent。
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {hints.map((h) => (
+          <span
+            key={h}
+            style={{
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-tertiary)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-full)',
+              padding: '5px 11px',
+              background: 'var(--bg-surface)',
+            }}
+          >
+            {h}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean }) {
+  const isUser = m.role === 'user'
+  return (
+    <div
+      className="fade-up"
+      style={{ marginBottom: 'var(--space-4)', display: 'flex', gap: 'var(--space-3)' }}
+    >
+      {!isUser && (
+        <span
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 'var(--radius-sm)',
+            background: color,
+            color: 'var(--bg-base)',
+            display: 'grid',
+            placeItems: 'center',
+            fontSize: 11,
+            fontWeight: 700,
+            flexShrink: 0,
+            marginTop: 1,
+            opacity: 0.9,
+          }}
+        >
+          ◆
+        </span>
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: 3,
+            fontSize: 'var(--text-xs)',
+            color: isUser ? 'var(--text-disabled)' : 'var(--text-tertiary)',
+            fontWeight: 600,
+            letterSpacing: '0.02em',
+            lineHeight: 1.3,
+          }}
+        >
+          {isUser ? '你' : 'Agent'}
+          {live && (
+            <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
+              ●
+            </span>
+          )}
+        </div>
+        <div
+          style={{
+            fontSize: 'var(--text-md)',
+            lineHeight: 1.7,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            color: isUser ? 'var(--text-primary)' : 'var(--text-secondary)',
+          }}
+        >
+          {m.content}
+        </div>
       </div>
     </div>
   )

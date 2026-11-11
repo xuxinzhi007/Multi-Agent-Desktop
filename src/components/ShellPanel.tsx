@@ -3,42 +3,45 @@ import { prettyTime } from '../lib/presets'
 
 export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClose: () => void }) {
   return (
-    <div
+    <aside
+      className="c-col slide-in"
       style={{
-        width: 330,
+        width: 360,
         flexShrink: 0,
-        background: 'var(--panel)',
-        borderLeft: '1px solid var(--border)',
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
+        background: 'var(--bg-chrome)',
+        borderLeft: '1px solid var(--border-subtle)',
       }}
     >
       <div
         style={{
-          padding: '11px 14px',
-          borderBottom: '1px solid var(--border)',
+          height: 'var(--header-h)',
           display: 'flex',
           alignItems: 'center',
+          gap: 'var(--space-2)',
+          padding: '0 var(--space-3)',
+          borderBottom: '1px solid var(--border-subtle)',
+          flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 12, fontWeight: 600 }}>命令执行</span>
-        <button
-          onClick={onClose}
-          style={{ marginLeft: 'auto', color: 'var(--dim)', fontSize: 15, lineHeight: 1 }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text)')}
-          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--dim)')}
+        <span className="c-section-label">命令执行</span>
+        <span
+          className="mono"
+          style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}
         >
+          {logs.length}
+        </span>
+        <button className="c-icon-btn" style={{ marginLeft: 'auto' }} onClick={onClose}>
           ×
         </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-2)' }}>
         {logs.length === 0 && (
-          <div style={{ color: 'var(--dim)', fontSize: 11.5, lineHeight: 1.9, padding: '8px 2px' }}>
-            还没有执行记录。
-            <br />
-            切到「终端」模式发命令。
+          <div className="c-empty">
+            还没有执行记录
+            <div style={{ fontSize: 'var(--text-xs)', marginTop: 6 }}>
+              底部切到「终端」发命令
+            </div>
           </div>
         )}
 
@@ -47,32 +50,34 @@ export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClos
             key={l.id}
             className="fade-up mono"
             style={{
-              marginBottom: 12,
-              background: 'var(--panel-2)',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
+              marginBottom: 'var(--space-2)',
+              background: 'var(--bg-surface)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-md)',
               overflow: 'hidden',
-              fontSize: 11,
+              fontSize: 'var(--text-xs)',
             }}
           >
             <div
               style={{
                 padding: '7px 9px',
-                borderBottom: l.result ? '1px solid var(--border)' : 'none',
+                borderBottom: l.result ? '1px solid var(--border-subtle)' : 'none',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 6,
               }}
             >
-              <span style={{ color: 'var(--green)' }}>$</span>
-              <span style={{ flex: 1, wordBreak: 'break-all' }}>{l.command}</span>
-              <span style={{ color: 'var(--dim)', fontSize: 9.5, flexShrink: 0 }}>
+              <span style={{ color: 'var(--success)', flexShrink: 0 }}>$</span>
+              <span style={{ flex: 1, wordBreak: 'break-all', color: 'var(--text-primary)' }}>
+                {l.command}
+              </span>
+              <span style={{ color: 'var(--text-disabled)', fontSize: 9, flexShrink: 0 }}>
                 {prettyTime(l.at)}
               </span>
             </div>
 
             {!l.result && (
-              <div style={{ padding: '7px 9px', color: 'var(--amber)' }} className="blink">
+              <div style={{ padding: '7px 9px', color: 'var(--warning)' }} className="blink">
                 执行中…
               </div>
             )}
@@ -86,8 +91,8 @@ export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClos
                       padding: '7px 9px',
                       whiteSpace: 'pre-wrap',
                       wordBreak: 'break-all',
-                      color: '#c2c9d6',
-                      maxHeight: 220,
+                      color: 'var(--text-secondary)',
+                      maxHeight: 240,
                       overflow: 'auto',
                     }}
                   >
@@ -101,8 +106,8 @@ export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClos
                       padding: '7px 9px',
                       whiteSpace: 'pre-wrap',
                       wordBreak: 'break-all',
-                      color: '#ff9a9e',
-                      borderTop: '1px solid var(--border)',
+                      color: 'var(--danger)',
+                      borderTop: '1px solid var(--border-subtle)',
                       maxHeight: 160,
                       overflow: 'auto',
                     }}
@@ -112,10 +117,10 @@ export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClos
                 )}
                 <div
                   style={{
-                    padding: '5px 9px',
-                    borderTop: '1px solid var(--border)',
-                    color: l.result.exitCode === 0 ? 'var(--green)' : 'var(--red)',
-                    fontSize: 10,
+                    padding: '4px 9px',
+                    borderTop: '1px solid var(--border-subtle)',
+                    color: l.result.exitCode === 0 ? 'var(--success)' : 'var(--danger)',
+                    fontSize: 9.5,
                   }}
                 >
                   exit {l.result.exitCode}
@@ -125,6 +130,6 @@ export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClos
           </div>
         ))}
       </div>
-    </div>
+    </aside>
   )
 }

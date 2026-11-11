@@ -15,7 +15,7 @@ Tauri 2 (Rust 壳)  +  React 19 (前端)  +  Go sidecar (后端)
 
 > 请先读这一段，避免期待错位。
 
-**已完成（W1 + W2）**
+**已完成（W1 + W2 + UI 骨架）**
 
 - Tauri 壳自动拉起 / 关闭 sidecar，进程干净退出
 - 前端 ↔ sidecar WebSocket 全双工通信
@@ -23,10 +23,17 @@ Tauri 2 (Rust 壳)  +  React 19 (前端)  +  Go sidecar (后端)
 - token 级流式渲染，运行中可中断
 - shell 命令执行，右侧面板看 stdout / stderr / exit code
 - 模型 provider 可切换：Mock / Ollama / OpenAI 兼容 / DeepSeek / Claude
+- **三栏信息架构**：agent 舰队 / 会话流 / 检查器（改动·任务·工具）
+- **diff 视图**：双列行号、红绿高亮、按文件折叠
+- **工具调用卡片**：含「待批准 / 允许 / 拒绝」交互
+- **Todo 进度追踪**：完成态删除线、进行中闪烁、百分比进度条
+- **设计 token 体系**：约 120 个变量，组件零硬编码色值
 
 **还没做（W3 + W4）**
 
 - ❌ **agent 不能自己执行代码** —— 目前 shell 需要你手动输入，agent 干活靠字
+- ⚠️ **检查器面板是演示数据** —— 改动/任务/工具由 mock 事件驱动，展示的是界面结构，
+  不是真实 agent 行为。真数据要等 W3 把工具调用接进 agent loop
 - ❌ **没有 git worktree 隔离** —— 多个 agent 改同一份代码会互相踩
 - ❌ **没有 Supervisor** —— 任务要你手动分配给每个 agent，不能自动拆解
 - ❌ **会话不持久化** —— sidecar 重启即清空
@@ -70,6 +77,25 @@ ollama pull qwen2.5-coder:7b
 或者填 OpenAI / DeepSeek 的 Base URL + API Key。Key 只存在 sidecar 进程内存里，不落盘。
 
 ---
+
+## 设计系统
+
+`src/index.css` 定义约 120 个 token，`src/styles/components.css` 提供 `c-*` 组件类。
+组件内**禁止硬编码色值**，一律走变量。
+
+命名规律：
+
+```
+--bg-{base|chrome|surface|elevated|inset}     背景层级（越靠上层越亮）
+--border-{subtle|default|strong|focus}        边框
+--text-{primary|secondary|tertiary|disabled}  文字层级
+--{success|warning|danger|info}-{,dim,border} 语义色三件套
+--diff-{add,del}-{bg,text}                    diff 专用
+--agent-1..6                                  agent 身份色
+--space-1..8 (4px 基准)  --text-xs..xl  --radius-sm..full
+```
+
+改主题只需改 `:root` 一处。加新组件用 `c-` 前缀，避免和内联样式打架。
 
 ## 环境要求
 
@@ -198,6 +224,9 @@ multi-agent-desktop/
 | `agent.message` | 一条完整消息（user 或 assistant 落定） |
 | `agent.error` | 该会话出错 |
 | `shell.start` / `shell.result` | 命令开始 / 结果 |
+| `file.change` | 文件改动（含 diff 行）→ 检查器「改动」 |
+| `todo.update` | 任务清单更新 → 检查器「任务」 |
+| `tool.start` / `tool.result` | 工具调用开始 / 结果 → 检查器「工具」 |
 | `llm.config` | provider 变更（单播确认带 `origin: true`） |
 | `workdir` | 工作目录变更 |
 
