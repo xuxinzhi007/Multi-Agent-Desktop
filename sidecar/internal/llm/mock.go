@@ -77,9 +77,9 @@ func tokenize(s string) []string {
 
 func mockReply(system, user string) string {
 	role := "Agent"
-	if i := strings.Index(system, "你是"); i >= 0 {
-		rest := system[i+len("你是"):]
-		if j := strings.IndexAny(rest, "，。,."); j > 0 {
+	if i := strings.Index(system, "角色："); i >= 0 {
+		rest := system[i+len("角色："):]
+		if j := strings.IndexAny(rest, "。，,.\n"); j > 0 {
 			role = strings.TrimSpace(rest[:j])
 		}
 	}
@@ -90,15 +90,13 @@ func mockReply(system, user string) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "我是%s。收到任务：%s\n\n", role, task)
-	b.WriteString("我的拆解：\n")
-	b.WriteString("1. 先确认输入边界和验收标准\n")
-	b.WriteString("2. 给出最小可运行实现\n")
-	b.WriteString("3. 标注风险和需要你决策的点\n\n")
-	b.WriteString("当前运行在 mock provider 上，这段回复由本地规则生成，")
-	b.WriteString("用来验证多 agent 并行、流式渲染和会话隔离是否正常。\n")
-	b.WriteString("在设置里切到 Ollama 或 OpenAI 兼容接口后，这里就是真实模型的输出。\n\n")
-	fmt.Fprintf(&b, "结论：%s 方向可行，建议先做能跑通的最小切片。", role)
+	fmt.Fprintf(&b, "[%s] 收到：%s\n\n", role, task)
+	b.WriteString("这是 mock 模式的占位回复，不是真实分析。\n")
+	b.WriteString("在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n")
+	b.WriteString("现在这个 mock 只用来验证三件事：\n")
+	b.WriteString("1. 多个 agent 能否并行流式输出\n")
+	b.WriteString("2. 会话之间是否隔离\n")
+	b.WriteString("3. 停止按钮能否中断\n")
 
 	return b.String()
 }

@@ -88,7 +88,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Status:    StatusIdle,
 		CreatedAt: time.Now().Unix(),
 		Messages: []llm.Message{
-			{Role: "system", Content: "你是一个多 agent 开发工具里的子 agent。"},
+			{Role: "system", Content: "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"},
 		},
 	}
 
