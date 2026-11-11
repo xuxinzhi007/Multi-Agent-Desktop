@@ -14,7 +14,12 @@
         {
           "name": "sidecar",
           "sidecar": true,
-          "args": ["--port", { "validator": "\\d+" }]
+          "args": [
+            "--port",
+            { "validator": "^\\d+$" },
+            "--workdir",
+            { "validator": "^[^\\u0000]+$" }
+          ]
         }
       ]
     }

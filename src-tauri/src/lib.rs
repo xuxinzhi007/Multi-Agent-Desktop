@@ -9,11 +9,22 @@ const SIDECAR_PORT: &str = "17389";
 struct SidecarProcess(Mutex<Option<CommandChild>>);
 
 fn spawn_sidecar(app: &tauri::AppHandle) -> Result<CommandChild, Box<dyn std::error::Error>> {
-    let (mut rx, child) = app
-        .shell()
-        .sidecar("sidecar")?
-        .args(["--port", SIDECAR_PORT])
-        .spawn()?;
+    let mut args: Vec<String> = vec!["--port".into(), SIDECAR_PORT.into()];
+
+    // 开发时 cwd 是 src-tauri，仓库根是它的父目录
+    if let Ok(cwd) = std::env::current_dir() {
+        let root = if cwd.file_name().and_then(|n| n.to_str()) == Some("src-tauri") {
+            cwd.parent().map(|p| p.to_path_buf()).unwrap_or(cwd)
+        } else {
+            cwd
+        };
+        if root.join("package.json").exists() {
+            args.push("--workdir".into());
+            args.push(root.to_string_lossy().to_string());
+        }
+    }
+
+    let (mut rx, child) = app.shell().sidecar("sidecar")?.args(args).spawn()?;
 
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;

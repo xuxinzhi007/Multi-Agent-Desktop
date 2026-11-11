@@ -1,7 +1,7 @@
 # HANDOVER — 多 Agent 桌面程序项目交接文档
 
 > 这份文档自包含所有上下文。换机器 / 换会话 / 让别人接手，照这份文档就能继续。
-> 最后更新：2026-11-11（W1 已完成）
+> 最后更新：2026-11-11（W2 已完成，可完整体验）
 
 ---
 
@@ -55,10 +55,15 @@
 ├── docs/
 │   ├── research.md         ← 候选开源项目调研
 │   └── architecture.md     ← 详细架构 + 跨平台坑
-├── src-tauri/              ← Rust 壳（待建）
-├── src/                    ← React 前端（待建）
+├── src-tauri/              ← Rust 壳（已建，自动拉起 sidecar）
+├── src/                    ← React 前端（已建，舰队面板）
 ├── sidecar/                ← Go 后端
-│   ├── main.go             ← 当前：/healthz 健康检查
+│   ├── main.go             ← HTTP + WS 入口
+│   ├── internal/
+│   │   ├── llm/            ← mock + openai 兼容流式
+│   │   ├── agent/          ← 多会话管理
+│   │   ├── pty/            ← 跨平台 shell
+│   │   └── server/         ← WS hub + 命令分发
 │   └── go.mod
 ├── assets/pet/             ← 小鲸鱼素材（14 张 png，从 dsh-pet 复制）
 └── tools/
@@ -106,53 +111,79 @@ export PATH="$HOME/sdk/go1.25.8/bin:$HOME/go/bin:$HOME/.cargo/bin:$PATH"
 - [x] Go sidecar 最小骨架（`/healthz` 跑在 17389）
 - [x] 小鲸鱼素材 14 张复制到 `assets/pet/`
 - [x] **W1**：Tauri 壳 + React 前端 + sidecar WS 通信跑通 ✅ 2026-11-11
-- [ ] W2：单 agent + PTY + Ollama 对话
-- [ ] W3：多 agent 并行 + git worktree
+- [x] **W2**：多 agent 并行 + 流式对话 + shell 执行 ✅ 2026-11-11
+- [ ] W3：git worktree 隔离 + Supervisor 编排
 - [ ] W4：搬小鲸鱼 UI + 三端打包 dmg/msi
 
-## 8. W1 已验收内容（2026-11-11）
+## 8. W2 已交付（2026-11-11）
 
-实跑验证通过：
+### 能体验什么
 
-- `npm run tauri dev` 起桌面窗口，Rust 壳 `setup` 阶段自动 spawn sidecar
-- sidecar 监听 `127.0.0.1:17389`，提供 `/healthz` + `/ws`
-- 前端 `src/lib/ws.ts` 连 WS，收到 `hello` 握手 + 每 3 秒 `ping` 心跳
-- 窗口关闭时 `RunEvent::Exit` 杀掉 sidecar 子进程（无残留）
+1. `npm run tauri dev` 起窗口
+2. 左侧「+ 新建 Agent」，选角色预设（前端/后端/测试/架构/Reviewer）
+3. 建 3 个 agent，各自发消息 —— 三个会话同时流式输出，互不干扰
+4. 切「终端」模式发命令，右侧面板看 stdout / exit code
+5. 「⚙ 设置」切模型 provider（默认 Mock，无需任何配置）
 
-实测事件流：
-```
-hello    {"service":"multi-agent-sidecar","version":"0.1.0"}
-ping     {"clients":1}
-ping     {"clients":1}
-```
+### 后端结构（sidecar）
 
-### 关键文件
-
-| 文件 | 作用 |
+| 包 | 职责 |
 |---|---|
-| `sidecar/main.go` | HTTP + WS hub + 3s 心跳广播 |
-| `src/lib/ws.ts` | `fetchHealth()` / `connect()` |
-| `src/App.tsx` | 状态灯 + 事件流面板 |
-| `src-tauri/src/lib.rs` | spawn sidecar、转发日志、退出时 kill |
-| `src-tauri/capabilities/default.json` | `shell:allow-spawn` 白名单 |
-| `src-tauri/tauri.conf.json` | `bundle.externalBin = ["binaries/sidecar"]` |
+| `internal/llm` | `Client` 接口 + `mock`（规则引擎）+ `openai`（兼容 Ollama/OpenAI/DeepSeek/Claude），SSE 流式解析 |
+| `internal/agent` | `Manager` 管理 N 个会话，每个 `Agent` 独立历史/状态/cancel，并发安全 |
+| `internal/pty` | 跨平台 shell 执行，`Setpgid`(unix) / `CREATE_NEW_PROCESS_GROUP`(win) |
+| `internal/server` | WS hub（单写 goroutine + 心跳 + 慢客户端淘汰）、命令分发 |
+| `internal/{supervisor,worktree,events}` | W3 占位，内含 README 说明规划 |
 
-### 下次启动前必做
+### WS 协议
 
-`src-tauri/binaries/` 被 gitignore，二进制要重新生成：
+前端 → sidecar（`{action, data}`）：
 
-```bash
-./tools/build-sidecar.sh
-mkdir -p src-tauri/binaries
-cp sidecar/bin/sidecar-darwin-arm64 src-tauri/binaries/sidecar-aarch64-apple-darwin
-```
+| action | data | 说明 |
+|---|---|---|
+| `agent.create` | `{name, role}` | 建会话 |
+| `agent.delete` | `{id}` | 删会话 |
+| `agent.stop` | `{id}` | 取消正在跑的推理 |
+| `agent.prompt` | `{agentId, text}` | 发消息，流式回流 |
+| `shell.run` | `{agentId, command}` | 执行命令 |
+| `llm.config` | `{provider, baseUrl, apiKey, model}` | 切模型 |
+| `workdir.set` | `{dir}` | 切工作目录 |
 
-## 9. 下一步具体动作（W2）
+sidecar → 前端（`{event, data, ts}`）：
 
-1. sidecar 加 `internal/pty`（`creack/pty`），起 zsh/powershell 会话
-2. 加 `internal/llm`，OpenAI 兼容 client 接远端 Ollama
-3. `/ws` 增加双向消息：前端发 `{action:"chat", prompt}`，sidecar 流式回 `token` 事件
-4. 前端加一个输入框 + 流式输出区
+`bootstrap` `agent.created` `agent.deleted` `agent.status` `agent.delta` `agent.message` `agent.error` `shell.start` `shell.result` `llm.config` `workdir` `error`
+
+### 前端结构
+
+| 文件 | 职责 |
+|---|---|
+| `src/lib/ws.ts` | WS 连接（自动重连退避）、类型定义 |
+| `src/lib/useSidecar.ts` | 单一 state + reducer，把事件流折叠成 UI 状态 |
+| `src/lib/presets.ts` | 角色预设、provider 选项、默认 base/model |
+| `src/components/Sidebar.tsx` | agent 列表、状态点、新建/删除 |
+| `src/components/AgentView.tsx` | 消息流、流式气泡、对话/终端双模输入 |
+| `src/components/ShellPanel.tsx` | 命令执行记录、stdout/stderr/exit |
+| `src/components/SettingsModal.tsx` | provider 切换、API Key、工作目录 |
+
+### 两个关键设计取舍
+
+1. **Mock provider 兜底**：`llm.New()` 遇到未识别 provider 直接回落 mock，保证任何环境下应用都能启动并演示。避免"没装 Ollama 就白屏"。
+2. **`llm.config` 单播确认 + 排除发起者广播**：避免前端收到广播后又发一次导致自激循环（已实测回归：保存一次只收到 1 次事件）。
+
+### 已知限制（W3 要补）
+
+- 会话不持久化，sidecar 重启即清空
+- 没有 git worktree 隔离，多个 agent 改同一份代码会冲突
+- shell 是同步返回，长命令期间 UI 只能等 `shell.result`
+- 没有 Supervisor，任务需人工分配给每个 agent
+
+## 9. 下一步具体动作（W3）
+
+1. `internal/worktree`：每个 agent 一个 worktree，`git worktree add` 编排
+2. `internal/supervisor`：任务拆解 → 分发 → 汇总
+3. `internal/events`：事件总线抽包 + 断线重放
+4. 会话持久化（sidecar 侧落盘，或前端 localStorage 缓存）
+5. 小鲸鱼桌宠组件接进 UI
 
 ## 10. 关键决策记录
 

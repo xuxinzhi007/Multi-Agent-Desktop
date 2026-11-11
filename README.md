@@ -8,7 +8,7 @@
 
 ## 状态
 
-✅ W1 完成（2026-11-11）
+✅ W2 完成（2026-11-11）
 
 - [x] 目录结构
 - [x] 调研文档 `docs/research.md`
@@ -17,8 +17,8 @@
 - [x] Go sidecar 最小骨架（`/healthz` @ 17389）
 - [x] React 19 + Vite + TS 前端脚手架
 - [x] **W1: Tauri + Go sidecar WS 通信跑通** ✅ 2026-11-11
-- [ ] W2: 单 agent + Ollama ← 下一步
-- [ ] W3: 多 agent + worktree
+- [x] **W2: 多 agent 并行 + 流式对话 + shell 执行** ✅ 2026-11-11
+- [ ] W3: git worktree 隔离 + Supervisor 编排 ← 下一步
 - [ ] W4: 三端打包
 
 ## 快速开始
@@ -39,6 +39,16 @@ cp sidecar/bin/sidecar-darwin-arm64 src-tauri/binaries/sidecar-aarch64-apple-dar
 npm install
 npm run tauri dev
 ```
+
+## 能做什么
+
+- **多 agent 并行**：侧栏新建 N 个 agent，各持独立会话与系统角色，同时跑互不干扰
+- **流式对话**：token 级流式渲染，运行中可随时停止
+- **shell 执行**：切「终端」模式直接在指定工作目录执行命令，右侧面板看 exit code
+- **模型可切**：设置里选 Mock（默认，无需配置）/ Ollama / OpenAI 兼容 / DeepSeek / Claude
+- **会话隔离**：每个 agent 独立历史、状态、颜色，删除不影响其他
+
+默认 `Mock` provider 是本机规则引擎，装 Ollama 之前也能完整体验多 agent 交互。
 
 ## 文档
 
