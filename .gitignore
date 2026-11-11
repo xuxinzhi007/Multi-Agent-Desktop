@@ -32,3 +32,6 @@ sidecar/bin
 
 # Tauri externalBin（构建产物，由 tools/build-sidecar.sh 生成）
 src-tauri/binaries
+
+# 打包产物
+src-tauri/target/release/bundle

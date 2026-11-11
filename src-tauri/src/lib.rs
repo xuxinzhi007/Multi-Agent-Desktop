@@ -11,17 +11,24 @@ struct SidecarProcess(Mutex<Option<CommandChild>>);
 fn spawn_sidecar(app: &tauri::AppHandle) -> Result<CommandChild, Box<dyn std::error::Error>> {
     let mut args: Vec<String> = vec!["--port".into(), SIDECAR_PORT.into()];
 
-    // 开发时 cwd 是 src-tauri，仓库根是它的父目录
-    if let Ok(cwd) = std::env::current_dir() {
-        let root = if cwd.file_name().and_then(|n| n.to_str()) == Some("src-tauri") {
+    // 开发时 cwd 是 src-tauri，仓库根是它的父目录；
+    // 打包后 cwd 是 /，回落到用户 home。
+    let dev_root = std::env::current_dir().ok().map(|cwd| {
+        if cwd.file_name().and_then(|n| n.to_str()) == Some("src-tauri") {
             cwd.parent().map(|p| p.to_path_buf()).unwrap_or(cwd)
         } else {
             cwd
-        };
-        if root.join("package.json").exists() {
-            args.push("--workdir".into());
-            args.push(root.to_string_lossy().to_string());
         }
+    });
+
+    let workdir: Option<std::path::PathBuf> = match dev_root {
+        Some(p) if p.join("package.json").exists() => Some(p),
+        _ => std::env::var_os("HOME").map(std::path::PathBuf::from),
+    };
+
+    if let Some(dir) = workdir {
+        args.push("--workdir".into());
+        args.push(dir.to_string_lossy().to_string());
     }
 
     let (mut rx, child) = app.shell().sidecar("sidecar")?.args(args).spawn()?;
