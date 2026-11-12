@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Status</title>
+    <style>
+      /* 迷你窗样式：透明背景，圆角悬浮条 */
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      body {
+        font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
+        -webkit-app-region: drag; /* 可拖动 */
+      }
+      /* 状态点动画 */
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      .blink {
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/mini.tsx"></script>
+  </body>
+</html>

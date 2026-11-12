@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/egoist/mygo"
@@ -98,6 +99,37 @@ type ShellResultEvent struct {
 // WorkDirEvent 是工作目录变更。
 type WorkDirEvent struct {
 	Dir string `json:"dir"`
+}
+
+// MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。
+type MiniAgentStatus struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Color  string `json:"color"`
+	Status string `json:"status"`
+}
+
+// MiniStatus 是迷你窗的完整状态。
+type MiniStatus struct {
+	Agents []MiniAgentStatus `json:"agents"`
+}
+
+// MiniStatusEvent 事件，推给悬浮窗。
+var MiniStatusEvent = mygo.NewEvent[MiniStatus]("mini.status")
+
+// buildMiniStatus 从 Manager 构建迷你窗状态。
+func buildMiniStatus(mgr *agent.Manager) MiniStatus {
+	list := mgr.List()
+	out := make([]MiniAgentStatus, 0, len(list))
+	for _, a := range list {
+		out = append(out, MiniAgentStatus{
+			ID:     a.ID,
+			Name:   a.Name,
+			Color:  a.Color,
+			Status: string(a.Status),
+		})
+	}
+	return MiniStatus{Agents: out}
 }
 
 // ListAgents 返回所有会话。
@@ -207,56 +239,89 @@ func (s *Sidecar) IsAlwaysOnTop() bool {
 	return s.win.IsAlwaysOnTop()
 }
 
-func main() {
-	// emitter 把 agent 事件转成 MyGo Event 发给前端
-	var win *mygo.Window
-	emit := func(event string, data any) {
-		if win == nil || win.IsDestroyed() {
-			return
+// ToggleMiniWindow 显示/隐藏迷你悬浮窗。
+func (s *Sidecar) ToggleMiniWindow(show bool) bool {
+	// miniWin 在 main 里创建，这里通过包级变量访问
+	if miniWindowRef != nil {
+		if show {
+			miniWindowRef.Show()
+		} else {
+			miniWindowRef.Hide()
 		}
-		switch event {
-		case "agent.created":
-			if a, ok := data.(agent.Agent); ok {
-				AgentCreated.Emit(win, a)
+	}
+	return show
+}
+
+// miniWindowRef 包级引用，main 里赋值。
+var miniWindowRef *mygo.Window
+
+func main() {
+	cfg := llm.Config{Provider: "mock"}
+	var mgr *agent.Manager
+	var win *mygo.Window
+	var miniWin *mygo.Window
+
+	// emitter 把 agent 事件转成 MyGo Event 发给前端
+	emit := func(event string, data any) {
+		// 主窗口
+		if win != nil && !win.IsDestroyed() {
+			switch event {
+			case "agent.created":
+				if a, ok := data.(agent.Agent); ok {
+					AgentCreated.Emit(win, a)
+				}
+			case "agent.deleted":
+				if id, ok := data.(map[string]any)["id"].(string); ok {
+					AgentDeleted.Emit(win, id)
+				}
+			case "agent.status":
+				if m, ok := data.(map[string]any); ok {
+					AgentStatus.Emit(win, StatusEvent{
+						ID:     m["id"].(string),
+						Status: string(m["status"].(agent.Status)),
+					})
+				}
+			case "agent.delta":
+				if m, ok := data.(map[string]any); ok {
+					AgentDelta.Emit(win, DeltaEvent{
+						ID:    m["id"].(string),
+						Delta: m["delta"].(string),
+					})
+				}
+			case "agent.message":
+				if m, ok := data.(map[string]any); ok {
+					AgentMessage.Emit(win, MessageEvent{
+						ID:      m["id"].(string),
+						Message: m["message"].(llm.Message),
+					})
+				}
+			case "agent.error":
+				if m, ok := data.(map[string]any); ok {
+					AgentError.Emit(win, ErrorEvent{
+						ID:    m["id"].(string),
+						Error: m["error"].(string),
+					})
+				}
 			}
-		case "agent.deleted":
-			if id, ok := data.(map[string]any)["id"].(string); ok {
-				AgentDeleted.Emit(win, id)
-			}
-		case "agent.status":
-			if m, ok := data.(map[string]any); ok {
-				AgentStatus.Emit(win, StatusEvent{
-					ID:     m["id"].(string),
-					Status: string(m["status"].(agent.Status)),
-				})
-			}
-		case "agent.delta":
-			if m, ok := data.(map[string]any); ok {
-				AgentDelta.Emit(win, DeltaEvent{
-					ID:    m["id"].(string),
-					Delta: m["delta"].(string),
-				})
-			}
-		case "agent.message":
-			if m, ok := data.(map[string]any); ok {
-				AgentMessage.Emit(win, MessageEvent{
-					ID:      m["id"].(string),
-					Message: m["message"].(llm.Message),
-				})
-			}
-		case "agent.error":
-			if m, ok := data.(map[string]any); ok {
-				AgentError.Emit(win, ErrorEvent{
-					ID:    m["id"].(string),
-					Error: m["error"].(string),
-				})
+		}
+
+		// 迷你悬浮窗也推（只有状态变化才推，减少流量）
+		if miniWin != nil && !miniWin.IsDestroyed() {
+			switch event {
+			case "agent.created", "agent.deleted", "agent.status":
+				MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
 			}
 		}
 	}
 
-	cfg := llm.Config{Provider: "mock"}
-	mgr := agent.NewManager(cfg, emit)
+	mgr = agent.NewManager(cfg, emit)
 	runner := pty.NewRunner(mustHome())
+
+	// 持久化到用户数据目录
+	dataDir := mustDataDir()
+	if err := os.MkdirAll(dataDir, 0755); err == nil {
+		mgr.SetStore(filepath.Join(dataDir, "agents.json"))
+	}
 
 	sidecar := &Sidecar{mgr: mgr, runner: runner}
 
@@ -274,6 +339,20 @@ func main() {
 			URL:             "/",
 		})
 		sidecar.win = win
+
+		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景
+		miniWin = mygo.NewWindow(mygo.WindowOptions{
+			Title:           "Agent Status",
+			Width:           300,
+			Height:          40,
+			Frameless:       true,
+			AlwaysOnTop:     true,
+			SkipTaskbar:     true,
+			Transparent:     true,
+			BackgroundColor: "#00000000",
+			URL:             "/mini",
+		})
+		miniWindowRef = miniWin
 	})
 
 	if err := mygo.App.Run(); err != nil {
@@ -287,4 +366,25 @@ func mustHome() string {
 		return "."
 	}
 	return home
+}
+
+// mustDataDir 返回用户数据目录（跨平台）。
+func mustDataDir() string {
+	home := mustHome()
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "multi-agent-desktop")
+	case "windows":
+		appdata := os.Getenv("APPDATA")
+		if appdata == "" {
+			appdata = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appdata, "multi-agent-desktop")
+	default: // linux
+		xdg := os.Getenv("XDG_DATA_HOME")
+		if xdg == "" {
+			xdg = filepath.Join(home, ".local", "share")
+		}
+		return filepath.Join(xdg, "multi-agent-desktop")
+	}
 }

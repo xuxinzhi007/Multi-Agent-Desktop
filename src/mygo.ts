@@ -51,6 +51,19 @@ export interface MessageEvent {
   message: Message;
 }
 
+/** MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。 */
+export interface MiniAgentStatus {
+  id: string;
+  name: string;
+  color: string;
+  status: string;
+}
+
+/** MiniStatus 是迷你窗的完整状态。 */
+export interface MiniStatus {
+  agents: MiniAgentStatus[];
+}
+
 export interface PromptRequest {
   agentId: string;
   text: string;
@@ -162,6 +175,10 @@ export const Sidecar = {
   stopAgent(id: string): Promise<boolean> {
     return call("Sidecar.StopAgent", id);
   },
+  /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
+  toggleMiniWindow(show: boolean): Promise<boolean> {
+    return call("Sidecar.ToggleMiniWindow", show);
+  },
 } as const;
 
 // ---- Events ----
@@ -178,4 +195,6 @@ export const events = {
   shellResult: event<ShellResultEvent>("shell.result"),
   llmConfig: event<Config>("llm.config"),
   workdir: event<WorkDirEvent>("workdir"),
+  /** MiniStatusEvent 事件，推给悬浮窗。 */
+  miniStatus: event<MiniStatus>("mini.status"),
 } as const;

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -46,6 +48,7 @@ type Manager struct {
 	order  []string
 	llmCfg llm.Config
 	emit   Emitter
+	store  string // 持久化文件路径，空则不持久化
 }
 
 func NewManager(cfg llm.Config, emit Emitter) *Manager {
@@ -54,6 +57,81 @@ func NewManager(cfg llm.Config, emit Emitter) *Manager {
 		llmCfg: cfg,
 		emit:   emit,
 	}
+}
+
+// SetStore 设置持久化文件路径，并尝试加载。
+func (m *Manager) SetStore(path string) error {
+	m.store = path
+	return m.Load()
+}
+
+// Save 把所有 agent 序列化到磁盘。
+func (m *Manager) Save() error {
+	if m.store == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	data := make([]Agent, 0, len(m.order))
+	for _, id := range m.order {
+		if a, ok := m.agents[id]; ok {
+			a.mu.Lock()
+			data = append(data, Agent{
+				ID:        a.ID,
+				Name:      a.Name,
+				Role:      a.Role,
+				Color:     a.Color,
+				Status:    StatusIdle, // 重启后都是空闲
+				CreatedAt: a.CreatedAt,
+				Messages:  a.Messages,
+			})
+			a.mu.Unlock()
+		}
+	}
+
+	buf, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(m.store, buf, 0644)
+}
+
+// Load 从磁盘恢复 agent。
+func (m *Manager) Load() error {
+	if m.store == "" {
+		return nil
+	}
+	buf, err := os.ReadFile(m.store)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var data []Agent
+	if err := json.Unmarshal(buf, &data); err != nil {
+		return err
+	}
+
+	for _, saved := range data {
+		a := &Agent{
+			ID:        saved.ID,
+			Name:      saved.Name,
+			Role:      saved.Role,
+			Color:     saved.Color,
+			Status:    StatusIdle,
+			CreatedAt: saved.CreatedAt,
+			Messages:  saved.Messages,
+			queue:     make(chan PromptRequest, 32),
+			done:      make(chan struct{}),
+		}
+		m.agents[a.ID] = a
+		m.order = append(m.order, a.ID)
+		go a.workerLoop(m)
+	}
+	return nil
 }
 
 func (m *Manager) SetLLMConfig(cfg llm.Config) {
@@ -105,6 +183,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	go a.workerLoop(m)
 
 	go m.emit("agent.created", a.snapshot())
+	go m.Save() // 异步保存
 	return a
 }
 
@@ -149,6 +228,7 @@ func (m *Manager) Delete(id string) bool {
 	close(a.done)
 	a.stop()
 	go m.emit("agent.deleted", map[string]any{"id": id})
+	go m.Save() // 异步保存
 	return true
 }
 
