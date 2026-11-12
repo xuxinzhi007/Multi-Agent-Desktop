@@ -270,6 +270,7 @@ export const Sidecar = {
   /**
    * SendToChannel 发消息到频道，并触发所有成员 agent。
    * 不因单个接收者排队已满而中断，错误合并返回。
+   * 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
    */
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);

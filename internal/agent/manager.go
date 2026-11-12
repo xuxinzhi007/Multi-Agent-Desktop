@@ -540,6 +540,17 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 		"tokensIn":  tokensIn,
 		"tokensOut": tokensOut,
 	})
+
+	// 检查是否是频道消息，如果是则路由回频道
+	if channelId := extractChannelId(text); channelId != "" {
+		m.emit("agent.channel.reply", map[string]any{
+			"channelId": channelId,
+			"agentId":   a.ID,
+			"agentName": a.Name,
+			"text":      full,
+		})
+	}
+
 	a.setIdleOrQueued(m)
 }
 
@@ -616,6 +627,17 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 	a.mu.Unlock()
 
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()}})
+
+	// 检查是否是频道消息，如果是则路由回频道
+	if channelId := extractChannelId(text); channelId != "" {
+		m.emit("agent.channel.reply", map[string]any{
+			"channelId": channelId,
+			"agentId":   a.ID,
+			"agentName": a.Name,
+			"text":      fullText,
+		})
+	}
+
 	a.setIdleOrQueued(m)
 }
 
@@ -742,4 +764,17 @@ func (a *Agent) viewMap() map[string]any {
 		"workDir":   a.WorkDir,
 		"llmCfg":    a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
 	}
+}
+
+// extractChannelId 从消息文本提取频道 ID（[channel:xxx] 标记）。
+func extractChannelId(text string) string {
+	start := strings.Index(text, "[channel:")
+	if start == -1 {
+		return ""
+	}
+	end := strings.Index(text[start:], "]")
+	if end == -1 {
+		return ""
+	}
+	return text[start+9 : start+end]
 }

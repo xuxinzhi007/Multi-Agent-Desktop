@@ -314,6 +314,7 @@ func (s *Sidecar) ListChannels() []channel.Channel {
 
 // SendToChannel 发消息到频道，并触发所有成员 agent。
 // 不因单个接收者排队已满而中断，错误合并返回。
+// 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
 func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
 	if err != nil {
@@ -325,9 +326,11 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 
 	var errs []string
 	for _, agentId := range recipients {
+		// 给成员的 prompt 加频道标记，回复时识别并路由回频道
+		prompt := fmt.Sprintf("[channel:%s] %s: %s", channelId, fromName, text)
 		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
 			AgentID: agentId,
-			Text:    fmt.Sprintf("[%s] %s: %s", channelId, fromName, text),
+			Text:    prompt,
 		})
 		if err != nil {
 			errs = append(errs, err.Error())
@@ -733,8 +736,31 @@ func toToolStart(data any) (ToolStartEvent, bool) {
 	}, true
 }
 
+// AgentChannelReply 是 agent 回复到频道的事件。
+type AgentChannelReply struct {
+	ChannelID string `json:"channelId"`
+	AgentID   string `json:"agentId"`
+	AgentName string `json:"agentName"`
+	Text      string `json:"text"`
+}
+
+// toAgentChannelReply 解析 agent.channel.reply 事件。
+func toAgentChannelReply(data any) (AgentChannelReply, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.channel.reply: unexpected payload type %T", data)
+		return AgentChannelReply{}, false
+	}
+	return AgentChannelReply{
+		ChannelID: getStr(m, "channelId"),
+		AgentID:   getStr(m, "agentId"),
+		AgentName: getStr(m, "agentName"),
+		Text:      getStr(m, "text"),
+	}, true
+}
+
 // emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
-func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, event string, data any) {
+func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, event string, data any) {
 	if win != nil && !win.IsDestroyed() {
 		switch event {
 		case "agent.created":
@@ -765,6 +791,15 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, event string, d
 			if v, ok := toToolStart(data); ok {
 				ToolStart.Emit(win, v)
 			}
+		case "agent.channel.reply":
+			if v, ok := toAgentChannelReply(data); ok {
+				// 把 agent 回复写入频道历史
+				if chMgr != nil {
+					if msg, err := chMgr.AddMessage(v.ChannelID, v.AgentID, v.AgentName, v.Text); err == nil {
+						ChannelMessage.Emit(win, *msg)
+					}
+				}
+			}
 		}
 	}
 
@@ -784,13 +819,15 @@ func main() {
 	var miniWin *mygo.Window
 
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
+	var chMgr *channel.Manager
 	emit := func(event string, data any) {
-		emitToWindow(win, miniWin, mgr, event, data)
+		emitToWindow(win, miniWin, mgr, chMgr, event, data)
 	}
 
 	mgr = agent.NewManager(cfg, emit)
 	runner := pty.NewRunner(mustHome())
 	channels := channel.NewManager()
+	chMgr = channels
 
 	// 持久化到用户数据目录
 	dataDir := mustDataDir()
