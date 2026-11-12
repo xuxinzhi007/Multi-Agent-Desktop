@@ -4,12 +4,16 @@ import { call, event } from "mygo-runtime";
 
 // ---- Types ----
 
-export interface Agent {
+/**
+ * ListAgents 返回所有会话。
+ * AgentView 是前端可见的会话视图（不含锁，可安全值拷贝）。
+ */
+export interface AgentView {
   id: string;
   name: string;
   role: string;
   color: string;
-  status: Status;
+  status: string;
   createdAt: number;
   messages: Message[];
   queueLen: number;
@@ -114,8 +118,6 @@ export interface ShellResultEvent {
   result: Result;
 }
 
-export type Status = string;
-
 /** StatusEvent 是 agent 状态变化。 */
 export interface StatusEvent {
   id: string;
@@ -140,11 +142,11 @@ export interface WorkDirEvent {
 /** Sidecar 暴露给前端的 API。`mygo generate` 会生成 typed TS client。 */
 export const Sidecar = {
   /** CreateAgent 新建一个 agent。 */
-  createAgent(req: CreateAgentRequest): Promise<Agent> {
+  createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("Sidecar.CreateAgent", req);
   },
   /** CreateCLIAgent 新建一个 CLI backend 的 agent。 */
-  createCLIAgent(name: string, role: string, backend: string): Promise<Agent> {
+  createCLIAgent(name: string, role: string, backend: string): Promise<AgentView> {
     return call("Sidecar.CreateCLIAgent", name, role, backend);
   },
   /** CreateChannel 新建频道。 */
@@ -171,8 +173,7 @@ export const Sidecar = {
   isAlwaysOnTop(): Promise<boolean> {
     return call("Sidecar.IsAlwaysOnTop");
   },
-  /** ListAgents 返回所有会话。 */
-  listAgents(): Promise<Agent[]> {
+  listAgents(): Promise<AgentView[]> {
     return call("Sidecar.ListAgents");
   },
   /** ListChannels 返回所有频道。 */
@@ -225,7 +226,7 @@ export const Sidecar = {
 
 /** Events sent by the Go side. Subscribe with `events.name.on(listener)`. */
 export const events = {
-  agentCreated: event<Agent>("agent.created"),
+  agentCreated: event<AgentView>("agent.created"),
   agentDeleted: event<string>("agent.deleted"),
   agentStatus: event<StatusEvent>("agent.status"),
   agentDelta: event<DeltaEvent>("agent.delta"),

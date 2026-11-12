@@ -35,10 +35,10 @@ type Agent struct {
 	QueueLen  int           `json:"queueLen"` // 排队中的消息数
 	Backend   string        `json:"backend"`  // mock / claude / codex
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	queue  chan PromptRequest // 待处理消息队列
-	done   chan struct{}      // worker 退出信号
+	mu     sync.Mutex       `json:"-"`
+	cancel context.CancelFunc `json:"-"`
+	queue  chan PromptRequest `json:"-"` // 待处理消息队列
+	done   chan struct{}      `json:"-"` // worker 退出信号
 }
 
 // Emitter 把事件推给前端。由 server 层注入，避免 agent 直连 WS。
@@ -121,7 +121,7 @@ func (m *Manager) Load() error {
 		return err
 	}
 
-	var data []Agent
+	var data []*Agent
 	if err := json.Unmarshal(buf, &data); err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	// 启动 worker goroutine 消费队列
 	go a.workerLoop(m)
 
-	go m.emit("agent.created", a.snapshot())
+	go m.emit("agent.created", *a.snapshot())
 	go m.Save() // 异步保存
 	return a
 }
@@ -534,10 +534,10 @@ emptied:
 	a.mu.Unlock()
 }
 
-func (a *Agent) snapshot() Agent {
+func (a *Agent) snapshot() *Agent {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return Agent{
+	return &Agent{
 		ID:        a.ID,
 		Name:      a.Name,
 		Role:      a.Role,
@@ -545,5 +545,7 @@ func (a *Agent) snapshot() Agent {
 		Status:    a.Status,
 		CreatedAt: a.CreatedAt,
 		Messages:  append([]llm.Message(nil), a.Messages...),
+		QueueLen:  a.QueueLen,
+		Backend:   a.Backend,
 	}
 }

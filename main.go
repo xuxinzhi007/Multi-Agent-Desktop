@@ -25,7 +25,7 @@ type Sidecar struct {
 }
 
 // Agent 是前端可见的会话视图。
-type Agent = agent.Agent
+type Agent = AgentView
 
 // LLMConfig 是模型配置。
 type LLMConfig = llm.Config
@@ -156,19 +156,46 @@ func extractTask(a *agent.Agent) string {
 }
 
 // ListAgents 返回所有会话。
-func (s *Sidecar) ListAgents() []Agent {
+// AgentView 是前端可见的会话视图（不含锁，可安全值拷贝）。
+type AgentView struct {
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Role      string        `json:"role"`
+	Color     string        `json:"color"`
+	Status    string        `json:"status"`
+	CreatedAt int64         `json:"createdAt"`
+	Messages  []llm.Message `json:"messages"`
+	QueueLen  int           `json:"queueLen"`
+	Backend   string        `json:"backend"`
+}
+
+func toAgentView(a *agent.Agent) AgentView {
+	return AgentView{
+		ID:        a.ID,
+		Name:      a.Name,
+		Role:      a.Role,
+		Color:     a.Color,
+		Status:    string(a.Status),
+		CreatedAt: a.CreatedAt,
+		Messages:  a.Messages,
+		QueueLen:  a.QueueLen,
+		Backend:   a.Backend,
+	}
+}
+
+func (s *Sidecar) ListAgents() []AgentView {
 	list := s.mgr.List()
-	out := make([]Agent, len(list))
+	out := make([]AgentView, len(list))
 	for i, a := range list {
-		out[i] = *a
+		out[i] = toAgentView(a)
 	}
 	return out
 }
 
 // CreateAgent 新建一个 agent。
-func (s *Sidecar) CreateAgent(req CreateAgentRequest) Agent {
+func (s *Sidecar) CreateAgent(req CreateAgentRequest) AgentView {
 	a := s.mgr.Create("", req.Name, req.Role)
-	return *a
+	return toAgentView(a)
 }
 
 // DeleteAgent 删除一个 agent。
@@ -221,9 +248,9 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 }
 
 // CreateCLIAgent 新建一个 CLI backend 的 agent。
-func (s *Sidecar) CreateCLIAgent(name, role, backend string) Agent {
+func (s *Sidecar) CreateCLIAgent(name, role, backend string) AgentView {
 	a := s.mgr.CreateWithBackend("", name, role, backend)
-	return *a
+	return toAgentView(a)
 }
 
 // PromptAgent 发消息并流式回流。
@@ -350,7 +377,7 @@ func main() {
 		if win != nil && !win.IsDestroyed() {
 			switch event {
 			case "agent.created":
-				if a, ok := data.(agent.Agent); ok {
+				if a, ok := data.(Agent); ok {
 					AgentCreated.Emit(win, a)
 				}
 			case "agent.deleted":
