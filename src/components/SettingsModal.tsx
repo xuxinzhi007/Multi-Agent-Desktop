@@ -42,6 +42,26 @@ export default function SettingsModal(p: Props) {
 
   if (!p.open) return null
 
+  const [models, setModels] = useState<string[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelError, setModelError] = useState('')
+
+  const loadModels = async () => {
+    setLoadingModels(true)
+    setModelError('')
+    try {
+      const list = await Sidecar.listModels(cfg)
+      setModels(list)
+      if (list.length === 0) {
+        setModelError('未获取到模型列表')
+      }
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : '加载失败')
+    } finally {
+      setLoadingModels(false)
+    }
+  }
+
   const pick = (id: string) => {
     setCfg({
       provider: id,
@@ -49,6 +69,7 @@ export default function SettingsModal(p: Props) {
       apiKey: id === cfg.provider ? cfg.apiKey : '',
       model: DEFAULT_MODEL[id] ?? '',
     })
+    setModels([]) // 切换 provider 时清空模型列表
   }
 
   return (
@@ -216,13 +237,57 @@ export default function SettingsModal(p: Props) {
               />
             </Field>
             <Field label="模型名">
-              <input
-                value={cfg.model}
-                onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
-                placeholder={DEFAULT_MODEL[cfg.provider] ?? ''}
-                className="mono"
-                style={{ width: '100%' }}
-              />
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={cfg.model}
+                  onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
+                  placeholder={DEFAULT_MODEL[cfg.provider] ?? ''}
+                  className="mono"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  onClick={loadModels}
+                  disabled={loadingModels}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-default)',
+                    background: 'var(--bg-surface)',
+                    color: 'var(--text-primary)',
+                    fontSize: 'var(--text-xs)',
+                    cursor: loadingModels ? 'wait' : 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {loadingModels ? '加载中…' : '加载列表'}
+                </button>
+              </div>
+              {models.length > 0 && (
+                <select
+                  value={cfg.model}
+                  onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
+                  style={{
+                    width: '100%',
+                    marginTop: 6,
+                    padding: '6px 8px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-default)',
+                    background: 'var(--bg-surface)',
+                    color: 'var(--text-primary)',
+                    fontSize: 'var(--text-xs)',
+                  }}
+                >
+                  <option value="">选择模型…</option>
+                  {models.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              )}
+              {modelError && (
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--error)', marginTop: 4 }}>
+                  {modelError}
+                </div>
+              )}
             </Field>
             <Field label="API Key">
               <input

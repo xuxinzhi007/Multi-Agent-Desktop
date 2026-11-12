@@ -180,6 +180,10 @@ export const Sidecar = {
   listChannels(): Promise<Channel[]> {
     return call("Sidecar.ListChannels");
   },
+  /** ListModels 返回指定配置下可用的模型列表。 */
+  listModels(cfg: Config): Promise<string[]> {
+    return call("Sidecar.ListModels", cfg);
+  },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("Sidecar.PickDirectory");

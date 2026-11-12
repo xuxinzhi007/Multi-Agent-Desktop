@@ -283,6 +283,11 @@ func (s *Sidecar) SetLLMConfig(cfg LLMConfig) LLMConfig {
 	return cfg
 }
 
+// ListModels 返回指定配置下可用的模型列表。
+func (s *Sidecar) ListModels(cfg LLMConfig) ([]string, error) {
+	return llm.ListModels(context.Background(), cfg)
+}
+
 // GetWorkDir 返回工作目录。
 func (s *Sidecar) GetWorkDir() string {
 	return s.runner.Dir()
@@ -454,8 +459,8 @@ func main() {
 		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景、可拖动
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
 			Title:           "Agent 舰队",
-			Width:           360,
-			Height:          48,
+			Width:           380,
+			Height:          52,
 			Frameless:       true,
 			AlwaysOnTop:     true,
 			SkipTaskbar:     true,
