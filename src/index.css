@@ -450,3 +450,56 @@ textarea::placeholder {
   background: var(--bg-surface);
   font-weight: 600;
 }
+
+/* ===== 滚动条更细 + 自动隐藏 ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-focus);
+  opacity: 1;
+}
+
+/* 自动隐藏：非 hover 时透明 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: var(--border-default) transparent;
+}
+
+/* ===== :focus-visible 全局 focus ring ===== */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ===== agent 头像渐变 ===== */
+.agent-avatar {
+  background: linear-gradient(135deg, var(--avatar-color, #5b9dff) 0%, 
+    color-mix(in srgb, var(--avatar-color, #5b9dff) 70%, black) 100%);
+}
+
+.agent-avatar-glow {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--avatar-color, #5b9dff) 40%, transparent);
+}

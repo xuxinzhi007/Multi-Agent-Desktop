@@ -77,11 +77,12 @@ export default function SettingsModal(p: Props) {
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.62)',
+        background: 'rgba(0,0,0,0.5)',
         display: 'grid',
         placeItems: 'center',
         zIndex: 100,
-        backdropFilter: 'blur(2px)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
       }}
     >
       <div
@@ -91,11 +92,13 @@ export default function SettingsModal(p: Props) {
           width: 470,
           maxHeight: '86vh',
           overflowY: 'auto',
-          background: 'var(--bg-elevated)',
+          background: 'color-mix(in srgb, var(--bg-elevated) 85%, transparent)',
           border: '1px solid var(--border-default)',
           borderRadius: 'var(--radius-xl)',
           padding: 'var(--space-5)',
           boxShadow: 'var(--shadow-lg)',
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
         }}
       >
         <div

@@ -39,6 +39,7 @@ function MiniApp() {
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
+        padding: '4px',
         // @ts-ignore CSS 变量
         '--app-region': 'drag',
       } as React.CSSProperties}

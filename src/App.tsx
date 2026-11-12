@@ -5,6 +5,7 @@ import Inspector, { type InspectorTab } from './components/Inspector'
 import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import ActivityFeed from './components/ActivityFeed'
+import ToastContainer from './components/Toast'
 import { useSidecar } from './lib/useSidecar'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useSidecar'
@@ -96,6 +97,7 @@ export default function App() {
       />
 
       <ActivityFeed activities={s.activities} />
+      <ToastContainer />
     </div>
   )
 }

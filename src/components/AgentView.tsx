@@ -82,10 +82,30 @@ export default function AgentView(p: Props) {
     return (
       <div className="c-col" style={{ flex: 1 }}>
         <div className="c-empty" style={{ flex: 1 }}>
-          <div style={{ fontSize: 32, opacity: 0.18, marginBottom: 'var(--space-4)' }}>◇</div>
-          左侧新建 agent，或点击已有会话
-          <div style={{ fontSize: 'var(--text-xs)', marginTop: 'var(--space-3)' }}>
-            多个 agent 可同时运行，各自隔离
+          <div
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 'var(--radius-lg)',
+              background: 'linear-gradient(135deg, var(--accent-dim) 0%, transparent 100%)',
+              display: 'grid',
+              placeItems: 'center',
+              marginBottom: 'var(--space-4)',
+              fontSize: 28,
+            }}
+          >
+            🤖
+          </div>
+          <div style={{ fontSize: 'var(--text-md)', fontWeight: 600, marginBottom: 8 }}>
+            开始你的多 Agent 协作
+          </div>
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 16 }}>
+            创建多个 Agent，让它们并行工作、互相协作
+          </div>
+          <div style={{ display: 'flex', gap: 16, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+            <span>💬 流式对话</span>
+            <span>🔧 工具调用</span>
+            <span>✉️ Agent 协作</span>
           </div>
         </div>
       </div>

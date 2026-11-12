@@ -137,6 +137,7 @@ export default function Sidebar(p: Props) {
                 />
               )}
               <span
+                className="agent-avatar"
                 style={{
                   width: 19,
                   height: 19,
@@ -149,6 +150,8 @@ export default function Sidebar(p: Props) {
                   fontWeight: 700,
                   flexShrink: 0,
                   opacity: a.status === 'idle' ? 0.55 : 1,
+                  // @ts-ignore CSS 变量
+                  '--avatar-color': a.color,
                 }}
               >
                 {a.name.slice(0, 1).toUpperCase()}
