@@ -5,7 +5,7 @@ import Inspector, { type InspectorTab } from './components/Inspector'
 import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import { useSidecar } from './lib/useSidecar'
-import type { LLMConfig } from './lib/ws'
+import type { LLMConfig } from './lib/useSidecar'
 
 export default function App() {
   const s = useSidecar()

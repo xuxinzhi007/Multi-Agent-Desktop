@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { PROVIDERS } from '../lib/presets'
-import type { LLMConfig } from '../lib/ws'
+import type { LLMConfig } from '../lib/useSidecar'
 
 type Props = {
   open: boolean

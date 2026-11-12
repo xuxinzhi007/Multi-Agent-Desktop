@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"multi-agent-desktop/sidecar/internal/llm"
+	"multi-agent-desktop/internal/llm"
 )
 
 type Status string

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
-import type { Agent } from '../lib/ws'
+import type { Agent } from '../lib/mygo'
 
 type Props = {
   agents: Agent[]

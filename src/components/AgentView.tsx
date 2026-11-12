@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Agent, Message } from '../lib/ws'
+import type { Agent, Message } from '../lib/mygo'
 
 type Props = {
   agent: Agent | null
