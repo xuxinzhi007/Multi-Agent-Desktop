@@ -384,7 +384,7 @@ export default function AgentView(p: Props) {
               }}
               title={p.workDir}
             >
-              {p.workDir || '—'}
+              {p.workDir ? p.workDir.split('/').filter(Boolean).pop() : '—'}
             </span>
 
             <button
@@ -565,6 +565,11 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
           }}
         >
           {isUser ? '你' : isRouted ? `✉ ${routeInfo}` : 'Agent'}
+          {m.timestamp && (
+            <span style={{ fontWeight: 400, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginLeft: 'auto' }}>
+              {new Date(m.timestamp * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
           {live && (
             <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
               ●

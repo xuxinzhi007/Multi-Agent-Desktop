@@ -60,6 +60,7 @@ export interface ErrorEvent {
 export interface Message {
   role: string;
   content: string;
+  timestamp?: number;
 }
 
 /** MessageEvent 是一条完整消息。 */

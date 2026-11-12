@@ -328,7 +328,7 @@ func (a *Agent) workerLoop(m *Manager) {
 // execute 执行一条消息（阻塞，完成后取下一个）。
 func (a *Agent) execute(m *Manager, req PromptRequest) {
 	a.mu.Lock()
-	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text})
+	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -391,10 +391,10 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 	}
 
 	a.mu.Lock()
-	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full})
+	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()})
 	a.mu.Unlock()
 
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full}})
+	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()}})
 	a.setIdleOrQueued(m)
 }
 
@@ -470,10 +470,10 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 	}
 
 	a.mu.Lock()
-	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: fullText})
+	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()})
 	a.mu.Unlock()
 
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText}})
+	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()}})
 	a.setIdleOrQueued(m)
 }
 

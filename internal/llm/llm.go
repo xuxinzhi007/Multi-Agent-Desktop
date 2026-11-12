@@ -7,8 +7,9 @@ import (
 
 // Message 是对话历史里的一条。
 type Message struct {
-	Role    string `json:"role"` // system | user | assistant
-	Content string `json:"content"`
+	Role      string `json:"role"` // system | user | assistant
+	Content   string `json:"content"`
+	Timestamp int64  `json:"timestamp,omitempty"` // Unix 秒
 }
 
 // Chunk 是流式返回的一个片段。
