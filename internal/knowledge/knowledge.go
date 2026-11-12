@@ -334,9 +334,9 @@ func ViewFromNotes(notes []Note, agentID, role string, knowledgeIDs []string, re
 		}
 	}
 
-	// 2. 字符预算裁剪
+	// 2. 字符预算裁剪（按优先级：scope 命中 > tags 命中 > 最近写入）
 	if budget > 0 {
-		matched = trimByBudget(matched, budget)
+		matched = trimByBudget(matched, recentText, budget)
 	}
 
 	// 3. 渲染
@@ -350,17 +350,61 @@ func ViewFromNotes(notes []Note, agentID, role string, knowledgeIDs []string, re
 }
 
 // trimByBudget 按字符预算裁剪笔记列表。
-func trimByBudget(notes []Note, budget int) []Note {
+// 优先级：scope 命中 > tags 命中最近文本 > 最近写入。
+func trimByBudget(notes []Note, recentText string, budget int) []Note {
+	if budget <= 0 || len(notes) == 0 {
+		return notes
+	}
+
+	// 按优先级分组
+	var highPriority, midPriority, lowPriority []Note
+	recentLower := strings.ToLower(recentText)
+
+	for _, n := range notes {
+		// 高优先级：scope 命中（agent 私有或显式附加）
+		if n.Scope != ScopeGlobal && n.Scope != "global" {
+			highPriority = append(highPriority, n)
+			continue
+		}
+
+		// 中优先级：tags 命中最近文本
+		if recentText != "" {
+			tagMatch := false
+			for _, tag := range n.Tags {
+				if strings.Contains(recentLower, strings.ToLower(tag)) {
+					tagMatch = true
+					break
+				}
+			}
+			if tagMatch {
+				midPriority = append(midPriority, n)
+				continue
+			}
+		}
+
+		// 低优先级：最近写入
+		lowPriority = append(lowPriority, n)
+	}
+
+	// 按优先级贪心填充预算
 	var out []Note
 	used := 0
-	for _, n := range notes {
-		size := len(n.Title) + len(n.Body) + 10 // 估算
-		if used+size > budget && len(out) > 0 {
-			break
+
+	fill := func(list []Note) {
+		for _, n := range list {
+			size := len(n.Title) + len(n.Body) + 10
+			if used+size > budget && len(out) > 0 {
+				return
+			}
+			out = append(out, n)
+			used += size
 		}
-		out = append(out, n)
-		used += size
 	}
+
+	fill(highPriority)
+	fill(midPriority)
+	fill(lowPriority)
+
 	return out
 }
 
