@@ -15,7 +15,14 @@
       }
       body {
         font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
-        -webkit-app-region: drag; /* 可拖动 */
+      }
+      /* 默认可拖动区域 */
+      #root {
+        --app-region: drag;
+      }
+      /* 可交互元素不拖动 */
+      button, [role="button"] {
+        --app-region: no-drag;
       }
       /* 状态点动画 */
       @keyframes pulse {

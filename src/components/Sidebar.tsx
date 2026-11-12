@@ -205,7 +205,9 @@ export default function Sidebar(p: Props) {
                 className="c-icon-btn c-icon-btn--danger"
                 onClick={(e) => {
                   e.stopPropagation()
-                  p.onDelete(a.id)
+                  if (confirm(`删除 agent「${a.name}」？\n\n历史消息将一并清除，不可恢复。`)) {
+                    p.onDelete(a.id)
+                  }
                 }}
                 title="删除"
                 style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}

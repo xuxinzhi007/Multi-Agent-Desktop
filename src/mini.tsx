@@ -31,8 +31,9 @@ function MiniApp() {
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
+        // @ts-ignore CSS 变量
+        '--app-region': 'drag',
         // 整个窗口可拖动
-        WebkitAppRegion: 'drag',
       } as React.CSSProperties}
     >
       {/* 悬浮条主体 */}
@@ -84,7 +85,6 @@ function MiniApp() {
                     ? 'pulse 1.2s infinite'
                     : 'none',
                 cursor: 'pointer',
-                WebkitAppRegion: 'no-drag', // 状态点可点击
               }}
               onClick={() => {
                 // 点击状态点，后续：聚焦主窗口该 agent
@@ -121,7 +121,6 @@ function MiniApp() {
             cursor: 'pointer',
             display: 'grid',
             placeItems: 'center',
-            WebkitAppRegion: 'no-drag',
             transition: 'transform 0.2s',
             transform: expanded ? 'rotate(180deg)' : 'none',
           }}
@@ -144,7 +143,6 @@ function MiniApp() {
             cursor: 'pointer',
             display: 'grid',
             placeItems: 'center',
-            WebkitAppRegion: 'no-drag',
           }}
           title="展开主窗口"
         >
@@ -163,7 +161,6 @@ function MiniApp() {
             padding: '12px 16px',
             maxHeight: 200,
             overflowY: 'auto',
-            WebkitAppRegion: 'no-drag', // 详情区可交互
           }}
         >
           {status.agents.map((a) => (

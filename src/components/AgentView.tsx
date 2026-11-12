@@ -55,23 +55,75 @@ export default function AgentView(p: Props) {
     )
   }
 
+  const [showMentions, setShowMentions] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [selectedMentions, setSelectedMentions] = useState<string[]>([])
+
+  // 解析 @提及（支持多选）
+  const parseMentions = (text: string): { targets: string[]; message: string } => {
+    const mentionRegex = /@(\S+)/g
+    const targets: string[] = []
+    let match
+    while ((match = mentionRegex.exec(text)) !== null) {
+      targets.push(match[1])
+    }
+    const message = text.replace(mentionRegex, '').trim()
+    return { targets, message }
+  }
+
   const submit = () => {
     const text = input.trim()
     if (!text) return
     if (mode === 'shell') {
       p.onShell(text)
     } else {
-      // 检查 @提及：@agentName 消息
-      const mentionMatch = text.match(/^@(\S+)\s+(.+)$/)
-      if (mentionMatch && p.onRoute) {
-        const [, targetName, msg] = mentionMatch
-        p.onRoute(targetName, msg)
+      const { targets, message } = parseMentions(text)
+      if (targets.length > 0 && p.onRoute && p.agents) {
+        // 多选 @：发给多个 agent
+        targets.forEach((targetName) => {
+          const target = p.agents!.find((a) => a.name === targetName || a.id === targetName)
+          if (target) {
+            p.onRoute!(target.id, message || text)
+          }
+        })
       } else {
         p.onPrompt(text)
       }
     }
     setInput('')
+    setSelectedMentions([])
   }
+
+  // 输入时检测 @ 弹出补全
+  const handleInputChange = (value: string) => {
+    setInput(value)
+    const atIndex = value.lastIndexOf('@')
+    if (atIndex !== -1) {
+      const query = value.slice(atIndex + 1)
+      if (!query.includes(' ')) {
+        setMentionQuery(query)
+        setShowMentions(true)
+      } else {
+        setShowMentions(false)
+      }
+    } else {
+      setShowMentions(false)
+    }
+  }
+
+  const insertMention = (agentName: string) => {
+    const atIndex = input.lastIndexOf('@')
+    const newInput = input.slice(0, atIndex) + '@' + agentName + ' '
+    setInput(newInput)
+    setShowMentions(false)
+    taRef.current?.focus()
+  }
+
+  const filteredAgents = p.agents?.filter(
+    (a) =>
+      a.name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
+      a.id.toLowerCase().includes(mentionQuery.toLowerCase()),
+  ) || []
 
   const running = p.agent.status === 'running'
   const visible = p.agent.messages.filter((m) => m.role !== 'system')
@@ -202,10 +254,11 @@ export default function AgentView(p: Props) {
       >
         <div
           style={{
+            position: 'relative',
             background: 'var(--bg-surface)',
             border: '1px solid var(--border-default)',
             borderRadius: 'var(--radius-lg)',
-            overflow: 'hidden',
+            overflow: 'visible',
             transition: 'border-color var(--dur-fast) var(--ease)',
           }}
           onFocusCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-focus)')}
@@ -214,7 +267,7 @@ export default function AgentView(p: Props) {
           <textarea
             ref={taRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => handleInputChange(e.target.value)
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -238,6 +291,69 @@ export default function AgentView(p: Props) {
               fontSize: 'var(--text-md)',
             }}
           />
+
+          {/* @提及自动补全 */}
+          {showMentions && filteredAgents.length > 0 && mode === 'chat' && (
+            <div
+              className="fade-up"
+              style={{
+                position: 'absolute',
+                bottom: '100%',
+                left: 13,
+                right: 13,
+                marginBottom: 4,
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: 'var(--shadow-lg)',
+                maxHeight: 200,
+                overflowY: 'auto',
+                zIndex: 50,
+              }}
+            >
+              {filteredAgents.map((a) => (
+                <button
+                  key={a.id}
+                  onClick={() => insertMention(a.name)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    width: '100%',
+                    padding: '8px 12px',
+                    textAlign: 'left',
+                    borderBottom: '1px solid var(--border-subtle)',
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-primary)',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <span
+                    style={{
+                      width: 16,
+                      height: 16,
+                      borderRadius: 'var(--radius-sm)',
+                      background: a.color,
+                      display: 'grid',
+                      placeItems: 'center',
+                      fontSize: 9,
+                      fontWeight: 700,
+                      color: 'var(--bg-base)',
+                    }}
+                  >
+                    {a.name.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span>{a.name}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                    {a.role.slice(0, 20)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <div
             style={{
@@ -396,10 +512,23 @@ function EmptyChat({ color, name }: { color: string; name: string }) {
 
 function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean }) {
   const isUser = m.role === 'user'
+
+  // 检测路由消息：[from xxx] 或 [to xxx]
+  const fromMatch = m.content.match(/^\[from\s+(\S+)\]\s*/)
+  const toMatch = m.content.match(/^\[to\s+(\S+)\]\s*/)
+  const isRouted = !!(fromMatch || toMatch)
+  const routeInfo = fromMatch ? `来自 ${fromMatch[1]}` : toMatch ? `发给 ${toMatch[1]}` : ''
+  const displayContent = m.content.replace(/^\[(from|to)\s+\S+\]\s*/, '')
+
   return (
     <div
       className="fade-up"
-      style={{ marginBottom: 'var(--space-4)', display: 'flex', gap: 'var(--space-3)' }}
+      style={{
+        marginBottom: 'var(--space-4)',
+        display: 'flex',
+        gap: 'var(--space-3)',
+        opacity: isRouted ? 0.85 : 1,
+      }}
     >
       {!isUser && (
         <span
@@ -407,8 +536,8 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
             width: 22,
             height: 22,
             borderRadius: 'var(--radius-sm)',
-            background: color,
-            color: 'var(--bg-base)',
+            background: isRouted ? 'var(--accent-dim)' : color,
+            color: isRouted ? 'var(--accent-bright)' : 'var(--bg-base)',
             display: 'grid',
             placeItems: 'center',
             fontSize: 11,
@@ -418,7 +547,7 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
             opacity: 0.9,
           }}
         >
-          ◆
+          {isRouted ? '✉' : '◆'}
         </span>
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -429,13 +558,13 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
             gap: 6,
             marginBottom: 3,
             fontSize: 'var(--text-xs)',
-            color: isUser ? 'var(--text-disabled)' : 'var(--text-tertiary)',
+            color: isUser ? 'var(--text-disabled)' : isRouted ? 'var(--accent-bright)' : 'var(--text-tertiary)',
             fontWeight: 600,
             letterSpacing: '0.02em',
             lineHeight: 1.3,
           }}
         >
-          {isUser ? '你' : 'Agent'}
+          {isUser ? '你' : isRouted ? `✉ ${routeInfo}` : 'Agent'}
           {live && (
             <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
               ●
@@ -448,10 +577,11 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
             lineHeight: 1.7,
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
-            color: isUser ? 'var(--text-primary)' : 'var(--text-secondary)',
+            color: isUser ? 'var(--text-primary)' : isRouted ? 'var(--text-secondary)' : 'var(--text-secondary)',
+            fontStyle: isRouted ? 'italic' : 'normal',
           }}
         >
-          {m.content}
+          {displayContent}
         </div>
       </div>
     </div>
