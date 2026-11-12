@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "mygo dev",
     "build": "mygo build",
+    "build:app": "mygo build -skip-installer",
     "generate": "mygo generate",
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",

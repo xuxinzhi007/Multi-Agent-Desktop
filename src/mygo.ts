@@ -12,6 +12,7 @@ export interface Agent {
   status: Status;
   createdAt: number;
   messages: Message[];
+  queueLen: number;
 }
 
 export interface Config {
@@ -137,6 +138,10 @@ export const Sidecar = {
   promptAgent(req: PromptRequest): Promise<void> {
     return call("Sidecar.PromptAgent", req);
   },
+  /** RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。 */
+  routeAgent(fromId: string, toId: string, text: string): Promise<void> {
+    return call("Sidecar.RouteAgent", fromId, toId, text);
+  },
   /** RunShell 执行 shell 命令。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
@@ -153,7 +158,7 @@ export const Sidecar = {
   setWorkDir(dir: string): Promise<string> {
     return call("Sidecar.SetWorkDir", dir);
   },
-  /** StopAgent 停止一个 agent 的推理。 */
+  /** StopAgent 停止一个 agent 的推理并清空队列。 */
   stopAgent(id: string): Promise<boolean> {
     return call("Sidecar.StopAgent", id);
   },

@@ -116,6 +116,12 @@ export function useSidecar() {
         return Sidecar.stopAgent((data as { id: string }).id)
       case 'agent.prompt':
         return Sidecar.promptAgent(data as { agentId: string; text: string })
+      case 'agent.route':
+        return Sidecar.routeAgent(
+          (data as { fromId: string }).fromId,
+          (data as { toId: string }).toId,
+          (data as { text: string }).text,
+        )
       case 'shell.run':
         return Sidecar.runShell(data as { agentId: string; command: string })
       case 'llm.config':

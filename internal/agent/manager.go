@@ -14,6 +14,7 @@ type Status string
 const (
 	StatusIdle    Status = "idle"
 	StatusRunning Status = "running"
+	StatusQueued  Status = "queued"
 	StatusDone    Status = "done"
 	StatusError   Status = "error"
 )
@@ -27,9 +28,12 @@ type Agent struct {
 	Status    Status        `json:"status"`
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
+	QueueLen  int           `json:"queueLen"` // 排队中的消息数
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
+	queue  chan PromptRequest // 待处理消息队列
+	done   chan struct{}      // worker 退出信号
 }
 
 // Emitter 把事件推给前端。由 server 层注入，避免 agent 直连 WS。
@@ -90,10 +94,15 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Messages: []llm.Message{
 			{Role: "system", Content: "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"},
 		},
+		queue: make(chan PromptRequest, 32),
+		done:  make(chan struct{}),
 	}
 
 	m.agents[id] = a
 	m.order = append(m.order, id)
+
+	// 启动 worker goroutine 消费队列
+	go a.workerLoop(m)
 
 	go m.emit("agent.created", a.snapshot())
 	return a
@@ -135,6 +144,9 @@ func (m *Manager) Delete(id string) bool {
 	if !ok {
 		return false
 	}
+
+	// 停止 worker
+	close(a.done)
 	a.stop()
 	go m.emit("agent.deleted", map[string]any{"id": id})
 	return true
@@ -145,19 +157,83 @@ type PromptRequest struct {
 	Text    string `json:"text"`
 }
 
-// Prompt 给某个 agent 发一条消息并流式回流。多个 agent 可同时并发执行。
+// Prompt 给某个 agent 发一条消息。如果 agent 空闲立即执行，否则排队。
 func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 	a, ok := m.Get(req.AgentID)
 	if !ok {
 		return fmt.Errorf("agent %s not found", req.AgentID)
 	}
 
+	// 入队
+	select {
+	case a.queue <- req:
+		a.mu.Lock()
+		a.QueueLen = len(a.queue)
+		if a.Status == StatusIdle {
+			a.Status = StatusQueued
+			m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusQueued})
+		}
+		a.mu.Unlock()
+		return nil
+	default:
+		return fmt.Errorf("agent %s queue full", req.AgentID)
+	}
+}
+
+// Stop 取消一个 agent 的当前执行并清空队列。
+func (m *Manager) Stop(id string) bool {
+	a, ok := m.Get(id)
+	if !ok {
+		return false
+	}
+	a.StopAll()
+	m.emit("agent.status", map[string]any{"id": id, "status": StatusIdle})
+	return true
+}
+
+// Route 从一个 agent 发消息给另一个 agent（agent 主动协作）。
+func (m *Manager) Route(fromId, toId, text string) error {
+	from, ok := m.Get(fromId)
+	if !ok {
+		return fmt.Errorf("agent %s not found", fromId)
+	}
+
+	// 记录 from 的消息（作为上下文）
+	from.mu.Lock()
+	from.Messages = append(from.Messages, llm.Message{
+		Role:    "user",
+		Content: fmt.Sprintf("[to %s] %s", toId, text),
+	})
+	from.mu.Unlock()
+
+	// 触发 to 的执行
+	return m.Prompt(context.Background(), PromptRequest{
+		AgentID: toId,
+		Text:    fmt.Sprintf("[from %s] %s", fromId, text),
+	})
+}
+
+// workerLoop 每个 agent 一个，循环消费队列。
+func (a *Agent) workerLoop(m *Manager) {
+	for {
+		select {
+		case <-a.done:
+			return
+		case req := <-a.queue:
+			a.execute(m, req)
+		}
+	}
+}
+
+// execute 执行一条消息（阻塞，完成后取下一个）。
+func (a *Agent) execute(m *Manager, req PromptRequest) {
 	client := llm.New(m.LLMConfig())
 
 	a.mu.Lock()
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text})
 	a.Status = StatusRunning
-	runCtx, cancel := context.WithCancel(ctx)
+	a.QueueLen = len(a.queue)
+	runCtx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	history := append([]llm.Message(nil), a.Messages...)
 	a.mu.Unlock()
@@ -165,48 +241,56 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusRunning})
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
 
-	// mock provider 下推一组检查器事件，让改动/任务/工具面板有真实结构
+	// mock provider 下推一组检查器事件
 	if m.LLMConfig().Provider == "" || m.LLMConfig().Provider == "mock" {
 		m.demoTrail(a.ID, a.Name)
 	}
 
-	go func() {
-		defer cancel()
+	defer cancel()
 
-		stream, err := client.Stream(runCtx, history)
-		if err != nil {
-			m.finish(a, StatusError, "调用模型失败："+err.Error())
+	stream, err := client.Stream(runCtx, history)
+	if err != nil {
+		m.finish(a, StatusError, "调用模型失败："+err.Error())
+		return
+	}
+
+	var full string
+	for chunk := range stream {
+		if chunk.Err != "" {
+			m.finish(a, StatusError, chunk.Err)
 			return
 		}
-
-		var full string
-		for chunk := range stream {
-			if chunk.Err != "" {
-				m.finish(a, StatusError, chunk.Err)
-				return
-			}
-			if chunk.Delta != "" {
-				full += chunk.Delta
-				m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta})
-			}
+		if chunk.Delta != "" {
+			full += chunk.Delta
+			m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta})
 		}
+	}
 
-		if runCtx.Err() != nil {
-			m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusIdle})
-			return
-		}
-
+	if runCtx.Err() != nil {
+		// 用户停止
 		a.mu.Lock()
-		a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full})
-		a.Status = StatusDone
-		a.cancel = nil
+		a.Status = StatusIdle
+		a.QueueLen = len(a.queue)
+		if len(a.queue) > 0 {
+			a.Status = StatusQueued
+		}
 		a.mu.Unlock()
+		m.emit("agent.status", map[string]any{"id": a.ID, "status": a.Status})
+		return
+	}
 
-		m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusDone})
-		m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full}})
-	}()
+	a.mu.Lock()
+	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full})
+	a.Status = StatusIdle
+	a.QueueLen = len(a.queue)
+	if len(a.queue) > 0 {
+		a.Status = StatusQueued
+	}
+	a.cancel = nil
+	a.mu.Unlock()
 
-	return nil
+	m.emit("agent.status", map[string]any{"id": a.ID, "status": a.Status})
+	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full}})
 }
 
 func (m *Manager) finish(a *Agent, st Status, msg string) {
@@ -221,15 +305,7 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 	}
 }
 
-// Stop 取消一个 agent 正在跑的推理。
-func (m *Manager) Stop(id string) bool {
-	a, ok := m.Get(id)
-	if !ok {
-		return false
-	}
-	return a.stop()
-}
-
+// stop 取消当前执行（不清队列，worker 会继续取下一个）。
 func (a *Agent) stop() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -238,8 +314,27 @@ func (a *Agent) stop() bool {
 	}
 	a.cancel()
 	a.cancel = nil
-	a.Status = StatusIdle
 	return true
+}
+
+// StopAll 取消当前执行并清空队列。
+func (a *Agent) StopAll() {
+	a.stop()
+	// 清空队列
+	for {
+		select {
+		case <-a.queue:
+		default:
+			goto emptied
+		}
+	}
+emptied:
+	a.mu.Lock()
+	a.QueueLen = 0
+	if a.Status != StatusIdle {
+		a.Status = StatusIdle
+	}
+	a.mu.Unlock()
 }
 
 func (a *Agent) snapshot() Agent {

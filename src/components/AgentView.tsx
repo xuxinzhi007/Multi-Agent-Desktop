@@ -11,6 +11,8 @@ type Props = {
   onShell: (command: string) => void
   onToggleInspector: () => void
   inspectorOpen: boolean
+  onRoute?: (targetName: string, text: string) => void
+  agents?: Agent[]
 }
 
 export default function AgentView(p: Props) {
@@ -56,8 +58,18 @@ export default function AgentView(p: Props) {
   const submit = () => {
     const text = input.trim()
     if (!text) return
-    if (mode === 'shell') p.onShell(text)
-    else p.onPrompt(text)
+    if (mode === 'shell') {
+      p.onShell(text)
+    } else {
+      // 检查 @提及：@agentName 消息
+      const mentionMatch = text.match(/^@(\S+)\s+(.+)$/)
+      if (mentionMatch && p.onRoute) {
+        const [, targetName, msg] = mentionMatch
+        p.onRoute(targetName, msg)
+      } else {
+        p.onPrompt(text)
+      }
+    }
     setInput('')
   }
 
@@ -118,7 +130,7 @@ export default function AgentView(p: Props) {
               停止
             </button>
           )}
-          <StatusBadge status={p.agent.status} />
+          <StatusBadge status={p.agent.status} queueLen={p.agent.queueLen} />
           <button
             className={`c-icon-btn ${p.inspectorOpen ? 'c-icon-btn--active' : ''}`}
             onClick={p.onToggleInspector}
@@ -312,10 +324,11 @@ function ModeBtn({
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, queueLen }: { status: string; queueLen?: number }) {
   const map: Record<string, { cls: string; t: string }> = {
     idle: { cls: '', t: '空闲' },
     running: { cls: 'c-badge--warning', t: '运行中' },
+    queued: { cls: 'c-badge--accent', t: queueLen ? `排队 ${queueLen}` : '排队' },
     done: { cls: 'c-badge--success', t: '完成' },
     error: { cls: 'c-badge--danger', t: '出错' },
   }

@@ -119,6 +119,10 @@
   background: var(--warning);
   box-shadow: 0 0 0 3px var(--warning-dim);
 }
+.c-dot--queued {
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
 .c-dot--done {
   background: var(--success);
 }

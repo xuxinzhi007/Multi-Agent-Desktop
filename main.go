@@ -121,9 +121,14 @@ func (s *Sidecar) DeleteAgent(id string) bool {
 	return s.mgr.Delete(id)
 }
 
-// StopAgent 停止一个 agent 的推理。
+// StopAgent 停止一个 agent 的推理并清空队列。
 func (s *Sidecar) StopAgent(id string) bool {
 	return s.mgr.Stop(id)
+}
+
+// RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。
+func (s *Sidecar) RouteAgent(fromId, toId, text string) error {
+	return s.mgr.Route(fromId, toId, text)
 }
 
 // PromptAgent 发消息并流式回流。

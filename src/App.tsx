@@ -47,11 +47,19 @@ export default function App() {
         streaming={streaming}
         error={err}
         workDir={s.workDir}
+        agents={s.agents}
         onPrompt={(text) => active && s.send('agent.prompt', { agentId: active.id, text })}
         onStop={() => active && s.send('agent.stop', { id: active.id })}
         onShell={(command) => {
           setShellOpen(true)
           s.send('shell.run', { agentId: active?.id ?? '', command })
+        }}
+        onRoute={(targetName, text) => {
+          if (!active) return
+          const target = s.agents.find((a) => a.name === targetName || a.id === targetName)
+          if (target) {
+            s.send('agent.route', { fromId: active.id, toId: target.id, text })
+          }
         }}
         inspectorOpen={inspectorOpen}
         onToggleInspector={() => setInspectorOpen((v) => !v)}

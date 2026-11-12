@@ -184,7 +184,7 @@ export default function Sidebar(p: Props) {
                     {a.name}
                   </span>
                   <span
-                    className={`c-dot c-dot--${a.status} ${a.status === 'running' ? 'blink' : ''}`}
+                    className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' ? 'blink' : ''}`}
                     style={{ width: 5, height: 5 }}
                   />
                 </div>
