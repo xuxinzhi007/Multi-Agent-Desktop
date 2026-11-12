@@ -223,96 +223,147 @@ cd sidecar && go run .
 
 ## 架构
 
+### 进程模型
+
+**单 Go 进程**（MyGo），无跨进程通信：
+
 ```
 ┌────────────────────────────────────────────────┐
-│ Tauri 2 壳 (Rust)                              │
-│  启动时 spawn sidecar，退出时 kill，转发日志     │
-│  src-tauri/src/lib.rs                          │
+│ MyGo 主进程（Go）                              │
+│  ├── main.go           壳入口，mygo.Bind()     │
+│  ├── internal/agent/   N 个会话，goroutine 并行 │
+│  ├── internal/llm/     mock / ollama / openai  │
+│  ├── internal/pty/     跨平台 shell 执行        │
+│  └── internal/events/  事件总线（W3 规划）      │
 ├────────────────────────────────────────────────┤
-│ React 19 前端                                   │
-│  Sidebar        agent 列表 / 状态 / 增删         │
-│  AgentView      消息流 / 流式气泡 / 双模输入     │
-│  ShellPanel     命令执行记录                    │
-│  SettingsModal  provider / key / 工作目录       │
-├────────────────────────────────────────────────┤
-│ Go sidecar  (127.0.0.1:17389)                  │
-│  internal/server   WS hub + 命令分发            │
-│  internal/agent    N 个隔离会话                 │
-│  internal/llm      mock + OpenAI 兼容 SSE       │
-│  internal/pty      跨平台 shell 执行            │
+│ React 19 前端（Vite 构建）                      │
+│  ├── src/mygo.ts       typed IPC client（生成） │
+│  ├── src/lib/useSidecar.ts  状态管理 + 事件订阅 │
+│  ├── src/lib/useTheme.ts    主题切换            │
+│  └── src/components/*.tsx  UI 组件             │
 └────────────────────────────────────────────────┘
+         ↓ mygo.Bind() + mygo.NewEvent()
+    编译期类型安全，无 WebSocket
 ```
 
-通信全是 localhost WebSocket + JSON，没有自研二进制协议。
+### 通信协议
+
+**MyGo typed IPC**（不是 WebSocket）：
+
+```go
+// Go 端暴露 API
+mygo.Bind(Sidecar{})
+var AgentCreated = mygo.NewEvent[Agent]("agent.created")
+AgentCreated.Emit(win, agent)
+```
+
+```ts
+// 前端调用（自动生成 src/mygo.ts）
+await Sidecar.createAgent({ name: "前端", role: "..." })
+events.agentCreated.on((agent) => { ... })
+```
+
+**为什么不用 WebSocket**：
+- 类型不安全（JSON 字符串，运行时才发现错）
+- 要维护连接状态、重连逻辑
+- MyGo IPC 编译期类型安全，零样板代码
+
+### 多 Agent 并发
+
+**Goroutine per Prompt**，当前无队列（会乱序，见设计文档 5.2）：
+
+```go
+func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
+    a := m.Get(req.AgentID)
+    runCtx, cancel := context.WithCancel(ctx)
+    a.cancel = cancel
+    
+    go func() {
+        stream, _ := client.Stream(runCtx, history)
+        for chunk := range stream {
+            m.emit("agent.delta", ...)
+        }
+        m.emit("agent.message", ...)
+    }()
+}
+```
+
+**目标**：Queue + Worker 模型（见 `docs/design.md` 5.2）
 
 ### 目录
 
 ```
 multi-agent-desktop/
-├── HANDOVER.md              ← 交接文档（自包含全部上下文）
-├── README.md
+├── main.go                  ← MyGo 壳入口
+├── mygo.config.ts           ← 打包配置
+├── go.mod / go.sum          ← Go 依赖
+├── internal/
+│   ├── agent/               ← 会话管理（Manager + Agent）
+│   ├── llm/                 ← mock / openai / 接口
+│   ├── pty/                 ← shell 执行
+│   ├── events/              ← 事件总线（W3 占位）
+│   ├── supervisor/          ← 任务分发（W3 占位）
+│   └── worktree/            ← git worktree（W3 占位）
+├── src/
+│   ├── mygo.ts              ← typed IPC client（自动生成）
+│   ├── App.tsx              ← 根组件
+│   ├── lib/
+│   │   ├── useSidecar.ts    ← 状态管理
+│   │   ├── useTheme.ts      ← 主题切换
+│   │   └── presets.ts       ← 角色/provider 预设
+│   ├── components/          ← UI 组件
+│   └── index.css            ← 设计 token（暗色 + 亮色）
 ├── docs/
-│   ├── research.md          ← 候选开源项目调研与选型
-│   └── architecture.md      ← 详细架构 + 跨平台坑清单
-├── src/                     ← React 前端
-│   ├── lib/ws.ts            WS 连接 + 自动重连 + 类型
-│   ├── lib/useSidecar.ts    事件流 → UI 状态的 reducer
-│   ├── lib/presets.ts       角色预设 / provider 默认值
-│   └── components/*.tsx
-├── src-tauri/               ← Rust 壳
-│   ├── src/lib.rs           sidecar 生命周期管理
-│   ├── capabilities/        权限白名单（shell:allow-spawn）
-│   └── binaries/            交叉编译产物（gitignore）
-├── sidecar/                 ← Go 后端
-│   ├── main.go              入口，解析 flag / env
-│   └── internal/
-│       ├── llm/             mock / openai / 接口定义
-│       ├── agent/           会话管理
-│       ├── pty/             命令执行
-│       ├── server/          WS hub + dispatch
-│       ├── supervisor/      W3 占位（见 README）
-│       ├── worktree/        W3 占位（见 README）
-│       └── events/          W3 占位（见 README）
-├── assets/pet/              小鲸鱼 14 张 png（未接入 UI）
-└── tools/build-sidecar.sh   四平台交叉编译
+│   ├── design.md            ← 架构、并发模型、交互设计
+│   ├── research.md          ← 技术选型调研
+│   └── architecture.md      ← 跨平台坑清单
+├── assets/pet/              ← 小鲸鱼素材（未接入）
+└── tools/                   ← 构建脚本
 ```
 
 ---
 
-## 协议
+## API 与事件
 
-### 前端 → sidecar
+### 前端调用（typed IPC）
 
-```jsonc
-{ "action": "agent.create", "data": { "name": "前端", "role": "React 专家" } }
-{ "action": "agent.delete", "data": { "id": "agent-xxx" } }
-{ "action": "agent.stop",   "data": { "id": "agent-xxx" } }
-{ "action": "agent.prompt", "data": { "agentId": "agent-xxx", "text": "..." } }
-{ "action": "shell.run",    "data": { "agentId": "agent-xxx", "command": "ls -la" } }
-{ "action": "llm.config",   "data": { "provider": "ollama", "baseUrl": "...", "model": "..." } }
-{ "action": "workdir.set",  "data": { "dir": "/path/to/project" } }
+```ts
+// 会话管理
+await Sidecar.createAgent({ name: "前端", role: "React 专家" })
+await Sidecar.deleteAgent(agentId)
+await Sidecar.stopAgent(agentId)
+await Sidecar.promptAgent({ agentId, text: "..." })
+await Sidecar.listAgents()
+
+// Shell
+await Sidecar.runShell({ agentId, command: "ls -la" })
+
+// 配置
+await Sidecar.getLLMConfig() / setLLMConfig(cfg)
+await Sidecar.getWorkDir() / setWorkDir(dir)
+
+// 窗口
+await Sidecar.setAlwaysOnTop(true)
+
+// 系统信息
+await Sidecar.info()
 ```
 
-### sidecar → 前端
+### Go → 前端事件
 
-| 事件 | 含义 |
-|---|---|
-| `bootstrap` | 首次连接推全量快照（agents / llm / workDir / version） |
-| `agent.created` / `agent.deleted` | 会话增删 |
-| `agent.status` | `idle` / `running` / `done` / `error` |
-| `agent.delta` | 流式片段（token 级） |
-| `agent.message` | 一条完整消息（user 或 assistant 落定） |
-| `agent.error` | 该会话出错 |
-| `shell.start` / `shell.result` | 命令开始 / 结果 |
-| `file.change` | 文件改动（含 diff 行）→ 检查器「改动」 |
-| `todo.update` | 任务清单更新 → 检查器「任务」 |
-| `tool.start` / `tool.result` | 工具调用开始 / 结果 → 检查器「工具」 |
-| `llm.config` | provider 变更（单播确认带 `origin: true`） |
-| `workdir` | 工作目录变更 |
+| 事件 | 载荷类型 | 含义 |
+|---|---|---|
+| `agent.created` | `Agent` | 新会话 |
+| `agent.deleted` | `string` | 删除的 agent ID |
+| `agent.status` | `StatusEvent` | `idle` / `running` / `done` / `error` |
+| `agent.delta` | `DeltaEvent` | 流式片段（token 级） |
+| `agent.message` | `MessageEvent` | 完整消息落定 |
+| `agent.error` | `ErrorEvent` | 错误 |
+| `shell.start` / `shell.result` | `ShellEvent` / `ShellResultEvent` | 命令执行 |
+| `llm.config` | `Config` | 模型配置变更 |
+| `workdir` | `WorkDirEvent` | 工作目录变更 |
 
 ### 环境变量
-
-sidecar 支持用环境变量预设 provider，省得每次点设置：
 
 ```bash
 MAD_LLM_PROVIDER=ollama
@@ -325,24 +376,29 @@ MAD_LLM_API_KEY=sk-...
 
 ## 路线图
 
-| 周 | 目标 | 状态 |
+| 里程碑 | 目标 | 状态 |
 |---|---|---|
-| W1 | Tauri 壳 + sidecar WS 通信 | ✅ 2026-11-11 |
+| W1 | ~~Tauri 壳 + sidecar WS 通信~~ → **已迁移 MyGo** | ✅ 2026-11-11 |
 | W2 | 多 agent 并行 + 流式对话 + shell | ✅ 2026-11-11 |
-| W3 | git worktree 隔离 + Supervisor 编排 | ⬜ 下一步 |
-| W4 | 小鲸鱼桌宠 + 三端打包 | 🟡 macOS `.app` 已可打出（18MB），Windows/Linux 待验 |
+| W2.5 | **MyGo 迁移**：单 Go 进程 + typed IPC + 跨平台打包 | ✅ 2026-11-12 |
+| W3 | 连续对话队列 + agent 互相通信 + CLI 编排 | ⬜ 下一步 |
+| W4 | git worktree 隔离 + 小鲸鱼桌宠 + 自动更新 | ⬜ |
 
-W3 要解决的正是「现在感觉怪」的根因：**让 agent 真的能改代码，且互不打架**。
+**W3 核心**（见 `docs/design.md` 第 5 节）：
+1. **Queue + Worker**：连续对话不乱序，可排队/跳过/清空
+2. **Manager.Route**：agent 可 @其他 agent，主动发消息、触发工作
+3. **CLI 编排**：接 `claude -p` / `codex exec`，让 agent 真能改代码
 
 ---
 
 ## 已知问题
 
 - **Mock 回复是占位的**，别当真实分析看
+- **连续对话会乱序** —— 无队列机制，连发两条消息两个 goroutine 同时跑
+- **agent 不能互相通信** —— 完全孤立，没有 @提及、任务分发
 - **agent 不会自己用终端** —— `shell.run` 是前端发起的，跟 agent 推理链没打通
-- **长命令会卡住** —— shell 是同步等结果，没有流式输出，跑 `npm install` 只能干等
-- **`llm.config` 曾出现过自激回环** —— 已用「单播确认 + 排除发起者广播」修复，有回归测试
-- **workdir 自动推断**：开发时取仓库根，打包后回落到 `$HOME`
+- **长命令会卡住** —— shell 是同步等结果，没有流式输出
+- **检查器面板是演示数据** —— `demoTrail()` 造的，不是真实 agent 行为
 - **DMG 打包会失败** —— `bundle_dmg.sh` 依赖 Finder AppleScript，无 GUI 会话时报 -1712，用 `tools/package-macos.sh` 绕过
 - **未签名** —— 分发给别人会被 Gatekeeper / SmartScreen 拦
 

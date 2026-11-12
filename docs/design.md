@@ -152,12 +152,9 @@ Go Event → useSidecar reducer → React state → 组件渲染
 
 ## 5. 多 Agent 并发模型
 
-### 5.1 Goroutine per Agent
+### 5.1 当前实现：Goroutine per Prompt
 
-每个 `Agent` 持独立：
-- `context.CancelFunc` —— 用户点「停止」时取消
-- `[]llm.Message` —— 对话历史（mutex 保护）
-- `status` —— 当前状态
+**现状**：每次 `Prompt` 起新 goroutine，独立 stream，无排队机制。
 
 ```go
 func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
@@ -175,7 +172,123 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 }
 ```
 
-**N 个 agent 并发 = N 个 goroutine**，无锁竞争（每个 agent 独立 mutex）。
+**问题**：
+- 用户连发两条消息 → 两个 goroutine 同时跑 → 历史乱序
+- 没有「执行中」状态管理，用户不知道当前在跑第几条
+- 停止按钮只能停当前，不能清队列
+
+### 5.2 目标实现：Queue + Worker
+
+**每个 agent 一个消息队列**：
+
+```go
+type Agent struct {
+    // ... 现有字段 ...
+    queue   chan PromptRequest  // 待处理消息
+    worker  *Worker             // 消费 goroutine
+    status  Status              // idle / running / queued
+}
+
+type Worker struct {
+    agent   *Agent
+    current context.CancelFunc  // 当前任务的取消函数
+}
+
+func (w *Worker) Run() {
+    for req := range w.agent.queue {
+        w.execute(req)  // 阻塞执行，完成后取下一个
+    }
+}
+```
+
+**状态机**：
+```
+idle --Prompt--> running --完成--> idle
+  ↑                                  |
+  |-------- Prompt（排队）--------> queued
+```
+
+**用户操作**：
+- **发送**：入队，如果 idle 立即执行，否则 queued
+- **停止**：取消当前 running，清空 queue
+- **跳过**：取消当前，取 queue 下一个
+
+### 5.3 Agent 间协作
+
+**现状**：完全孤立，agent 不知道其他 agent 存在。
+
+**需要加的能力**：
+
+| 能力 | 说明 | 实现 |
+|---|---|---|
+| **发现** | 知道有哪些 agent | `Manager.List()` 注入 |
+| **寻址** | @某个 agent | `Message.toAgentId` |
+| **发送** | 主动推消息 | `Manager.Route(from, to, msg)` |
+| **触发** | 让另一个 agent 工作 | `Manager.Prompt(toId, text)` |
+
+**架构**：
+```go
+// Agent 增加协作能力
+type Agent struct {
+    // ... 现有字段 ...
+    manager *Manager  // 反向引用，用于寻址其他 agent
+}
+
+// Manager 增加路由
+func (m *Manager) Route(fromId, toId, text string) error {
+    msg := Message{
+        From: fromId,
+        To:   toId,
+        Text: text,
+    }
+    // 推给目标 agent 的 queue
+    return m.Prompt(toId, PromptRequest{Text: text})
+}
+```
+
+**使用场景**：
+```
+用户: "@Supervisor 实现登录功能"
+Supervisor: "拆解任务：@前端 写UI，@后端 写API"
+  → Manager.Route("supervisor", "frontend", "写登录页面")
+  → Manager.Route("supervisor", "backend", "写登录接口")
+前端: "完成，代码在 login.tsx"
+  → Manager.Route("frontend", "supervisor", "已完成")
+```
+
+### 5.4 群聊 vs 私聊
+
+**两层并存**：
+
+```
+频道（Channel）          私聊（DM）
+  #general               @前端 ↔ 用户
+  #frontend              @前端 ↔ @后端
+```
+
+**Channel 实现**：
+```go
+type Channel struct {
+    ID       string
+    Name     string
+    Members  []string  // agent IDs
+    Messages []Message // 共享历史
+}
+
+// 发消息到频道，所有成员收到
+func (m *Manager) Broadcast(channelId, fromId, text string) {
+    for _, memberId := range channel.Members {
+        m.Route(fromId, memberId, text)
+    }
+}
+```
+
+**前端 UI**：
+- 侧栏加「频道」分组（类似 Slack）
+- 频道视图显示所有成员消息
+- @提及高亮，点击可跳转私聊
+
+---
 
 ### 5.2 事件广播
 
@@ -185,19 +298,93 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 
 ---
 
-## 6. 已知限制 & 下一步
+## 6. 交互体验设计
 
-| 限制 | 计划 |
-|---|---|
-| 检查器面板是演示数据 | W3：接 CLI agent（claude -p / codex exec）产生真实数据 |
-| agent 不能读写代码 | W3：加 tools 包（read/write/grep/run_test） |
-| 无 git worktree 隔离 | W3：worktree 包 |
-| 会话不持久化 | W4：落盘或 localStorage |
-| 未接小鲸鱼桌宠 | W4：PetWidget 组件 |
+### 6.1 流式输出
+
+**原则**：不打断用户阅读，不强制滚动。
+
+**实现**：
+- 跟踪用户是否在底部（`pinnedToBottom`）
+- 在底部：新内容自动跟随滚动
+- 不在底部：保持当前位置，不强制跳转
+- 用户回到底部：恢复自动跟随
+
+**代码**：
+```tsx
+const pinnedToBottom = useRef(true)
+
+const handleScroll = () => {
+  const el = scrollRef.current
+  if (!el) return
+  const threshold = 40
+  pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+}
+
+useEffect(() => {
+  if (pinnedToBottom.current) {
+    el.scrollTop = el.scrollHeight
+  }
+}, [streaming])
+```
+
+### 6.2 连续对话
+
+**状态展示**：
+```
+[运行中] 帮我看看 A...        ← 当前执行
+[排队中] 还有 B               ← 等待
+[排队中] 一起总结一下          ← 等待
+```
+
+**操作**：
+- **点击排队项**：可删除或提前
+- **停止按钮**：取消当前 + 清空队列
+- **跳过按钮**：取消当前，执行下一个
+
+### 6.3 Agent 状态可视化
+
+**侧栏状态点**：
+- 灰色：空闲
+- 橙色闪烁：执行中
+- 蓝色：有排队消息
+- 绿色：完成
+- 红色：出错
+
+**检查器联动**：
+- 点击 agent → 右侧显示该 agent 的改动/任务/工具
+- 多个 agent 同时运行 → 检查器可切换查看
+
+### 6.4 打断与恢复
+
+**用户打断**：
+- 点击「停止」→ 取消当前 stream，agent 状态回 idle
+- 已生成的内容保留（作为 assistant 消息入历史）
+- 未开始的消息仍在队列
+
+**Agent 被打断**（被其他 agent @）：
+- 如果正在执行，新消息排队
+- 如果空闲，立即执行
+- 优先级：用户直接消息 > 其他 agent 消息
 
 ---
 
-## 7. 参考
+## 7. 已知限制 & 下一步
+
+| 限制 | 优先级 | 计划 |
+|---|---|---|
+| 连续对话会乱序（无队列） | 🔴 高 | 加 Queue + Worker，见 5.2 |
+| agent 不能互相通信 | 🔴 高 | 加 Manager.Route，见 5.3 |
+| 检查器面板是演示数据 | 🟡 中 | W3：接 CLI agent 产生真实数据 |
+| agent 不能读写代码 | 🟡 中 | W3：加 tools 包 |
+| 无 git worktree 隔离 | 🟡 中 | W3：worktree 包 |
+| 会话不持久化 | 🟢 低 | W4：落盘或 localStorage |
+| 未接小鲸鱼桌宠 | 🟢 低 | W4：PetWidget 组件 |
+| 无群聊/频道 | 🟡 中 | 见 5.4，需先实现 5.3 |
+
+---
+
+## 8. 参考
 
 - MyGo: https://github.com/egoist/mygo
 - 调研: docs/research.md
