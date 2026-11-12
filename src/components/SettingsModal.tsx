@@ -32,6 +32,9 @@ export default function SettingsModal(p: Props) {
   const [dir, setDir] = useState(p.workDir)
   const { theme, setTheme } = useTheme()
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  const [models, setModels] = useState<string[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelError, setModelError] = useState('')
 
   useEffect(() => {
     if (p.open) {
@@ -41,10 +44,6 @@ export default function SettingsModal(p: Props) {
   }, [p.open, p.llm, p.workDir])
 
   if (!p.open) return null
-
-  const [models, setModels] = useState<string[]>([])
-  const [loadingModels, setLoadingModels] = useState(false)
-  const [modelError, setModelError] = useState('')
 
   const loadModels = async () => {
     setLoadingModels(true)
