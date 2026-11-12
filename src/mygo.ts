@@ -103,7 +103,10 @@ export interface Note {
   body: string;
   tags?: string[];
   scope?: string;
+  source?: string;
+  related?: string[];
   at: number;
+  updatedAt?: number;
 }
 
 export interface PromptRequest {
@@ -201,6 +204,10 @@ export const Sidecar = {
   deleteNote(id: string): Promise<boolean> {
     return call("Sidecar.DeleteNote", id);
   },
+  /** DetachNoteFromAgent 从 agent 移除知识笔记。 */
+  detachNoteFromAgent(noteId: string, agentId: string): Promise<AgentView> {
+    return call("Sidecar.DetachNoteFromAgent", noteId, agentId);
+  },
   /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
   focusAgent(agentId: string): Promise<void> {
     return call("Sidecar.FocusAgent", agentId);
@@ -208,6 +215,10 @@ export const Sidecar = {
   /** GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。 */
   getAgentConfig(agentId: string): Promise<Config> {
     return call("Sidecar.GetAgentConfig", agentId);
+  },
+  /** GetAgentKnowledge 返回 agent 附加的知识笔记 ID 列表。 */
+  getAgentKnowledge(agentId: string): Promise<string[]> {
+    return call("Sidecar.GetAgentKnowledge", agentId);
   },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
@@ -243,6 +254,14 @@ export const Sidecar = {
   listModelsFor(agentId: string, cfg: Config): Promise<string[]> {
     return call("Sidecar.ListModelsFor", agentId, cfg);
   },
+  /** ListNotesByTag 按标签列出笔记。 */
+  listNotesByTag(tag: string): Promise<Note[]> {
+    return call("Sidecar.ListNotesByTag", tag);
+  },
+  /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
+  matchNotesForAgent(agentId: string): Promise<Note[]> {
+    return call("Sidecar.MatchNotesForAgent", agentId);
+  },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("Sidecar.PickDirectory");
@@ -266,6 +285,10 @@ export const Sidecar = {
   /** RunShell 执行 shell 命令。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
+  },
+  /** SearchNotes 全文搜索笔记。 */
+  searchNotes(text: string, limit: number): Promise<Note[]> {
+    return call("Sidecar.SearchNotes", text, limit);
   },
   /**
    * SendToChannel 发消息到频道，并触发相关成员 agent。

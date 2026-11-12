@@ -36,6 +36,7 @@ type Agent struct {
 	Backend   string        `json:"backend"`           // mock / claude / codex
 	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
 	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`  // 会话级模型配置，nil 则回落 Manager.llmCfg
+	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
 
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
@@ -152,6 +153,7 @@ func (m *Manager) Save() error {
 				Backend:   a.Backend,
 				WorkDir:   a.WorkDir,
 				LLMCfg:    a.LLMCfg,
+				Knowledge: append([]string(nil), a.Knowledge...),
 			})
 			a.mu.Unlock()
 		}
@@ -226,6 +228,7 @@ func (m *Manager) Load() error {
 			Backend:   saved.Backend,
 			WorkDir:   saved.WorkDir,
 			LLMCfg:    saved.LLMCfg,
+			Knowledge: append([]string(nil), saved.Knowledge...),
 			queue:     make(chan PromptRequest, 32),
 			done:      make(chan struct{}),
 		}
@@ -282,6 +285,53 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 	a.mu.Unlock()
 	m.goSave()
 	return nil
+}
+
+// AttachNote 把知识笔记附加到 agent（幂等，重复 attach 不新增）。
+func (m *Manager) AttachNote(agentId, noteId string) error {
+	a, ok := m.Get(agentId)
+	if !ok {
+		return fmt.Errorf("agent %s not found", agentId)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, id := range a.Knowledge {
+		if id == noteId {
+			return nil // 已存在，幂等返回
+		}
+	}
+	a.Knowledge = append(a.Knowledge, noteId)
+	m.goSave()
+	return nil
+}
+
+// DetachNote 从 agent 移除知识笔记。
+func (m *Manager) DetachNote(agentId, noteId string) error {
+	a, ok := m.Get(agentId)
+	if !ok {
+		return fmt.Errorf("agent %s not found", agentId)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, id := range a.Knowledge {
+		if id == noteId {
+			a.Knowledge = append(a.Knowledge[:i], a.Knowledge[i+1:]...)
+			m.goSave()
+			return nil
+		}
+	}
+	return nil
+}
+
+// GetKnowledge 返回 agent 附加的知识笔记 ID 列表。
+func (m *Manager) GetKnowledge(agentId string) []string {
+	a, ok := m.Get(agentId)
+	if !ok {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.Knowledge...)
 }
 
 var palette = []string{"#5b9dff", "#3ecf8e", "#e8a33d", "#c47aff", "#ff7a8a", "#4dd0e1"}
@@ -763,6 +813,7 @@ func (a *Agent) viewMap() map[string]any {
 		"backend":   a.Backend,
 		"workDir":   a.WorkDir,
 		"llmCfg":    a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
+		"knowledge": append([]string(nil), a.Knowledge...),
 	}
 }
 

@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>架构评审 · 群聊与单聊 (multi-agent-desktop)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+</script>
+<style>
+  .seam { stroke-dasharray: 5 5; }
+  .leak { stroke: #dc2626; stroke-width: 2; }
+  .ghost { opacity: .38; }
+  .tag { font-size: 10px; letter-spacing: .12em; }
+  .lbl { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+  .deepfill { background: linear-gradient(135deg,#0f172a,#1e293b); }
+  .cell { border:1px solid #cbd5e1; border-radius:6px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-6xl mx-auto px-8 py-14 space-y-14">
+
+  <header class="space-y-4">
+    <p class="lbl text-slate-400">Architecture review</p>
+    <h1 class="font-serif text-4xl tracking-tight">群聊 · 单聊</h1>
+    <p class="text-slate-500 text-sm">multi-agent-desktop · 2025-11-12 · 范围：<span class="font-mono">internal/channel</span> 及其全部调用方</p>
+    <p class="text-slate-600 text-sm max-w-3xl">不扫：前端其他组件、llm 客户端、pty。无 <span class="font-mono">GLOSSARY.md</span>，无 <span class="font-mono">docs/adr/</span>。</p>
+    <div class="flex flex-wrap gap-5 text-xs text-slate-600 pt-3 border-t border-slate-200">
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 border border-slate-400 rounded-sm"></span>module</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#475569" class="seam"/></svg>seam</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#dc2626" stroke-width="2"/></svg>leakage</span>
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 deepfill rounded-sm"></span>deep module</span>
+    </div>
+  </header>
+
+  <!-- ============ 基线 ============ -->
+  <section class="space-y-5">
+    <h2 class="font-serif text-2xl">基线：两个平行的 manager，唯一的 seam 是一个字符串</h2>
+    <div class="grid md:grid-cols-2 gap-6">
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">今天怎么流动</p>
+        <pre class="mermaid">
+flowchart TB
+  U["用户在 #频道 发言"] --> SC["Sidecar.SendToChannel"]
+  SC -->|"Broadcast"| CH[("channel.Messages")]
+  SC --> PM["parseMentions<br/>+ isRelevantToRole"]
+  PM -->|"构造 '[channel:X] 名字: 正文'"| PR["mgr.Prompt"]
+  PR --> AG[("Agent.Messages<br/>每个成员各一份")]
+  AG -->|"extractChannelId 反解"| EV["agent.channel.reply"]
+  EV -->|"AddMessage"| CH
+  style PM fill:#fef2f2,stroke:#dc2626,stroke-width:2px
+  style AG fill:#fef2f2,stroke:#dc2626,stroke-width:2px
+        </pre>
+      </div>
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">一句话存了几份</p>
+        <table class="w-full text-xs">
+          <thead class="text-slate-400 lbl"><tr><th class="text-left pb-2">落点</th><th class="text-left pb-2">内容</th><th class="text-left pb-2">持久化</th></tr></thead>
+          <tbody class="text-slate-700">
+            <tr class="border-t border-slate-100"><td class="py-2 font-mono">channel.Messages</td><td>原句 + 发言人</td><td>channels.json</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2 font-mono">Agent.Messages ×N</td><td class="text-red-600">改写成 <span class="font-mono">[channel:X] 名字: 正文</span></td><td>agents.json</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2 font-mono">前端 channels[]</td><td>镜像</td><td class="text-slate-400">内存</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2 font-mono">前端 agents[]</td><td>镜像</td><td class="text-slate-400">内存</td></tr>
+          </tbody>
+        </table>
+        <p class="text-xs text-slate-500 mt-3">N 个成员 = N 份改写副本。<b>频道消息和 agent 消息字段交集为 0</b>（<span class="font-mono">channel.Message</span> vs <span class="font-mono">llm.Message</span>），没有任何一处在两者之间做转换的 module。</p>
+      </div>
+    </div>
+
+    <div class="rounded-lg border border-red-200 bg-red-50 p-5">
+      <p class="lbl text-red-700 mb-2">最严重的一处 · 已证实</p>
+      <p class="text-sm text-red-900 leading-relaxed">
+        <span class="font-mono text-xs">isRelevantToRole(text, a.Role)</span>（<span class="font-mono text-xs">main.go:397</span>）用 <span class="font-mono text-xs">map</span> 的键是 <b>「后端」「前端」「测试」「运维」「全栈」</b>，
+        但它拿到的 <span class="font-mono text-xs">a.Role</span> 实际值是 <span class="font-mono text-xs">"Go 专家，关注 API 设计、并发安全与查询效率"</span>（<span class="font-mono text-xs">src/lib/presets.ts:3</span>）。
+        <b>键永远不命中，函数恒返回 false。</b>
+      </p>
+      <p class="text-xs text-red-800 mt-2 leading-relaxed">
+        后果：没 @ 任何人时，<b>没有任何成员会回复</b>；代码里的 <span class="font-mono">「角色相关，选择性回复」</span> 分支从未执行过。
+        用户看到的现象是「群里发消息没人理」，而日志显示「不相关，跳过」。
+      </p>
+    </div>
+
+    <div class="rounded-lg border border-amber-200 bg-amber-50 p-5">
+      <p class="lbl text-amber-700 mb-2">次严重 · 已证实</p>
+      <p class="text-sm text-amber-900 leading-relaxed">
+        前端 <span class="font-mono text-xs">insertMention</span>（<span class="font-mono text-xs">ChannelView.tsx:74</span>）插入的是 <span class="font-mono text-xs">@</span> + <b>agent 的 name</b>（如「前端」）；
+        后端解析后与 <span class="font-mono text-xs">a.Name</span> 比对 —— 这条对上了。但 <span class="font-mono">parseMentions</span> 用 <span class="font-mono text-xs">strings.Fields</span> 切词，
+        <b>名字带空格就会断</b>；Go 侧 <span class="font-mono text-xs">parseMentions</span> 和前端 <span class="font-mono text-xs">filtered</span> 和 <span class="font-mono text-xs">insertMention</span> 是<b>三份互不相同的解析逻辑</b>。
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ Candidates ============ -->
+  <section id="candidates" class="space-y-12">
+
+    <!-- 1 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">1 · 没有一个「频道投递」module：fan-out 逻辑全裸在 Sidecar 里</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:315 SendToChannel · main.go:378 parseMentions · main.go:397 isRelevantToRole</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 决策逻辑散落三处</p>
+          <div class="space-y-2 pt-1">
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">main.go · Sidecar</p>
+              <p class="text-[11px] text-slate-600">谁该回 · 拼 prompt · 收集 errs · 打日志</p>
+            </div>
+            <div class="cell bg-red-50 border-red-300 p-2.5">
+              <p class="lbl text-red-600 mb-1">isRelevantToRole</p>
+              <p class="text-[11px] text-red-800">硬编码关键词表 · 恒返回 false</p>
+            </div>
+            <div class="cell bg-red-50 border-red-300 p-2.5">
+              <p class="lbl text-red-600 mb-1">parseMentions</p>
+              <p class="text-[11px] text-red-800">Fields 切词 · 名字带空格即断</p>
+            </div>
+            <div class="flex justify-end pt-1">
+              <span class="lbl text-red-500">测试覆盖 0</span>
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 一个 deep module</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-slate-800 bg-slate-900 p-2.5">
+              <p class="lbl text-slate-400 mb-1">Dispatch</p>
+              <p class="text-[11px] text-slate-100 font-mono leading-relaxed">Dispatch(channelId, msg) → []Delivery</p>
+            </div>
+            <div class="rounded border border-slate-300 bg-white p-2.5 space-y-1">
+              <p class="text-[10px] text-slate-600">· 提及解析（一份，前后端共用）</p>
+              <p class="text-[10px] text-slate-600">· 该谁回（显式规则，可测）</p>
+              <p class="text-[10px] text-slate-600">· 每人一份投递记录（成功/失败）</p>
+              <p class="text-[10px] text-slate-600">· prompt 组装（含群历史）</p>
+            </div>
+            <div class="flex justify-between pt-1">
+              <span class="lbl text-emerald-600">interface 1 个方法</span>
+              <span class="lbl text-emerald-600">测试 1 个 seam</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">「谁该回、回什么、失败了怎么办」三个决策全在 <span class="font-mono text-xs">SendToChannel</span> 的一个 <span class="font-mono text-xs">for</span> 循环里，和 I/O 搅在一起。任何一条规则改错都只有一个后果：群里静默无人回复，且没有测试能发现。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把 fan-out 决策抽成一个 deep module：入参是消息和成员，出参是「每个成员的投递计划」。Sidecar 只负责把计划交给 <span class="font-mono text-xs">mgr.Prompt</span>。提及解析只保留一份，前端复用同一份语义。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· <b>leverage</b>：一个 <span class="font-mono text-xs">Dispatch</span> 覆盖「谁回」全部规则</li>
+            <li>· <b>locality</b>：<span class="font-mono text-xs">isRelevantToRole</span> 的恒 false 类 bug 一处可测</li>
+            <li>· 提及解析从 3 份降到 1 份</li>
+            <li>· 投递结果成为数据，不再是一句拼起来的错误字符串</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">接口形状（定形，不写码）</p>
+          <div class="font-mono text-[11px] text-slate-700 bg-stone-100 rounded p-3 leading-relaxed">
+            type Delivery struct &#123; AgentID, Prompt string; Reason string &#125;<br/><br/>
+            Dispatch(msg Message, members []Member) []Delivery<br/>
+            <span class="text-slate-400">— Reason 用来解释「为什么回/不回」，</span><br/>
+            <span class="text-slate-400">  直接变成 UI 上的「为什么没人理我」</span>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <!-- 2 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">2 · agent 在群里看不见别的 agent 说了什么</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:360 prompt 构造 · channel.Messages 从不进入任何 Agent.Messages</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 每个 agent 只看到「用户那一句」</p>
+          <svg viewBox="0 0 400 190" class="w-full h-52">
+            <text x="0" y="12" class="lbl" fill="#94a3b8" font-size="9">#频道 里真实发生的</text>
+            <rect x="0" y="22" width="220" height="22" rx="3" fill="#fff" stroke="#cbd5e1"/>
+            <text x="7" y="37" font-size="9" fill="#475569">用户: 定个接口方案</text>
+            <rect x="0" y="48" width="180" height="22" rx="3" fill="#fff" stroke="#cbd5e1"/>
+            <text x="7" y="63" font-size="9" fill="#475569">后端: 用 REST</text>
+            <rect x="0" y="74" width="196" height="22" rx="3" fill="#fff" stroke="#cbd5e1"/>
+            <text x="7" y="89" font-size="9" fill="#475569">前端: 建议 GraphQL</text>
+            <rect x="0" y="100" width="150" height="22" rx="3" fill="#fff" stroke="#cbd5e1"/>
+            <text x="7" y="115" font-size="9" fill="#475569">用户: 你们商量下</text>
+
+            <text x="252" y="12" class="lbl" fill="#b91c1c" font-size="9">后端 agent 实际收到的</text>
+            <rect x="252" y="22" width="148" height="22" rx="3" fill="#fef2f2" stroke="#dc2626"/>
+            <text x="259" y="37" font-size="8" fill="#b91c1c">[channel:x] 用户: 定个接口方案</text>
+            <rect x="252" y="52" width="148" height="22" rx="3" fill="#fef2f2" stroke="#dc2626"/>
+            <text x="259" y="67" font-size="8" fill="#b91c1c">[channel:x] 用户: 你们商量下</text>
+            <text x="252" y="92" font-size="9" fill="#dc2626">✕ 前端说了 GraphQL —— 没见过</text>
+            <text x="252" y="108" font-size="9" fill="#dc2626">✕ 不知道有人已经回过</text>
+            <text x="0" y="145" font-size="9" fill="#64748b">每个 agent 看到的都是逐条切片的单轮问答，</text>
+            <text x="0" y="160" font-size="9" fill="#64748b">不是同一段对话的两个参与者。</text>
+          </svg>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · transcript 是共享事实源</p>
+          <svg viewBox="0 0 400 190" class="w-full h-52">
+            <text x="0" y="12" class="lbl" fill="#94a3b8" font-size="9">#频道 transcript（唯一事实源）</text>
+            <rect x="0" y="22" width="150" height="130" rx="4" fill="#ecfdf5" stroke="#059669"/>
+            <text x="8" y="38" font-size="8" fill="#065f46">用户 · 定个接口</text>
+            <text x="8" y="54" font-size="8" fill="#065f46">后端 · 用 REST</text>
+            <text x="8" y="70" font-size="8" fill="#065f46">前端 · 建议 GQL</text>
+            <text x="8" y="86" font-size="8" fill="#065f46">用户 · 商量下</text>
+            <path d="M158 60 C 195 60, 195 45, 228 45" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#g1)"/>
+            <path d="M158 60 C 195 60, 195 105, 228 105" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#g1)"/>
+            <defs><marker id="g1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#059669"/></marker></defs>
+            <text x="163" y="52" font-size="8" fill="#047857">按角色裁剪</text>
+            <rect x="228" y="30" width="172" height="32" rx="3" fill="#fff" stroke="#059669"/>
+            <text x="235" y="44" font-size="8" fill="#065f46">后端 agent：见全部 4 条</text>
+            <text x="235" y="56" font-size="7" fill="#64748b">→ 可以回应前端</text>
+            <rect x="228" y="90" width="172" height="32" rx="3" fill="#fff" stroke="#059669"/>
+            <text x="235" y="104" font-size="8" fill="#065f46">前端 agent：见全部 4 条</text>
+            <text x="235" y="116" font-size="7" fill="#64748b">→ 可以回应后端</text>
+            <text x="0" y="172" font-size="9" fill="#047857">Agent.Messages 只留自己的轮次；群上下文每轮从 transcript 现算。</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">prompt</span> 只有 <span class="font-mono text-xs">[channel:X] 发言人: 正文</span> 一句。频道的历史不进 prompt，别人的发言永远不出现。多个 agent 的「协作」实际上是在同一频道里各说各话，没有任何一方能看到对话发生过。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">频道 transcript 成为群上下文的唯一事实源。<span class="font-mono text-xs">Agent.Messages</span> 只保留该 agent 自己的轮次，群上下文每轮从 transcript 按预算裁剪后拼进 prompt。这与知识库那边「history 只放对话、context 每轮现算」是同一个形状。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· <b>locality</b>：群上下文只从 transcript 算，一处可测</li>
+            <li>· 同一句发言从 3 份持久副本降到 1 份 + N 份纯引用</li>
+            <li>· agent 之间真的能互相看到 → 协作才成立</li>
+            <li>· 和知识库的 history 预算机制复用同一形状</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="lbl text-amber-700 mb-2">注意</p>
+          <p class="text-xs text-amber-900 leading-relaxed">这条会把群聊从「广播」变成「多轮讨论」，<b>语义升级</b>。原来「频道是广播触发，非讨论收敛」是写进 <span class="font-mono">docs/design.md</span> 的已知限制。要真做的话得先确认：这是你想要的方向，还是继续维持广播语义、只修 #1 的那个恒 false bug。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- 3 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">3 · 投递失败了，但消息显示成功</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:315 SendToChannel errs 合并 · useSidecar.ts .catch → null</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 消息先落地，投递结果丢失</p>
+          <pre class="mermaid">
+sequenceDiagram
+  participant U as 用户
+  participant S as Sidecar
+  participant C as channel
+  participant A as Agent(队列满)
+  U->>S: 发消息
+  S->>C: AddMessage ✅ 已落库
+  S-->>U: Emit ✅ 气泡出现
+  S->>A: Prompt ❌ queue full
+  S->>S: errs = ["agent X queue full"]
+  S-->>U: 返回 error
+  U->>U: .catch(() => null) 全吞
+  Note over C,U: 频道里这条消息看起来完全正常
+          </pre>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 投递是消息的一部分</p>
+          <div class="rounded border border-emerald-300 bg-emerald-50 p-3">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-[11px] text-emerald-900">用户 · 定个接口方案</span>
+            </div>
+            <div class="flex flex-wrap gap-1">
+              <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-200 text-emerald-900">后端 ✓</span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-200 text-emerald-900">前端 ✓</span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-red-200 text-red-900">测试 ✕ 队列满</span>
+            </div>
+            <p class="text-[10px] text-emerald-800 mt-2">点 ✕ 可重投</p>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-3"><span class="font-mono">Message.Deliveries []Delivery</span> —— 和 #1 的 <span class="font-mono">Dispatch</span> 返回值是同一个结构。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">消息先落库先推送，之后才尝试投递。失败只拼成一个字符串返回，前端 <span class="font-mono text-xs">.catch → return null</span> 全吞。用户看到「消息发出去了」，实际有成员根本没收到，且无法发现或重试。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把投递结果变成 <span class="font-mono text-xs">Message</span> 上的数据（每个成员的成败），而不是一个抛出去的错误。UI 直接据此显示「谁收到了、谁没收到、为什么」。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 部分失败变成可见状态，不再被 <span class="font-mono text-xs">.catch</span> 吞掉</li>
+          <li>· 重投成为可能（数据在，不在异常里）</li>
+          <li>· <b>leverage</b>：复用 #1 的 <span class="font-mono text-xs">Delivery</span>，零新增类型</li>
+          <li>· 「为什么没人理我」有了第二种可解释的答案</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 4 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">4 · Channel 与 Agent 是两个逐字重复的 manager，缺一层</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">channel.Manager vs agent.Manager · Save/Load/goSave/saveMu/waitSaves 各一份</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Worth exploring</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 形状重合 ~62%，实现各写一遍</p>
+          <div class="grid grid-cols-2 gap-3 pt-1">
+            <div>
+              <p class="lbl text-slate-500 mb-1 text-center">channel.Manager</p>
+              <div class="space-y-1">
+                <div class="cell bg-white p-1.5 text-[10px] text-center">mu / channels / order</div>
+                <div class="cell bg-white p-1.5 text-[10px] text-center">store 路径</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">Save / Load</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">goSave / saveMu</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">writeFileAtomic</div>
+                <div class="cell bg-white p-1.5 text-[10px] text-center">Create / List / Get</div>
+              </div>
+            </div>
+            <div>
+              <p class="lbl text-slate-500 mb-1 text-center">agent.Manager</p>
+              <div class="space-y-1">
+                <div class="cell bg-white p-1.5 text-[10px] text-center">mu / agents / order</div>
+                <div class="cell bg-white p-1.5 text-[10px] text-center">store 路径</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">Save / Load</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">goSave / saveMu</div>
+                <div class="cell bg-red-50 border-red-300 p-1.5 text-[10px] text-center text-red-800">writeFileAtomic</div>
+                <div class="cell bg-white p-1.5 text-[10px] text-center">Create / List / Snapshot</div>
+              </div>
+            </div>
+          </div>
+          <p class="mt-2 text-[10px] text-red-600 text-center">红色 = 逐字重复的实现（3 组）</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 抽出落盘，各自保留本质差异</p>
+          <div class="space-y-2 pt-2">
+            <div class="rounded border-2 border-slate-800 bg-slate-900 p-2.5">
+              <p class="text-[11px] text-slate-100 font-mono">Collection[T] · 落盘 + 有序集合</p>
+            </div>
+            <div class="flex gap-2 justify-center text-slate-400">↓</div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="cell bg-white p-2">
+                <p class="text-[10px] text-slate-700 text-center mb-1">channel</p>
+                <p class="text-[9px] text-slate-500 text-center">Messages · Members<br/><span class="text-red-600">投递（本质）</span></p>
+              </div>
+              <div class="cell bg-white p-2">
+                <p class="text-[10px] text-slate-700 text-center mb-1">agent</p>
+                <p class="text-[9px] text-slate-500 text-center">Messages · 队列<br/><span class="text-red-600">执行体（本质）</span></p>
+              </div>
+            </div>
+            <p class="text-[10px] text-slate-500 text-center pt-1">本质差异只有 2 处，其余全是重复</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">两个 <span class="font-mono text-xs">Manager</span> 逐字段同构，落盘、串行化、原子写各写一遍。真正的本质差异只有两处：投递是否异步有执行体、是否持有 agent 存活性。剩下的重复让每个新特性都要改两遍。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">抽出有序集合 + 原子落盘这一层（泛型），两个 manager 各自只在上面加自己的本质职责。channel 侧顺带补上缺失的 <span class="font-mono text-xs">Delete</span>（前端已有删除按钮，后端无对应方法）。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 落盘实现从 2 份降到 1 份</li>
+          <li>· 新特性只改一处，不再「两遍」</li>
+          <li>· <b>leverage</b>：<span class="font-mono text-xs">Collection[T]</span> 同时服务 channel / agent</li>
+          <li>· 补上 <span class="font-mono text-xs">Delete</span>，前端按钮不再指向空</li>
+        </ul>
+      </div>
+      <div class="rounded-lg border border-slate-300 bg-slate-100 p-4">
+        <p class="text-xs text-slate-600"><b>为什么是 Worth exploring 不是 Strong：</b>这是纯结构收益，<b>不改任何可观察行为</b>。而且泛型抽象一旦过度，会变成新的浅 module —— 它得先被 #1/#2 的真实需求压出来，不能凭空抽。建议排在 #1 之后。</p>
+      </div>
+    </article>
+
+    <!-- 5 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">5 · 单聊和群聊是两个输入框、三份 @解析、切换即丢草稿</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">ChannelView.tsx:74 · AgentView.tsx · main.go:378 · 切换 remount</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Worth exploring</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 三个地方各解析一遍 @</p>
+          <div class="space-y-2 pt-1">
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">前端 · 补全</p>
+              <p class="text-[10px] text-slate-600 font-mono">filtered = name.includes(q) || id.includes(q)</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">前端 · 插入</p>
+              <p class="text-[10px] text-slate-600 font-mono">'@' + name + ' '</p>
+            </div>
+            <div class="cell bg-red-50 border-red-300 p-2.5">
+              <p class="lbl text-red-600 mb-1">后端 · 解析</p>
+              <p class="text-[10px] text-red-800 font-mono">strings.Fields → 名字带空格即断</p>
+            </div>
+            <p class="text-[10px] text-red-600 pt-1">同一件事，三种语义，零共享</p>
+          </div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">切换代价</p>
+          <div class="space-y-1.5 pt-1 text-[11px] text-slate-700">
+            <p>· <b>未提交草稿丢失</b>（remount）</p>
+            <p>· 滚动位置重置</p>
+            <p>· <span class="font-mono text-[10px]">errors</span> / <span class="font-mono text-[10px]">tokenUsage</span> 不清，跨会话串味</p>
+            <p>· 已删除 agent 的气泡永久失色（<span class="font-mono text-[10px]">memberById</span> 失配）</p>
+          </div>
+          <div class="mt-3 pt-2 border-t border-slate-200">
+            <p class="text-[10px] text-slate-500">两个输入框 = 两套 textarea + mention 逻辑，<br/>只有一件事不同：群聊能 @，单聊不能。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">「发消息」这件事在两个视图里各写一遍，@语义在前端两处后端一处各写一遍且互不一致。切换会话时草稿和滚动丢失，跨会话的临时状态不清。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">抽一个 composer module，把「草稿 + 补全 + 校验 + 提交」收进去，群聊只多开一个「可提及」能力。<b>提及解析和 #1 的 Dispatch 共用同一份</b>，不再有第二套语义。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· @ 语义从 3 份降到 1 份（与 #1 共用）</li>
+          <li>· 草稿跨切换保留</li>
+          <li>· 新视图零成本复用输入能力</li>
+          <li>· <b>locality</b>：输入相关 bug 集中在一个 module</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 6 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">6 · 删除 agent 后，消息里的引用悬空</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:280 DeleteAgent · channel.RemoveMember 只清 members</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-slate-200 text-slate-700 font-semibold">Speculative</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 只清一半</p>
+          <pre class="mermaid">
+flowchart LR
+  D["DeleteAgent"] --> RM["RemoveMember<br/>清 Members ✅"]
+  D --> X1["Message.FromID<br/>仍指向已删 agent ❌"]
+  D --> X2["前端 errors/tokenUsage<br/>不清 ❌"]
+  D --> X3["stop() + close(done)<br/>删后仍可能 emit ⚠️"]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class X1,X2 leak
+          </pre>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">实际后果</p>
+          <div class="space-y-1.5 pt-1 text-[11px] text-slate-700">
+            <p>· 已删成员的历史气泡<b>永久失色</b>（<span class="font-mono text-[10px]">memberById</span> 查不到）</p>
+            <p>· 名字变成裸 ID 或空白</p>
+            <p>· 竞态窗口内可能对已删 agent 发事件</p>
+            <p class="text-slate-500 pt-1">历史消息本身是对的 —— 删人不该删历史。<br/>问题在<b>展示层假设了成员一定存在</b>。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· 历史消息永久可读，不依赖当前成员表</li>
+            <li>· 删人后 UI 不再有幽灵</li>
+            <li>· <b>locality</b>：参与者生命周期集中一处</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-slate-300 bg-slate-100 p-4">
+          <p class="text-xs text-slate-600"><b>为什么是 Speculative：</b>影响面小、能绕开（删人不频繁）。但它暴露了一个真问题：<span class="font-mono">Message</span> 里存的 <span class="font-mono">FromName</span> 是快照还是引用？现在是快照，所以只要展示层别去查成员表就没问题 —— 这条要先定，再决定要不要做。</p>
+        </div>
+      </div>
+    </article>
+
+  </section>
+
+  <!-- ============ Top recommendation ============ -->
+  <section id="top-recommendation">
+    <div class="rounded-xl deepfill p-8 text-slate-100 space-y-4">
+      <p class="lbl text-slate-400">Top recommendation</p>
+      <h2 class="font-serif text-3xl">先修 #1 的恒 false，再决定 #2 要不要改语义</h2>
+      <p class="text-slate-300 text-sm leading-relaxed max-w-3xl">
+        两件事的紧急度完全不同。
+        <b class="text-white">#1 是 bug 不是设计</b>：<span class="font-mono text-xs text-slate-200">isRelevantToRole</span> 的键和 <span class="font-mono text-xs text-slate-200">a.Role</span> 的值永远对不上，导致「不 @ 就没人回」。这在用户的真实体验里是「群聊是坏的」，但日志显示一切正常 —— 没有任何测试能发现，因为投递逻辑零覆盖。
+        把它抽成 deep module 的同时，这个 bug 自然会暴露成一个失败的用例。
+      </p>
+      <p class="text-slate-300 text-sm leading-relaxed max-w-3xl">
+        <b class="text-white">#2 是产品决策不是重构</b>：让 agent 看见彼此，会把「频道」从广播变成讨论。
+        <span class="font-mono text-xs text-slate-200">docs/design.md</span> 里写着「语义保持为广播，不做多轮收敛编排」—— 那是当时的决定。要不要改，得你说。
+        如果维持广播语义，#1 就够了；如果要真协作，先做 #2 再做 #1，因为 Dispatch 的接口形状取决于「群上下文从哪来」。
+      </p>
+      <a href="#candidates" class="inline-block text-xs text-emerald-300 hover:text-emerald-200">← 回到候选列表</a>
+    </div>
+  </section>
+
+  <footer class="text-xs text-slate-400 pt-6 border-t border-slate-200 space-y-1">
+    <p>词汇：module · interface · implementation · depth · seam · adapter · leverage · locality</p>
+    <p class="font-mono">internal/channel/channel.go · internal/agent/manager.go · main.go · src/components/{ChannelView,AgentView,Sidebar}.tsx · src/lib/presets.ts</p>
+  </footer>
+
+</main>
+</body>
+</html>

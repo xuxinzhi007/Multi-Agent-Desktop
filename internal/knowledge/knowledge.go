@@ -17,12 +17,15 @@ type Scope = string
 
 // Note 是一条知识笔记。
 type Note struct {
-	ID    string   `json:"id"`
-	Title string   `json:"title"`
-	Body  string   `json:"body"`
-	Tags  []string `json:"tags,omitempty"`
-	Scope Scope    `json:"scope,omitempty"`
-	At    int64    `json:"at"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	Tags      []string `json:"tags,omitempty"`
+	Scope     Scope    `json:"scope,omitempty"`
+	Source    string   `json:"source,omitempty"`    // manual / auto / imported
+	Related   []string `json:"related,omitempty"`   // 关联笔记 ID
+	At        int64    `json:"at"`
+	UpdatedAt int64    `json:"updatedAt,omitempty"`
 }
 
 // Query 是查询条件，零值表示不过滤。
@@ -111,6 +114,7 @@ func (s *fileStore) Upsert(n Note) (Note, error) {
 	if n.At == 0 {
 		n.At = time.Now().Unix()
 	}
+	n.UpdatedAt = time.Now().Unix()
 	if _, seen := s.notes[n.ID]; !seen {
 		s.order = append(s.order, n.ID)
 	}
@@ -258,4 +262,87 @@ func Render(notes []Note) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// MatchNotesForAgent 根据 agent 角色匹配相关知识。
+func MatchNotesForAgent(role string, notes []Note) []Note {
+	var matched []Note
+	seen := make(map[string]bool)
+
+	// 1. 全局知识
+	for _, n := range notes {
+		if n.Scope == "" || n.Scope == "global" {
+			matched = append(matched, n)
+			seen[n.ID] = true
+		}
+	}
+
+	// 2. 角色相关标签
+	roleKeywords := map[string][]string{
+		"后端": {"api", "database", "server", "backend", "sql", "服务", "数据库"},
+		"前端": {"ui", "frontend", "react", "css", "页面", "组件"},
+		"测试": {"test", "qa", "bug", "测试", "错误"},
+		"运维": {"deploy", "ops", "部署", "服务器", "监控"},
+		"全栈": {"api", "ui", "database", "deploy"},
+	}
+
+	keywords := roleKeywords[role]
+	if len(keywords) == 0 {
+		return matched
+	}
+
+	for _, n := range notes {
+		if seen[n.ID] {
+			continue
+		}
+		for _, tag := range n.Tags {
+			tagLower := strings.ToLower(tag)
+			for _, kw := range keywords {
+				if strings.Contains(tagLower, strings.ToLower(kw)) {
+					matched = append(matched, n)
+					seen[n.ID] = true
+					break
+				}
+			}
+			if seen[n.ID] {
+				break
+			}
+		}
+	}
+
+	return matched
+}
+
+// SearchNotes 全文搜索笔记。
+func SearchNotes(notes []Note, text string, limit int) []Note {
+	needle := strings.ToLower(strings.TrimSpace(text))
+	if needle == "" {
+		return notes
+	}
+
+	var out []Note
+	for _, n := range notes {
+		hay := strings.ToLower(n.Title + "\n" + n.Body + "\n" + strings.Join(n.Tags, " "))
+		if strings.Contains(hay, needle) {
+			out = append(out, n)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// ListNotesByTag 按标签列出笔记。
+func ListNotesByTag(notes []Note, tag string) []Note {
+	var out []Note
+	for _, n := range notes {
+		for _, t := range n.Tags {
+			if t == tag {
+				out = append(out, n)
+				break
+			}
+		}
+	}
+	return out
 }
