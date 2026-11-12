@@ -267,7 +267,7 @@ export default function AgentView(p: Props) {
           <textarea
             ref={taRef}
             value={input}
-            onChange={(e) => handleInputChange(e.target.value)
+            onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()

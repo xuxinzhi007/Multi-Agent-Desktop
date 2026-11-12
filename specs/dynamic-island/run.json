@@ -1,0 +1,9 @@
+{
+  "workflow": "change",
+  "feature": "dynamic-island",
+  "stage": 3,
+  "status": "working",
+  "question": "",
+  "reply": "",
+  "raw_request": "悬浮窗灵动岛改造：运行中显示任务摘要，错误红色脉冲+角标，展开面板动画，hover tooltip显示当前任务"
+}

@@ -110,6 +110,7 @@ type MiniAgentStatus struct {
 	Name   string `json:"name"`
 	Color  string `json:"color"`
 	Status string `json:"status"`
+	Task   string `json:"task,omitempty"` // 当前任务摘要
 }
 
 // MiniStatus 是迷你窗的完整状态。
@@ -130,9 +131,28 @@ func buildMiniStatus(mgr *agent.Manager) MiniStatus {
 			Name:   a.Name,
 			Color:  a.Color,
 			Status: string(a.Status),
+			Task:   extractTask(a),
 		})
 	}
 	return MiniStatus{Agents: out}
+}
+
+// extractTask 提取 agent 当前任务摘要。
+func extractTask(a *agent.Agent) string {
+	if a.Status != "running" && a.Status != "queued" {
+		return ""
+	}
+	// 从最后一条 user 消息提取
+	for i := len(a.Messages) - 1; i >= 0; i-- {
+		if a.Messages[i].Role == "user" {
+			text := a.Messages[i].Content
+			if len(text) > 40 {
+				return text[:40] + "…"
+			}
+			return text
+		}
+	}
+	return ""
 }
 
 // ListAgents 返回所有会话。

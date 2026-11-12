@@ -75,6 +75,8 @@ export interface MiniAgentStatus {
   name: string;
   color: string;
   status: string;
+  /** 当前任务摘要 */
+  task?: string;
 }
 
 /** MiniStatus 是迷你窗的完整状态。 */
