@@ -414,17 +414,14 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 
 // executeCLI 用外部 CLI agent 执行。
 func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text string) {
-	var runner interface {
-		Run(ctx context.Context, prompt string) (<-chan cli.Event, error)
+	runner, err := cli.NewCLIRunner(backend, m.workDir, "")
+	if err != nil {
+		m.finish(a, StatusError, err.Error())
+		return
 	}
 
-	switch backend {
-	case "claude":
-		runner = cli.NewClaudeRunner(m.workDir, "")
-	case "codex":
-		runner = cli.NewCodexRunner(m.workDir, "")
-	default:
-		m.finish(a, StatusError, "unknown backend: "+backend)
+	if !runner.Available() {
+		m.finish(a, StatusError, fmt.Sprintf("%s CLI not found in PATH", runner.Name()))
 		return
 	}
 

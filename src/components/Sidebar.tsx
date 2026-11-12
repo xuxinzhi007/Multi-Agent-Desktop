@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { ROLE_PRESETS } from '../lib/presets'
 import { Sidecar, type AgentView as Agent } from '../mygo'
+import CreateAgentModal from './CreateAgentModal'
 
 type Props = {
   agents: Agent[]
@@ -15,18 +15,7 @@ type Props = {
 }
 
 export default function Sidebar(p: Props) {
-  const [adding, setAdding] = useState(false)
-  const [name, setName] = useState('')
-  const [role, setRole] = useState(ROLE_PRESETS[0].role)
-  const [backend, setBackend] = useState('mock')
-
-  const submit = () => {
-    const n = name.trim()
-    if (!n) return
-    p.onCreate(n, role, backend)
-    setName('')
-    setAdding(false)
-  }
+  const [showCreateModal, setShowCreateModal] = useState(false)
 
   const running = p.agents.filter((a) => a.status === 'running').length
 
@@ -99,7 +88,7 @@ export default function Sidebar(p: Props) {
 
       {/* 列表 */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-2)' }}>
-        {p.agents.length === 0 && !adding && (
+        {p.agents.length === 0 && !showCreateModal && (
           <div className="c-empty" style={{ padding: 'var(--space-6) var(--space-3)' }}>
             还没有 agent
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
@@ -226,70 +215,13 @@ export default function Sidebar(p: Props) {
           )
         })}
 
-        {adding && (
-          <div
-            className="fade-up"
-            style={{
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-md)',
-              padding: 'var(--space-2)',
-              marginTop: 'var(--space-1)',
-            }}
-          >
-            <input
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') submit()
-                if (e.key === 'Escape') setAdding(false)
-              }}
-              placeholder="名字"
-              style={{ width: '100%', marginBottom: 6, fontSize: 'var(--text-sm)' }}
-            />
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              style={{ width: '100%', marginBottom: 7, fontSize: 'var(--text-xs)' }}
-            >
-              {ROLE_PRESETS.map((r) => (
-                <option key={r.name} value={r.role}>
-                  {r.name}
-                </option>
-              ))}
-            </select>
-            <select
-              value={backend}
-              onChange={(e) => setBackend(e.target.value)}
-              style={{ width: '100%', marginBottom: 7, fontSize: 'var(--text-xs)' }}
-            >
-              <option value="mock">Mock（内置）</option>
-              <option value="claude">Claude Code</option>
-              <option value="codex">Codex</option>
-            </select>
-            <div style={{ display: 'flex', gap: 5 }}>
-              <button className="c-btn c-btn--primary c-btn--sm" style={{ flex: 1 }} onClick={submit}>
-                创建
-              </button>
-              <button
-                className="c-btn c-btn--secondary c-btn--sm"
-                style={{ flex: 1 }}
-                onClick={() => setAdding(false)}
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* 底部 */}
       <div style={{ padding: 'var(--space-2)', borderTop: '1px solid var(--border-subtle)', display: 'grid', gap: 6 }}>
         <button
           className="c-btn c-btn--secondary c-btn--full"
-          onClick={() => setAdding(true)}
-          disabled={adding}
+          onClick={() => setShowCreateModal(true)}
         >
           <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
         </button>
@@ -301,6 +233,13 @@ export default function Sidebar(p: Props) {
           ─ 缩小到悬浮条
         </button>
       </div>
+
+      {/* 新建 Agent 弹窗 */}
+      <CreateAgentModal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onCreate={p.onCreate}
+      />
     </aside>
   )
 }

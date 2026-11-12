@@ -273,3 +273,21 @@ func drain(ch <-chan Event) []Event {
 
 // ioEOF 用于避免 unused import。
 var _ = io.EOF
+
+// Name 返回 runner 名称。
+func (r *ClaudeRunner) Name() string { return "claude" }
+
+// Available 检查 claude CLI 是否可用。
+func (r *ClaudeRunner) Available() bool {
+	_, err := exec.LookPath("claude")
+	return err == nil
+}
+
+// Name 返回 runner 名称。
+func (r *CodexRunner) Name() string { return "codex" }
+
+// Available 检查 codex CLI 是否可用。
+func (r *CodexRunner) Available() bool {
+	_, err := exec.LookPath("codex")
+	return err == nil
+}
