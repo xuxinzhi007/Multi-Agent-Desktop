@@ -241,13 +241,24 @@ export default function SettingsModal(p: Props) {
         )}
 
         <Field label="工作目录">
-          <input
-            value={dir}
-            onChange={(e) => setDir(e.target.value)}
-            className="mono"
-            style={{ width: '100%' }}
-            placeholder="/path/to/project"
-          />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={dir}
+              onChange={(e) => setDir(e.target.value)}
+              className="mono"
+              style={{ flex: 1 }}
+              placeholder="/path/to/project"
+            />
+            <button
+              className="c-btn c-btn--secondary c-btn--sm"
+              onClick={async () => {
+                const picked = await Sidecar.pickDirectory()
+                if (picked) setDir(picked)
+              }}
+            >
+              浏览…
+            </button>
+          </div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginTop: 4 }}>
             shell 命令在此执行
           </div>

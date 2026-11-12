@@ -239,14 +239,34 @@ func (s *Sidecar) IsAlwaysOnTop() bool {
 	return s.win.IsAlwaysOnTop()
 }
 
+// PickDirectory 弹出原生目录选择对话框。
+func (s *Sidecar) PickDirectory() string {
+	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Title:       "选择工作目录",
+		Directory:   true,
+		ButtonLabel: "选择",
+	})
+	if err != nil || len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
 // ToggleMiniWindow 显示/隐藏迷你悬浮窗。
 func (s *Sidecar) ToggleMiniWindow(show bool) bool {
-	// miniWin 在 main 里创建，这里通过包级变量访问
 	if miniWindowRef != nil {
 		if show {
 			miniWindowRef.Show()
+			// 隐藏主窗口
+			if s.win != nil {
+				s.win.Hide()
+			}
 		} else {
 			miniWindowRef.Hide()
+			// 显示主窗口
+			if s.win != nil {
+				s.win.Show()
+			}
 		}
 	}
 	return show
@@ -340,19 +360,23 @@ func main() {
 		})
 		sidecar.win = win
 
-		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景
+		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景、可拖动
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
-			Title:           "Agent Status",
-			Width:           300,
-			Height:          40,
+			Title:           "Agent 舰队",
+			Width:           360,
+			Height:          48,
 			Frameless:       true,
 			AlwaysOnTop:     true,
 			SkipTaskbar:     true,
 			Transparent:     true,
 			BackgroundColor: "#00000000",
+			DisableMove:     false, // 允许拖动
 			URL:             "/mini",
 		})
 		miniWindowRef = miniWin
+
+		// 初始隐藏悬浮窗，主窗口点击「缩小」才显示
+		miniWin.Hide()
 	})
 
 	if err := mygo.App.Run(); err != nil {

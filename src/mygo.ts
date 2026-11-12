@@ -147,6 +147,10 @@ export const Sidecar = {
   listAgents(): Promise<Agent[]> {
     return call("Sidecar.ListAgents");
   },
+  /** PickDirectory 弹出原生目录选择对话框。 */
+  pickDirectory(): Promise<string> {
+    return call("Sidecar.PickDirectory");
+  },
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
     return call("Sidecar.PromptAgent", req);

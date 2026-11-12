@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
-import type { Agent } from '../lib/mygo'
+import { Sidecar, type Agent } from '../mygo'
 
 type Props = {
   agents: Agent[]
@@ -207,9 +207,9 @@ export default function Sidebar(p: Props) {
                   p.onDelete(a.id)
                 }}
                 title="删除"
-                style={{ opacity: 0, width: 20, height: 20, fontSize: 14 }}
+                style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}
                 onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
-                onMouseLeave={(e) => (e.currentTarget.style.opacity = '0')}
+                onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.35')}
               >
                 ×
               </button>
@@ -267,13 +267,20 @@ export default function Sidebar(p: Props) {
       </div>
 
       {/* 底部 */}
-      <div style={{ padding: 'var(--space-2)', borderTop: '1px solid var(--border-subtle)' }}>
+      <div style={{ padding: 'var(--space-2)', borderTop: '1px solid var(--border-subtle)', display: 'grid', gap: 6 }}>
         <button
           className="c-btn c-btn--secondary c-btn--full"
           onClick={() => setAdding(true)}
           disabled={adding}
         >
           <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
+        </button>
+        <button
+          className="c-btn c-btn--ghost c-btn--full"
+          onClick={() => Sidecar.toggleMiniWindow(true)}
+          title="缩小到悬浮条"
+        >
+          ─ 缩小到悬浮条
         </button>
       </div>
     </aside>
