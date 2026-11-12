@@ -71,6 +71,10 @@ export default function AgentView(p: Props) {
     taRef.current?.focus()
   }, [p.agent?.id, mode])
 
+  const [showMentions, setShowMentions] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [selectedMentions, setSelectedMentions] = useState<string[]>([])
+
   if (!p.agent) {
     return (
       <div className="c-col" style={{ flex: 1 }}>
@@ -84,10 +88,6 @@ export default function AgentView(p: Props) {
       </div>
     )
   }
-
-  const [showMentions, setShowMentions] = useState(false)
-  const [mentionQuery, setMentionQuery] = useState('')
-  const [selectedMentions, setSelectedMentions] = useState<string[]>([])
 
   // 解析 @提及（支持多选）
   const parseMentions = (text: string): { targets: string[]; message: string } => {
