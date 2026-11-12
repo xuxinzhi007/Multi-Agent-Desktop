@@ -125,6 +125,10 @@ export const Sidecar = {
   info(): Promise<SystemInfo> {
     return call("Sidecar.Info");
   },
+  /** IsAlwaysOnTop 返回窗口是否置顶。 */
+  isAlwaysOnTop(): Promise<boolean> {
+    return call("Sidecar.IsAlwaysOnTop");
+  },
   /** ListAgents 返回所有会话。 */
   listAgents(): Promise<Agent[]> {
     return call("Sidecar.ListAgents");
@@ -136,6 +140,10 @@ export const Sidecar = {
   /** RunShell 执行 shell 命令。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
+  },
+  /** SetAlwaysOnTop 控制窗口置顶（悬浮）。 */
+  setAlwaysOnTop(v: boolean): Promise<boolean> {
+    return call("Sidecar.SetAlwaysOnTop", v);
   },
   /** SetLLMConfig 切换模型配置。 */
   setLLMConfig(cfg: Config): Promise<Config> {

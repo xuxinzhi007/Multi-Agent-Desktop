@@ -18,10 +18,21 @@ export default function AgentView(p: Props) {
   const [mode, setMode] = useState<'chat' | 'shell'>('chat')
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const pinnedToBottom = useRef(true)
+
+  // 跟踪用户是否在底部（决定是否自动跟随滚动）
+  const handleScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const threshold = 40 // px，距底部多少内算「在底部」
+    pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+  }
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && pinnedToBottom.current) {
+      el.scrollTop = el.scrollHeight
+    }
   }, [p.agent?.messages.length, p.streaming])
 
   useEffect(() => {
@@ -121,6 +132,7 @@ export default function AgentView(p: Props) {
       {/* 消息流 */}
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-2)' }}
       >
         {visible.length === 0 && !p.streaming && (

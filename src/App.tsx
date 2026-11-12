@@ -5,10 +5,12 @@ import Inspector, { type InspectorTab } from './components/Inspector'
 import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import { useSidecar } from './lib/useSidecar'
+import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useSidecar'
 
 export default function App() {
   const s = useSidecar()
+  useTheme() // 应用主题到 document.documentElement
   const [activeId, setActiveId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [shellOpen, setShellOpen] = useState(false)

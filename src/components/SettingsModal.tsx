@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PROVIDERS } from '../lib/presets'
+import { useTheme, type Theme } from '../lib/useTheme'
+import { Sidecar } from '../mygo'
 import type { LLMConfig } from '../lib/useSidecar'
 
 type Props = {
@@ -28,6 +30,8 @@ const DEFAULT_MODEL: Record<string, string> = {
 export default function SettingsModal(p: Props) {
   const [cfg, setCfg] = useState<LLMConfig>(p.llm)
   const [dir, setDir] = useState(p.workDir)
+  const { theme, setTheme } = useTheme()
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false)
 
   useEffect(() => {
     if (p.open) {
@@ -86,6 +90,84 @@ export default function SettingsModal(p: Props) {
             ×
           </button>
         </div>
+
+        <Field label="外观">
+          <div style={{ display: 'flex', gap: 4 }}>
+            {(['dark', 'light', 'system'] as Theme[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTheme(t)}
+                style={{
+                  flex: 1,
+                  padding: '7px 0',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: 'var(--text-sm)',
+                  fontWeight: theme === t ? 600 : 400,
+                  color: theme === t ? 'var(--accent-bright)' : 'var(--text-tertiary)',
+                  background: theme === t ? 'var(--accent-dim)' : 'var(--bg-surface)',
+                  border: `1px solid ${theme === t ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+                  transition: 'all var(--dur-fast) var(--ease)',
+                }}
+              >
+                {t === 'dark' ? '暗色' : t === 'light' ? '亮色' : '跟随系统'}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <Field label="窗口">
+          <button
+            onClick={() => {
+              const next = !alwaysOnTop
+              setAlwaysOnTop(next)
+              Sidecar.setAlwaysOnTop(next)
+            }}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '9px 12px',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-surface)',
+              border: `1px solid ${alwaysOnTop ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+              transition: 'all var(--dur-fast) var(--ease)',
+            }}
+          >
+            <span
+              style={{
+                fontSize: 'var(--text-base)',
+                color: alwaysOnTop ? 'var(--accent-bright)' : 'var(--text-primary)',
+                fontWeight: alwaysOnTop ? 600 : 400,
+              }}
+            >
+              悬浮窗口（置顶）
+            </span>
+            <span
+              style={{
+                width: 32,
+                height: 18,
+                borderRadius: 'var(--radius-full)',
+                background: alwaysOnTop ? 'var(--accent-primary)' : 'var(--border-default)',
+                position: 'relative',
+                transition: 'background var(--dur-fast) var(--ease)',
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  left: alwaysOnTop ? 16 : 2,
+                  width: 14,
+                  height: 14,
+                  borderRadius: 'var(--radius-full)',
+                  background: '#fff',
+                  transition: 'left var(--dur-fast) var(--ease)',
+                }}
+              />
+            </span>
+          </button>
+        </Field>
 
         <Field label="模型提供方">
           <div style={{ display: 'grid', gap: 4 }}>

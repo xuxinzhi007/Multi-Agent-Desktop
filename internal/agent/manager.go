@@ -242,20 +242,10 @@ func (a *Agent) stop() bool {
 	return true
 }
 
-type agentView struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
-	Role      string        `json:"role"`
-	Color     string        `json:"color"`
-	Status    Status        `json:"status"`
-	CreatedAt int64         `json:"createdAt"`
-	Messages  []llm.Message `json:"messages"`
-}
-
-func (a *Agent) snapshot() agentView {
+func (a *Agent) snapshot() Agent {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return agentView{
+	return Agent{
 		ID:        a.ID,
 		Name:      a.Name,
 		Role:      a.Role,

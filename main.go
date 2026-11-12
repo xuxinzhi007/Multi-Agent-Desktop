@@ -186,6 +186,22 @@ func (s *Sidecar) Info() SystemInfo {
 	}
 }
 
+// SetAlwaysOnTop 控制窗口置顶（悬浮）。
+func (s *Sidecar) SetAlwaysOnTop(v bool) bool {
+	if s.win != nil {
+		s.win.SetAlwaysOnTop(v)
+	}
+	return v
+}
+
+// IsAlwaysOnTop 返回窗口是否置顶。
+func (s *Sidecar) IsAlwaysOnTop() bool {
+	if s.win == nil {
+		return false
+	}
+	return s.win.IsAlwaysOnTop()
+}
+
 func main() {
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	var win *mygo.Window
@@ -195,8 +211,8 @@ func main() {
 		}
 		switch event {
 		case "agent.created":
-			if a, ok := data.(*agent.Agent); ok {
-				AgentCreated.Emit(win, *a)
+			if a, ok := data.(agent.Agent); ok {
+				AgentCreated.Emit(win, a)
 			}
 		case "agent.deleted":
 			if id, ok := data.(map[string]any)["id"].(string); ok {
