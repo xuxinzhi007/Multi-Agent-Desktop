@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>架构评审 · 悬浮窗与交互 (multi-agent-desktop)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+</script>
+<style>
+  .seam { stroke-dasharray: 5 5; }
+  .leak { stroke: #dc2626; stroke-width: 2; }
+  .ghost { opacity: .38; }
+  .tag { font-size: 10px; letter-spacing: .12em; }
+  .lbl { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+  .deepfill { background: linear-gradient(135deg,#0f172a,#1e293b); }
+  .cell { border:1px solid #cbd5e1; border-radius:6px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-6xl mx-auto px-8 py-14 space-y-14">
+
+  <header class="space-y-4">
+    <p class="lbl text-slate-400">Architecture review</p>
+    <h1 class="font-serif text-4xl tracking-tight">悬浮窗 · 拖动 · 点击</h1>
+    <p class="text-slate-500 text-sm">multi-agent-desktop · 2025-11-12 · 范围：<span class="font-mono">src/mini.tsx</span> · <span class="font-mono">mini.html</span> · <span class="font-mono">main.go</span> 窗口创建与焦点</p>
+    <p class="text-slate-600 text-sm max-w-3xl">依据：<span class="font-mono">mygo v0.9.0</span> 源码 <span class="font-mono">packages/bridge/src/bridge.ts:181-191</span> 与 <span class="font-mono">window.go</span> 的 WindowOptions 文档。ADR-0001 与本次无关。</p>
+    <div class="flex flex-wrap gap-5 text-xs text-slate-600 pt-3 border-t border-slate-200">
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 border border-slate-400 rounded-sm"></span>module</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#475569" class="seam"/></svg>seam</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#dc2626" stroke-width="2"/></svg>leakage</span>
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 deepfill rounded-sm"></span>deep module</span>
+    </div>
+  </header>
+
+  <!-- ============ 基线：拖动的真实机制 ============ -->
+  <section class="space-y-5">
+    <h2 class="font-serif text-2xl">基线：拖动不是 CSS 属性，是「拦截 mousedown」</h2>
+
+    <div class="grid md:grid-cols-2 gap-6">
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">mygo 的实际判定</p>
+        <pre class="mermaid">
+flowchart TB
+  MD["mousedown（捕获阶段）"] --> C1{"button === 0 ?"}
+  C1 -->|否| STOP1[什么都不做]
+  C1 -->|是| C2{"appRegion(target) === 'drag' ?"}
+  C2 -->|否| STOP2[什么都不做]
+  C2 -->|是| C3{"target.closest(INTERACTIVE) ?"}
+  C3 -->|"是（按钮/输入框/链接…）"| STOP3[什么都不做]
+  C3 -->|否| PD["preventDefault()"]
+  PD --> N["notify('drag') → 原生开始拖"]
+  style C2 fill:#fef2f2,stroke:#dc2626
+  style PD fill:#fef2f2,stroke:#dc2626
+        </pre>
+        <p class="text-[11px] text-slate-500 mt-3">
+          <span class="font-mono">INTERACTIVE</span> = <span class="font-mono text-[10px]">input,textarea,select,button,a[href],summary,label,[contenteditable],video[controls],audio[controls]</span>
+        </p>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">两个必然后果</p>
+        <div class="space-y-3">
+          <div class="rounded border border-red-200 bg-red-50 p-3">
+            <p class="text-[11px] font-semibold text-red-900 mb-1">① 拖动区域内的点击被 preventDefault 吃掉</p>
+            <p class="text-[11px] text-red-800 leading-relaxed">
+              <span class="font-mono text-[10px]">--app-region: drag</span> 覆盖的区域，只要目标不是 INTERACTIVE 元素，
+              <span class="font-mono text-[10px]">mousedown</span> 就被 <span class="font-mono text-[10px]">preventDefault()</span>。
+              于是 <span class="font-mono text-[10px]"><code>&lt;div onClick&gt;</code></span> 的点击<b>永远不触发</b>——
+              因为 React 的单击也依赖 mousedown/up 序列，而这里被拦了。
+            </p>
+          </div>
+          <div class="rounded border border-amber-200 bg-amber-50 p-3">
+            <p class="text-[11px] font-semibold text-amber-900 mb-1">② 拖动区域是「继承」语义，不是包围盒</p>
+            <p class="text-[11px] text-amber-800 leading-relaxed">
+              <span class="font-mono text-[10px]">--app-region</span> 用 <span class="font-mono text-[10px]">getComputedStyle(el)</span> 读，
+              不是 <span class="font-mono text-[10px]">-webkit-app-region</span> 那种向上走父链的语义。
+              写了 <span class="font-mono text-[10px]">drag</span> 的容器，<b>它的所有后代都读不到，除非自己再写一次</b>。
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg border border-red-200 bg-red-50 p-5">
+      <p class="lbl text-red-700 mb-2">已证实 · 主窗口完全无法拖动</p>
+      <p class="text-sm text-red-900 leading-relaxed">
+        主窗口是 <span class="font-mono text-xs">Frameless: true</span>（<span class="font-mono text-xs">main.go:999</span>），
+        但 <span class="font-mono text-xs">grep app-region src/</span> 只有 <span class="font-mono text-xs">mini.tsx</span> 两处命中。
+        <b>主窗口整页没有任何 drag 区域</b> —— 它没有标题栏，也没有可拖的地方。
+        这不是「体验不好」，是它只能靠系统快捷键或别的窗口移。
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ Candidates ============ -->
+  <section id="candidates" class="space-y-12">
+
+    <!-- 1 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">1 · 状态点既是拖动手柄又是点击目标，两者互斥</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">src/mini.tsx:124 --app-region:drag 放在根节点 · :165-171 状态点的 onClick</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · drag 覆盖整条，点击被吃掉</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-red-400 bg-red-50 p-2 relative">
+              <span class="absolute top-1 right-2 text-[8px] text-red-600 font-mono">--app-region: drag</span>
+              <p class="text-[10px] text-red-800 mb-2">根 div（整条 380×52）</p>
+              <div class="space-y-1">
+                <div class="rounded bg-white border border-slate-300 p-1.5 flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
+                  <span class="text-[9px] text-slate-600">状态点</span>
+                  <span class="ml-auto text-[8px] text-red-600">onClick 不触发</span>
+                </div>
+                <div class="rounded bg-white border border-slate-300 p-1.5 text-[9px] text-slate-600">「舰队」文字 · 统计文字</div>
+                <div class="flex gap-1">
+                  <div class="rounded bg-white border border-emerald-400 p-1 px-2 text-[9px]">按钮</div>
+                  <div class="rounded bg-white border border-emerald-400 p-1 px-2 text-[9px]">按钮</div>
+                  <span class="text-[8px] text-emerald-700 self-center">button → 可点</span>
+                </div>
+              </div>
+            </div>
+            <p class="text-[10px] text-red-700 leading-relaxed pt-1">
+              状态点是 <span class="font-mono">&lt;div onClick&gt;</span>，不是 <span class="font-mono">button</span>，
+              因此 <b>closest(INTERACTIVE) 为 false</b> → mousedown 被拦 → 点击永远不生效。
+              拖和点抢同一块区域。
+            </p>
+          </div>
+        </div>
+
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 手柄与点击面分离</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-emerald-500 bg-emerald-50 p-2 relative">
+              <div class="flex items-center gap-1.5 mb-1">
+                <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-200 text-emerald-900 font-mono">⇔ drag</span>
+                <span class="text-[9px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">click</span>
+              </div>
+              <div class="rounded bg-white border border-slate-300 p-1.5 flex items-center gap-1.5 mb-1">
+                <span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
+                <span class="text-[9px] text-slate-600">状态点</span>
+                <span class="ml-auto text-[8px] text-emerald-700">button · 可点</span>
+              </div>
+              <div class="rounded bg-white border border-emerald-300 p-1.5 text-[9px] text-emerald-800">空白拖动条</div>
+            </div>
+            <div class="text-[10px] text-slate-700 leading-relaxed space-y-1 pt-1">
+              <p>· 可交互元素一律用 <span class="font-mono">button</span>（进 INTERACTIVE 白名单）</p>
+              <p>· <span class="font-mono">--app-region: drag</span> 只给专门的空白手柄区</p>
+              <p>· 状态点移出 drag 容器，或显式写 <span class="font-mono">no-drag</span></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">drag 区覆盖整条悬浮栏，而状态点用 <span class="font-mono text-xs">div + onClick</span> 实现。mygo 的判定只豁免 <span class="font-mono text-xs">button/input/a</span> 等标签，<span class="font-mono text-xs">div</span> 不在白名单，于是 mousedown 被 <span class="font-mono text-xs">preventDefault</span>，点击丢失。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把「窗口手柄」和「内容」做成两个明确的 module：一个 <span class="font-mono text-xs">DragHandle</span> 只负责拖，一个交互面负责点。所有可点元素用 <span class="font-mono text-xs">button</span>，drag 只覆盖空白区。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 点击和拖动不再互斥，各自独立</li>
+          <li>· <b>locality</b>：「能拖哪」集中在一处，不再散落</li>
+          <li>· 主窗口顺带补上拖动手柄（现在完全没有）</li>
+          <li>· 可测：手柄区域是显式元素，可断言其存在</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 2 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">2 · 单击和双击绑到同一动作，且点击会隐藏窗口</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">src/mini.tsx:166-168 · main.go:718 FocusAgent 里的 miniWindowRef.Hide()</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 一次点击，窗口消失</p>
+          <pre class="mermaid">
+sequenceDiagram
+  participant U as 用户
+  participant M as 悬浮窗
+  participant S as Sidecar
+  participant W as 主窗口
+  U->>M: 单击状态点（想做点什么）
+  Note over M: onClick 触发（若未被 drag 拦）
+  M->>S: focusAgent(id)
+  S->>W: Show() + Focus()
+  S->>M: Hide()
+  Note over U,M: 悬浮窗没了，主窗口弹到前面
+  U->>U: 我只是想看一眼状态…
+          </pre>
+          <p class="text-[10px] text-red-600 mt-2">单击 = 双击 = 跳主窗并隐藏自己。没有任何「轻量交互」的余地。</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 语义分层</p>
+          <div class="space-y-2 pt-1">
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">hover</p>
+              <p class="text-[10px] text-slate-600">显示 tooltip · 就地预览，不改变任何状态</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">单击</p>
+              <p class="text-[10px] text-slate-600">选中该 agent（就地高亮），<b class="text-emerald-700">不隐藏窗口</b></p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">双击 / 明确按钮</p>
+              <p class="text-[10px] text-slate-600">跳转主窗口并隐藏悬浮窗</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">右键</p>
+              <p class="text-[10px] text-slate-600 text-red-700">现在是「直接 stopAgent」，无确认 —— 危险动作绑在右键</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">onClick</span> 和 <span class="font-mono text-xs">onDoubleClick</span> 绑同一个函数（<span class="font-mono text-xs">mini.tsx:166-168</span>），而且这个函数会 <span class="font-mono text-xs">Hide()</span> 悬浮窗。右键直接 <span class="font-mono text-xs">stopAgent</span>，零确认。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把「查看 / 选中 / 跳转 / 停止」拆成四个不同意图，各自对应各自的交互。停止类动作必须有确认或撤销。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 看一眼状态不必丢窗口</li>
+          <li>· 危险动作不再藏在右键里</li>
+          <li>· <b>leverage</b>：一套意图模型，两处视图共用</li>
+          <li>· 可测：意图与动作的映射是纯数据</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 3 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">3 · 展开是「改窗口高度」，窗口和内容没有共同的事实源</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">src/mini.tsx:79-82 ResizeMiniWindow · :317-328 maxHeight 过渡</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 两套尺寸各算各的</p>
+          <div class="space-y-2 pt-1">
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">React 算</p>
+              <p class="text-[10px] text-slate-600 font-mono">52 + min(n*44+24, 320)</p>
+              <p class="text-[10px] text-red-600 mt-1">→ SetContentSize(w, h)</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">CSS 算</p>
+              <p class="text-[10px] text-slate-600 font-mono">maxHeight: expanded ? 280 : 0</p>
+              <p class="text-[10px] text-slate-600 mt-1">过渡 0.3s cubic-bezier</p>
+            </div>
+            <div class="rounded border border-red-300 bg-red-50 p-2">
+              <p class="text-[10px] text-red-800 leading-relaxed">
+                窗口<b>瞬变</b>（SetContentSize 无过渡），内容<b>渐变</b>（0.3s）。
+                两者错位 → 展开瞬间窗口已到位、内容还没长出来 = 白块；收起时内容还在、窗口已缩 = 裁切。
+              </p>
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 一个尺寸源</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-slate-800 bg-slate-900 p-2.5">
+              <p class="lbl text-slate-400 mb-1">内容定高</p>
+              <p class="text-[10px] text-slate-100 font-mono">FitContent: true</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="text-[10px] text-slate-600">窗口跟着内容走，不再由 JS 反算高度</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="text-[10px] text-slate-600">上限交给 <span class="font-mono">MaxHeight</span></p>
+            </div>
+            <p class="text-[10px] text-slate-500 pt-1">
+              mygo 的 <span class="font-mono">FitContent</span> 文档：「sizes the page area to its page's content, and follows it as it changes」
+              —— 正是这个场景。
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">展开高度由 React 用 <span class="font-mono text-xs">n*44+24</span> 估算后调 <span class="font-mono text-xs">SetContentSize</span>，CSS 另用 <span class="font-mono text-xs">maxHeight:280</span> 做过渡。两套常数、两种时序，必然错位。而且 <span class="font-mono text-xs">320</span> / <span class="font-mono text-xs">280</span> 两个魔数互不相干。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">让内容定高：窗口用 <span class="font-mono text-xs">FitContent</span> 跟随内容，上限用 <span class="font-mono text-xs">MaxHeight</span>。React 不再调 <span class="font-mono text-xs">ResizeMiniWindow</span>。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 展开/收起无白块、无裁切</li>
+          <li>· 删掉 <span class="font-mono text-xs">ResizeMiniWindow</span> 与两个魔数</li>
+          <li>· 内容增减自动跟随，不用重算</li>
+          <li>· <b>locality</b>：尺寸只有一个来源</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 4 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">4 · 一个位置都记不住，StateKey 根本没设</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:994-1005 WindowOptions 无 StateKey</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 每次重启回到原点</p>
+          <div class="rounded border border-slate-300 bg-white p-3 relative h-40">
+            <p class="text-[9px] text-slate-400 absolute top-2 left-2">屏幕</p>
+            <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-24 h-4 rounded bg-slate-300 border border-slate-400 flex items-center justify-center">
+              <span class="text-[8px] text-slate-600">悬浮窗（居中）</span>
+            </div>
+            <div class="absolute bottom-2 right-2 text-[8px] text-red-600 text-right">
+              用户拖到右下角<br/>→ 重启 → 回到中间
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-600 mt-2">
+            主窗口有 <span class="font-mono">StateKey: "main"</span>，
+            <b class="text-red-600">悬浮窗没有</b>。同一个应用，两个窗口两套标准。
+          </p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 记住位置，且不出屏</p>
+          <div class="rounded border border-emerald-400 bg-emerald-50 p-3 text-[11px] text-emerald-900 font-mono leading-relaxed">
+            StateKey: "mini"<br/>
+            Panel: true<br/>
+            CornerRadius: 24<br/>
+            <span class="text-emerald-700/70">// 位置/尺寸/展开态自动恢复</span>
+          </div>
+          <p class="text-[10px] text-slate-600 mt-3">
+            mygo 文档：<span class="font-mono">StateKey</span> 记住位置、尺寸，
+            且「as long as it would show on a connected display」—— 换显示器不会跑到屏外。
+          </p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">悬浮窗每次启动都在默认位置，用户拖到哪都不被记住。展开状态也不持久化。<span class="font-mono text-xs">AlwaysOnTop + SkipTaskbar</span> 已配，却漏了 <span class="font-mono text-xs">StateKey</span>。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">加 <span class="font-mono text-xs">StateKey: "mini"</span>。同时 <span class="font-mono text-xs">Panel: true</span> 更贴合「启动器式浮层」的定位：跨 Space、压全屏应用、不抢焦点。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· 拖到哪就在哪，重启不丢</li>
+            <li>· <span class="font-mono text-xs">Panel</span> 修掉「跨桌面就看不见」</li>
+            <li>· 与主窗口同一套持久化约定</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="lbl text-amber-700 mb-2">注意</p>
+          <p class="text-xs text-amber-900 leading-relaxed"><span class="font-mono">Panel: true</span> 在 macOS 上「不激活 app 就给键盘」，正是浮层想要的；
+          但它<b>不能最小化/最大化全屏</b>，要确认没和现有 <span class="font-mono">ToggleMiniWindow</span> 的 Show/Hide 逻辑冲突。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- 5 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">5 · 动画是状态缺失的补丁：时间要从事件里来</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">src/mini.tsx:23-35 startTimes · :100-107 formatElapsed · 无限 pulse</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Worth exploring</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 前端在猜后端的状态</p>
+          <div class="space-y-2 pt-1">
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">startedAt</p>
+              <p class="text-[10px] text-slate-600">前端首次看到 running 时打时间戳</p>
+              <p class="text-[10px] text-red-600 mt-1">→ 悬浮窗晚开就少算，切窗口就重算</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">lastOutput</p>
+              <p class="text-[10px] text-slate-600">拼 agentDelta，只留末 100 字符</p>
+              <p class="text-[10px] text-red-600 mt-1">→ 无标点边界，截断处难看</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">errorMsg</p>
+              <p class="text-[10px] text-slate-600">前端硬编码 '执行出错'</p>
+              <p class="text-[10px] text-red-600 mt-1">→ 真实错误不显示</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="lbl text-slate-400 mb-1">动画</p>
+              <p class="text-[10px] text-slate-600 font-mono">pulse 1s infinite / errorPulse 0.8s infinite</p>
+              <p class="text-[10px] text-red-600 mt-1">→ 一直闪，长任务看着累</p>
+            </div>
+          </div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 后端给事实，前端只呈现</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-slate-800 bg-slate-900 p-2.5">
+              <p class="text-[10px] text-slate-100 font-mono leading-relaxed">MiniAgentStatus &#123;<br/>&nbsp;&nbsp;Status · StartedAt · ErrMsg<br/>&nbsp;&nbsp;LastOutput · QueueLen<br/>&#125;</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="text-[10px] text-slate-600">时间戳由 agent 自己记，窗口晚开也准</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="text-[10px] text-slate-600">错误原文透传，不硬编码</p>
+            </div>
+            <div class="cell bg-white p-2.5">
+              <p class="text-[10px] text-slate-600">运行中呼吸 2–3s 缓动，非 1s 闪</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">计时、错误文案、输出片段全靠前端从增量事件里<strong>猜</strong>。<span class="font-mono text-xs">MiniStatus</span> 这个 interface 少了三个字段，于是每个消费者都要自己重建一遍，且重建结果不一致。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把 <span class="font-mono text-xs">StartedAt</span> / <span class="font-mono text-xs">ErrMsg</span> / <span class="font-mono text-xs">LastOutput</span> 加到 <span class="font-mono text-xs">MiniAgentStatus</span>，由 agent 层维护。前端删掉 <span class="font-mono text-xs">startTimes</span> / <span class="font-mono text-xs">lastOutputs</span> 两个 ref 和所有硬编码文案。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· 时间准确，与窗口开没开无关</li>
+          <li>· 真实错误可见，不再「执行出错」</li>
+          <li>· 删掉两个 ref + 三处硬编码</li>
+          <li>· <b>leverage</b>：一个 interface 服务主窗与悬浮窗</li>
+        </ul>
+      </div>
+    </article>
+
+    <!-- 6 -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">6 · 悬浮窗和主窗是两个前端应用，共享零个 module</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">src/main.tsx vs src/mini.tsx · 各自 createRoot · 颜色硬编码</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-slate-200 text-slate-700 font-semibold">Speculative</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 两套并行</p>
+          <div class="grid grid-cols-2 gap-3 pt-1">
+            <div class="cell bg-white p-2">
+              <p class="lbl text-slate-400 mb-1 text-center">主窗</p>
+              <p class="text-[9px] text-slate-600 text-center leading-relaxed">设计 token<br/>~/120 个 CSS 变量<br/>useTheme<br/>AgentView/ChannelView</p>
+            </div>
+            <div class="cell bg-red-50 border-red-300 p-2">
+              <p class="lbl text-red-600 mb-1 text-center">悬浮窗</p>
+              <p class="text-[9px] text-red-800 text-center leading-relaxed">无 token<br/>色值全硬编码<br/>无 useTheme<br/>独立实现</p>
+            </div>
+          </div>
+          <p class="text-[10px] text-red-700 mt-2 leading-relaxed">
+            <span class="font-mono">rgba(15,17,26,0.92)</span> ×3 · <span class="font-mono">#4d8cf0</span> · <span class="font-mono">#e8a33d</span> ·
+            <span class="font-mono">#e5534b</span> … <b>主窗换主题，悬浮窗不跟</b>。
+          </p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 共享一层</p>
+          <div class="space-y-2 pt-1">
+            <div class="rounded border-2 border-slate-800 bg-slate-900 p-2.5">
+              <p class="text-[10px] text-slate-100 font-mono">status module（共享）</p>
+            </div>
+            <div class="flex gap-2 justify-center text-slate-400">↓</div>
+            <div class="grid grid-cols-2 gap-2">
+              <div class="cell bg-white p-2 text-[9px] text-slate-600 text-center">主窗视图</div>
+              <div class="cell bg-white p-2 text-[9px] text-slate-600 text-center">悬浮窗视图</div>
+            </div>
+            <p class="text-[10px] text-slate-500 pt-1 text-center">+ 共享 token</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-300 bg-slate-100 p-4">
+        <p class="text-xs text-slate-600"><b>为什么是 Speculative：</b>色值硬编码不影响功能，只是主题不同步。真正的价值在「同一份状态模型」—— 那是候选 #5 已经覆盖的。等 #5 做完，这层共享自然浮现，现在单独做会过度设计。</p>
+      </div>
+    </article>
+
+  </section>
+
+  <!-- ============ Top recommendation ============ -->
+  <section id="top-recommendation">
+    <div class="rounded-xl deepfill p-8 text-slate-100 space-y-4">
+      <p class="lbl text-slate-400">Top recommendation</p>
+      <h2 class="font-serif text-3xl">先 #1（拖动吞点击），再 #3（尺寸错位）</h2>
+      <p class="text-slate-300 text-sm leading-relaxed max-w-3xl">
+        <b class="text-white">#1 是根因，不是手感问题。</b>你感觉「拖动和点击总有问题」，原因是这两件事被绑在同一块区域且互斥：
+        <span class="font-mono text-xs text-slate-200">--app-region: drag</span> 覆盖整条状态栏，mygo 对非 <span class="font-mono text-xs text-slate-200">button</span> 元素
+        直接 <span class="font-mono text-xs text-slate-200">preventDefault()</span>，于是状态点的 <span class="font-mono text-xs text-slate-200">onClick</span> 被吃掉。
+        顺带发现<b class="text-white">主窗口根本没有拖动手柄</b>（也是 Frameless，但没有一处 drag）。
+      </p>
+      <p class="text-slate-300 text-sm leading-relaxed max-w-3xl">
+        <b class="text-white">#3 是你说的「动画体验不好」。</b>窗口高度是<span class="text-white">瞬变</span>的，
+        内容高度是<span class="text-white">渐变</span>的，两者各有各的魔数（320 / 280）。错位就产生白块和裁切。
+        换成 mygo 的 <span class="font-mono text-xs text-slate-200">FitContent</span>，让内容定高，这两个魔数一起消失。
+      </p>
+      <p class="text-slate-400 text-xs">#2 #4 各半天可完成，建议与 #1 同批。#5 依赖 agent 层加字段。#6 等 #5 完再说。</p>
+      <a href="#candidates" class="inline-block text-xs text-emerald-300 hover:text-emerald-200">← 回到候选列表</a>
+    </div>
+  </section>
+
+  <footer class="text-xs text-slate-400 pt-6 border-t border-slate-200 space-y-1">
+    <p>词汇：module · interface · implementation · depth · seam · adapter · leverage · locality</p>
+    <p class="font-mono">src/mini.tsx · mini.html · main.go:993-1005 · main.go:690-735 · mygo packages/bridge/src/bridge.ts:104-191</p>
+  </footer>
+
+</main>
+</body>
+</html>

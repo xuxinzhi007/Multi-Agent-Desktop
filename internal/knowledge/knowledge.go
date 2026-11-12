@@ -12,8 +12,15 @@ import (
 	"time"
 )
 
-// Scope 是笔记归属：全局（""）或某个 agent ID。
+// Scope 是笔记归属：全局（""）、agent 私有（agentID）、频道（channel:xxx）。
 type Scope = string
+
+// Scope 常量。
+const (
+	ScopeGlobal  = ""           // 全局（兼容现状）
+	ScopeAgent   = "agent:"     // agent 私有前缀
+	ScopeChannel = "channel:"   // 频道私有前缀
+)
 
 // Note 是一条知识笔记。
 type Note struct {
@@ -303,9 +310,9 @@ func ViewFromNotes(notes []Note, agentID, role string, knowledgeIDs []string, re
 		}
 	}
 
-	// 1.2 agent 私有的
+	// 1.2 agent 私有的（agent:xxx 前缀）
 	for _, n := range notes {
-		if n.Scope == agentID && !seen[n.ID] {
+		if n.Scope == ScopeAgent+agentID && !seen[n.ID] {
 			matched = append(matched, n)
 			seen[n.ID] = true
 		}
@@ -313,7 +320,7 @@ func ViewFromNotes(notes []Note, agentID, role string, knowledgeIDs []string, re
 
 	// 1.3 全局的
 	for _, n := range notes {
-		if (n.Scope == "" || n.Scope == "global") && !seen[n.ID] {
+		if (n.Scope == ScopeGlobal || n.Scope == "global") && !seen[n.ID] {
 			matched = append(matched, n)
 			seen[n.ID] = true
 		}
