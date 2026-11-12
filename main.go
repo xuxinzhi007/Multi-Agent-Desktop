@@ -412,6 +412,35 @@ func (s *Sidecar) ToggleMiniWindow(show bool) bool {
 	return show
 }
 
+// ResizeMiniWindow 调整迷你悬浮窗大小。
+func (s *Sidecar) ResizeMiniWindow(height int) {
+	if miniWindowRef != nil {
+		w, _ := miniWindowRef.ContentSize()
+		miniWindowRef.SetContentSize(w, height)
+	}
+}
+
+// FocusAgent 聚焦主窗口并切换到指定 agent。
+func (s *Sidecar) FocusAgent(agentId string) {
+	if s.win != nil {
+		s.win.Show()
+		s.win.Focus()
+	}
+	if miniWindowRef != nil {
+		miniWindowRef.Hide()
+	}
+	// 发送事件让前端切换 agent
+	AgentFocused.Emit(s.win, AgentFocusedEvent{AgentID: agentId})
+}
+
+// AgentFocusedEvent 是聚焦 agent 事件。
+type AgentFocusedEvent struct {
+	AgentID string `json:"agentId"`
+}
+
+// AgentFocused 事件。
+var AgentFocused = mygo.NewEvent[AgentFocusedEvent]("agent.focused")
+
 // miniWindowRef 包级引用，main 里赋值。
 var miniWindowRef *mygo.Window
 

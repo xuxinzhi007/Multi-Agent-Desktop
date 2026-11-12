@@ -4,6 +4,11 @@ import { call, event } from "mygo-runtime";
 
 // ---- Types ----
 
+/** AgentFocusedEvent 是聚焦 agent 事件。 */
+export interface AgentFocusedEvent {
+  agentId: string;
+}
+
 /**
  * ListAgents 返回所有会话。
  * AgentView 是前端可见的会话视图（不含锁，可安全值拷贝）。
@@ -167,6 +172,10 @@ export const Sidecar = {
   deleteAgent(id: string): Promise<boolean> {
     return call("Sidecar.DeleteAgent", id);
   },
+  /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
+  focusAgent(agentId: string): Promise<void> {
+    return call("Sidecar.FocusAgent", agentId);
+  },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
     return call("Sidecar.GetLLMConfig");
@@ -201,6 +210,10 @@ export const Sidecar = {
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
     return call("Sidecar.PromptAgent", req);
+  },
+  /** ResizeMiniWindow 调整迷你悬浮窗大小。 */
+  resizeMiniWindow(height: number): Promise<void> {
+    return call("Sidecar.ResizeMiniWindow", height);
   },
   /** RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。 */
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
@@ -253,4 +266,6 @@ export const events = {
   workdir: event<WorkDirEvent>("workdir"),
   /** MiniStatusEvent 事件，推给悬浮窗。 */
   miniStatus: event<MiniStatus>("mini.status"),
+  /** AgentFocused 事件。 */
+  agentFocused: event<AgentFocusedEvent>("agent.focused"),
 } as const;

@@ -20,8 +20,9 @@ function MiniApp() {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const expandedRef = useRef<HTMLDivElement>(null)
 
-  // 记录任务开始时间
+  // 记录任务开始时间和最新输出
   const startTimes = useRef<Record<string, number>>({})
+  const lastOutputs = useRef<Record<string, string>>({})
 
   useEffect(() => {
     const unsub = events.miniStatus.on((s) => {
@@ -40,10 +41,19 @@ function MiniApp() {
           ...a,
           startedAt: startTimes.current[a.id],
           errorMsg: a.status === 'error' ? prev?.errorMsg || '执行出错' : undefined,
-          lastOutput: prev?.lastOutput,
+          lastOutput: lastOutputs.current[a.id] || prev?.lastOutput,
         }
       })
       setStatus({ agents })
+    })
+
+    // 订阅流式输出
+    const unsubDelta = events.agentDelta.on(({ id, delta }) => {
+      lastOutputs.current[id] = (lastOutputs.current[id] || '') + delta
+      // 只保留最后 100 字符
+      if (lastOutputs.current[id].length > 100) {
+        lastOutputs.current[id] = lastOutputs.current[id].slice(-100)
+      }
     })
 
     Sidecar.listAgents().then((agents) => {
@@ -57,14 +67,16 @@ function MiniApp() {
         })),
       })
     })
-    return unsub
+    return () => {
+      unsub()
+      unsubDelta()
+    }
   }, [])
 
   // 展开时调整窗口高度
   useEffect(() => {
-    const height = expanded ? 52 + Math.min(status.agents.length * 44 + 20, 300) : 52
-    // 通过 CSS 让内容自然撑开，但窗口高度需要通知主窗口
-    window.parent.postMessage({ type: 'resize', height }, '*')
+    const height = expanded ? 52 + Math.min(status.agents.length * 44 + 24, 320) : 52
+    Sidecar.resizeMiniWindow(height)
   }, [expanded, status.agents.length])
 
   const running = status.agents.filter((a) => a.status === 'running').length
@@ -91,8 +103,7 @@ function MiniApp() {
   // 双击状态点：聚焦主窗口并切换到该 agent
   const handleAgentClick = (agentId: string) => {
     setSelectedAgent(agentId)
-    // 通知主窗口切换 agent
-    window.parent.postMessage({ type: 'focus-agent', agentId }, '*')
+    Sidecar.focusAgent(agentId)
   }
 
   // 右键菜单
@@ -355,6 +366,11 @@ function MiniApp() {
                 {a.task && (
                   <div style={{ fontSize: 10, color: '#6e7789', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {a.task}
+                  </div>
+                )}
+                {a.lastOutput && a.status === 'running' && (
+                  <div style={{ fontSize: 10, color: '#a4adbd', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: 'italic' }}>
+                    {a.lastOutput}
                   </div>
                 )}
                 {a.errorMsg && a.status === 'error' && (
