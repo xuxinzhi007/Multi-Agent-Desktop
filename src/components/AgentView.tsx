@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { AgentView as Agent, Message } from '../mygo'
 
 type Props = {
@@ -316,7 +318,7 @@ export default function AgentView(p: Props) {
                 ? '输入 shell 命令，回车执行'
                 : `给 ${p.agent.name} 发消息…`
             }
-            rows={2}
+            rows={1}
             className={mode === 'shell' ? 'mono' : ''}
             style={{
               width: '100%',
@@ -326,6 +328,14 @@ export default function AgentView(p: Props) {
               padding: '11px 13px 4px',
               lineHeight: 'var(--leading-normal)',
               fontSize: 'var(--text-md)',
+              minHeight: 24,
+              maxHeight: 120,
+              overflowY: 'auto',
+            }}
+            onInput={(e) => {
+              const target = e.target as HTMLTextAreaElement
+              target.style.height = 'auto'
+              target.style.height = Math.min(target.scrollHeight, 120) + 'px'
             }}
           />
 
@@ -734,13 +744,15 @@ function Bubble({ m, color, live, tokens, onContextMenu }: { m: Message; color: 
           style={{
             fontSize: 'var(--text-md)',
             lineHeight: 1.7,
-            whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
             color: isUser ? 'var(--text-primary)' : isRouted ? 'var(--text-secondary)' : 'var(--text-secondary)',
             fontStyle: isRouted ? 'italic' : 'normal',
           }}
+          className="markdown-body"
         >
-          {displayContent}
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {displayContent}
+          </ReactMarkdown>
         </div>
         {tokens && (tokens.in > 0 || tokens.out > 0) && (
           <div
