@@ -18,9 +18,39 @@ type Props = {
 export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<'chat' | 'shell'>('chat')
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const pinnedToBottom = useRef(true)
+
+  // 右键菜单 handler
+  const handleContextMenu = (e: React.MouseEvent, msg: Message) => {
+    e.preventDefault()
+    setContextMenu({ x: e.clientX, y: e.clientY, msg })
+  }
+
+  const closeContextMenu = () => setContextMenu(null)
+
+  const copyMessage = (msg: Message) => {
+    navigator.clipboard.writeText(msg.content)
+    closeContextMenu()
+  }
+
+  const regenerateMessage = (msg: Message) => {
+    // 重新生成：把消息内容作为新 prompt 发给当前 agent
+    if (msg.role === 'assistant') {
+      p.onPrompt(msg.content)
+    }
+    closeContextMenu()
+  }
+
+  const quoteToAgent = (msg: Message, targetAgentId: string) => {
+    const target = p.agents?.find((a) => a.id === targetAgentId)
+    if (target && p.onRoute) {
+      p.onRoute(target.id, `引用：${msg.content.slice(0, 200)}`)
+    }
+    closeContextMenu()
+  }
 
   // 跟踪用户是否在底部（决定是否自动跟随滚动）
   const handleScroll = () => {
@@ -204,7 +234,7 @@ export default function AgentView(p: Props) {
         )}
 
         {visible.map((m, i) => (
-          <Bubble key={i} m={m} color={p.agent!.color} />
+          <Bubble key={i} m={m} color={p.agent!.color} onContextMenu={handleContextMenu} />
         ))}
 
         {p.streaming && <Bubble m={{ role: 'assistant', content: p.streaming }} color={p.agent.color} live />}
@@ -409,6 +439,121 @@ export default function AgentView(p: Props) {
           <span>Enter 发送 · Shift+Enter 换行</span>
         </div>
       </div>
+
+      {/* 右键菜单 */}
+      {contextMenu && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
+            onClick={closeContextMenu}
+            onContextMenu={(e) => { e.preventDefault(); closeContextMenu() }}
+          />
+          <div
+            className="fade-up"
+            style={{
+              position: 'fixed',
+              left: contextMenu.x,
+              top: contextMenu.y,
+              zIndex: 1000,
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: 'var(--shadow-lg)',
+              minWidth: 180,
+              overflow: 'hidden',
+            }}
+          >
+            <button
+              onClick={() => copyMessage(contextMenu.msg)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                width: '100%',
+                padding: '10px 14px',
+                textAlign: 'left',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--text-primary)',
+                background: 'transparent',
+                borderBottom: '1px solid var(--border-subtle)',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              📋 复制
+            </button>
+            {contextMenu.msg.role === 'assistant' && (
+              <button
+                onClick={() => regenerateMessage(contextMenu.msg)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  width: '100%',
+                  padding: '10px 14px',
+                  textAlign: 'left',
+                  fontSize: 'var(--text-sm)',
+                  color: 'var(--text-primary)',
+                  background: 'transparent',
+                  borderBottom: '1px solid var(--border-subtle)',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                🔄 重新生成
+              </button>
+            )}
+            {p.agents && p.agents.length > 1 && (
+              <div style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                <div style={{ padding: '8px 14px 4px', fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                  引用给…
+                </div>
+                {p.agents
+                  .filter((a) => a.id !== p.agent?.id)
+                  .map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => quoteToAgent(contextMenu.msg, a.id)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        width: '100%',
+                        padding: '8px 14px',
+                        textAlign: 'left',
+                        fontSize: 'var(--text-sm)',
+                        color: 'var(--text-primary)',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <span
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: 'var(--radius-sm)',
+                          background: a.color,
+                          display: 'grid',
+                          placeItems: 'center',
+                          fontSize: 8,
+                          fontWeight: 700,
+                          color: 'var(--bg-base)',
+                        }}
+                      >
+                        {a.name.slice(0, 1).toUpperCase()}
+                      </span>
+                      {a.name}
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -510,7 +655,7 @@ function EmptyChat({ color, name }: { color: string; name: string }) {
   )
 }
 
-function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean }) {
+function Bubble({ m, color, live, onContextMenu }: { m: Message; color: string; live?: boolean; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
   const isUser = m.role === 'user'
 
   // 检测路由消息：[from xxx] 或 [to xxx]
@@ -528,7 +673,9 @@ function Bubble({ m, color, live }: { m: Message; color: string; live?: boolean 
         display: 'flex',
         gap: 'var(--space-3)',
         opacity: isRouted ? 0.85 : 1,
+        cursor: onContextMenu ? 'context-menu' : 'default',
       }}
+      onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
     >
       {!isUser && (
         <span
