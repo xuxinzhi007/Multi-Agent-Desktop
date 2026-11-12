@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,7 +17,30 @@ type Message struct {
 	FromName  string `json:"fromName"`
 	Text      string `json:"text"`
 	At        int64  `json:"at"`
+	Kind      string `json:"kind,omitempty"` // user / agent / system
+	
+	// Deliveries 记录投递结果：谁收到了、谁跳过了
+	Deliveries []Delivery `json:"deliveries,omitempty"`
 }
+
+// Delivery 是消息的投递记录。
+type Delivery struct {
+	AgentID string `json:"agentId"`
+	Status  string `json:"status"` // delivered / skipped / failed
+	Reason  string `json:"reason,omitempty"` // 跳过原因
+}
+
+// TurnPolicy 回合策略。
+type TurnPolicy string
+
+const (
+	// PolicyDirect 只有被点名的人回（单聊）
+	PolicyDirect TurnPolicy = "direct"
+	// PolicyDiscuss 所有成员都能看到上下文，按 @ 或显式指派决定谁回
+	PolicyDiscuss TurnPolicy = "discuss"
+	// PolicyRoundRobin 轮流发言，用于评审场景
+	PolicyRoundRobin TurnPolicy = "roundrobin"
+)
 
 // Channel 是一个共享消息频道。
 type Channel struct {
@@ -24,6 +48,7 @@ type Channel struct {
 	Name     string    `json:"name"`
 	Members  []string  `json:"members"` // agent IDs
 	Messages []Message `json:"messages"`
+	Policy   TurnPolicy `json:"policy,omitempty"` // 回合策略，默认 discuss
 }
 
 // Manager 管理所有频道。
@@ -249,4 +274,98 @@ func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message,
 	m.mu.RUnlock()
 
 	return msg, recipients, nil
+}
+
+// Transcript 是频道的共享上下文，按预算裁剪后拼入 prompt。
+type Transcript struct {
+	Messages []Message
+	Budget   int // 字符预算
+}
+
+// BuildTranscript 从频道消息构建 transcript，按预算裁剪。
+// 保留最近的消息，确保预算内。
+func BuildTranscript(messages []Message, budget int) Transcript {
+	if budget <= 0 || len(messages) == 0 {
+		return Transcript{Messages: messages, Budget: budget}
+	}
+
+	// 从后往前累积，直到超预算
+	var out []Message
+	used := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		size := len(m.FromName) + len(m.Text) + 20
+		if used+size > budget && len(out) > 0 {
+			break
+		}
+		out = append([]Message{m}, out...)
+		used += size
+	}
+	return Transcript{Messages: out, Budget: budget}
+}
+
+// Render 把 transcript 渲染成 prompt 段。
+func (t Transcript) Render() string {
+	if len(t.Messages) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## 群聊上下文\n")
+	for _, m := range t.Messages {
+		b.WriteString(m.FromName)
+		b.WriteString(": ")
+		b.WriteString(m.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// ShouldReply 判断 agent 是否应该回复这条消息。
+// 按 TurnPolicy 和 @提及决定。
+func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName string) (bool, string) {
+	// 解析 @提及
+	mentions := parseMentions(msg.Text)
+
+	// 被 @ 必须回复
+	for _, m := range mentions {
+		if m == agentName || m == agentID || m == "all" {
+			return true, "被 @"
+		}
+	}
+
+	// 按策略判断
+	switch policy {
+	case PolicyDirect:
+		// 单聊模式：只有被 @ 才回
+		return false, "direct 模式未被 @"
+
+	case PolicyDiscuss:
+		// 讨论模式：没被 @ 也可以回（由 agent 自己判断）
+		// 这里返回 true，让 agent 自己决定是否回复
+		return true, "discuss 模式"
+
+	case PolicyRoundRobin:
+		// 轮流模式：按顺序，这里简化处理
+		return true, "roundrobin 模式"
+
+	default:
+		// 默认：discuss
+		return true, "默认 discuss 模式"
+	}
+}
+
+// parseMentions 解析 @提及。
+func parseMentions(text string) []string {
+	var mentions []string
+	words := strings.Fields(text)
+	for _, word := range words {
+		if strings.HasPrefix(word, "@") {
+			mention := strings.TrimPrefix(word, "@")
+			mention = strings.TrimRight(mention, ",.!?:;，。！？：；")
+			if mention != "" {
+				mentions = append(mentions, mention)
+			}
+		}
+	}
+	return mentions
 }

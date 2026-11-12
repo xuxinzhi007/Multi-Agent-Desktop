@@ -32,6 +32,7 @@ export interface Channel {
   name: string;
   members: string[];
   messages: ChannelMessage[];
+  policy?: TurnPolicy;
 }
 
 export interface ChannelMessage {
@@ -41,6 +42,8 @@ export interface ChannelMessage {
   fromName: string;
   text: string;
   at: number;
+  kind?: string;
+  deliveries?: Delivery[];
 }
 
 export interface Config {
@@ -54,6 +57,12 @@ export interface Config {
 export interface CreateAgentRequest {
   name: string;
   role: string;
+}
+
+export interface Delivery {
+  agentId: string;
+  status: string;
+  reason?: string;
 }
 
 /** DeltaEvent 是流式输出片段。 */
@@ -168,6 +177,8 @@ export interface ToolStartEvent {
   target: string;
 }
 
+export type TurnPolicy = string;
+
 /** WorkDirEvent 是工作目录变更。 */
 export interface WorkDirEvent {
   dir: string;
@@ -188,7 +199,10 @@ export const Sidecar = {
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("Sidecar.CreateAgent", req);
   },
-  /** CreateCLIAgent 新建一个 CLI backend 的 agent。 */
+  /**
+   * isRelevantToRole 判断消息是否与角色相关。
+   * CreateCLIAgent 新建一个 CLI backend 的 agent。
+   */
   createCLIAgent(name: string, role: string, backend: string): Promise<AgentView> {
     return call("Sidecar.CreateCLIAgent", name, role, backend);
   },

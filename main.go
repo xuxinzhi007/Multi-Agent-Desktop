@@ -316,59 +316,83 @@ func (s *Sidecar) ListChannels() []channel.Channel {
 // @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
 // 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
 func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
+	// 1. 广播消息到频道
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
 	if err != nil {
 		return err
 	}
 
-	// 先推消息（即使 0 个接收者，用户自己的消息也要展示）
+	// 2. 推消息到前端
 	ChannelMessage.Emit(s.win, *msg)
 
-	// 解析 @提及
-	mentions := parseMentions(text)
-	fmt.Printf("[channel] mentions: %v, text: %s\n", mentions, text)
+	// 3. 获取频道和策略
+	ch, ok := s.channels.Get(channelId)
+	if !ok {
+		return fmt.Errorf("channel %s not found", channelId)
+	}
+	policy := ch.Policy
+	if policy == "" {
+		policy = channel.PolicyDiscuss
+	}
 
+	// 4. 构建 transcript（共享上下文）
+	transcript := channel.BuildTranscript(ch.Messages, 2000) // 2000 字符预算
+
+	// 5. 按策略决定谁回复
+	var deliveries []channel.Delivery
 	var errs []string
+
 	for _, agentId := range recipients {
 		a, ok := s.mgr.Get(agentId)
 		if !ok {
+			deliveries = append(deliveries, channel.Delivery{
+				AgentID: agentId,
+				Status:  "failed",
+				Reason:  "agent not found",
+			})
 			continue
 		}
 
-		// 判断是否需要回复
-		shouldReply := false
+		// 判断是否应该回复
+		shouldReply, reason := channel.ShouldReply(policy, *msg, agentId, a.Name)
 
-		// 被 @ 必须回复
-		for _, mention := range mentions {
-			if mention == a.Name || mention == agentId || mention == "all" {
-				shouldReply = true
-				fmt.Printf("[channel] %s 被 @，必须回复\n", a.Name)
-				break
-			}
-		}
-
-		// 没被 @：根据角色相关性判断（减少噪音）
-		if !shouldReply && len(mentions) == 0 {
-			shouldReply = isRelevantToRole(text, a.Role)
-			if shouldReply {
-				fmt.Printf("[channel] %s 角色相关，选择性回复\n", a.Name)
-			}
-		}
-
-		if shouldReply {
-			// 给成员的 prompt 加频道标记，回复时识别并路由回频道
-			prompt := fmt.Sprintf("[channel:%s] %s: %s", channelId, fromName, text)
-			err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
+		if !shouldReply {
+			deliveries = append(deliveries, channel.Delivery{
 				AgentID: agentId,
-				Text:    prompt,
+				Status:  "skipped",
+				Reason:  reason,
 			})
-			if err != nil {
-				errs = append(errs, err.Error())
-			}
+			fmt.Printf("[channel] %s 跳过: %s\n", a.Name, reason)
+			continue
+		}
+
+		// 组装 prompt：transcript + 本轮消息
+		prompt := fmt.Sprintf("%s\n[user] %s: %s", transcript.Render(), fromName, text)
+
+		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
+			AgentID: agentId,
+			Text:    prompt,
+		})
+		if err != nil {
+			errs = append(errs, err.Error())
+			deliveries = append(deliveries, channel.Delivery{
+				AgentID: agentId,
+				Status:  "failed",
+				Reason:  err.Error(),
+			})
 		} else {
-			fmt.Printf("[channel] %s 不相关，跳过\n", a.Name)
+			deliveries = append(deliveries, channel.Delivery{
+				AgentID: agentId,
+				Status:  "delivered",
+			})
+			fmt.Printf("[channel] %s 已投递\n", a.Name)
 		}
 	}
+
+	// 6. 更新消息的投递记录
+	msg.Deliveries = deliveries
+	// TODO: 持久化 deliveries
+
 	if len(errs) > 0 {
 		return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))
 	}
@@ -393,27 +417,6 @@ func parseMentions(text string) []string {
 }
 
 // isRelevantToRole 判断消息是否与角色相关。
-func isRelevantToRole(text, role string) bool {
-	// 简单关键词匹配
-	keywords := map[string][]string{
-		"后端": {"api", "数据库", "服务", "接口", "sql", "server", "backend"},
-		"前端": {"ui", "页面", "组件", "样式", "css", "frontend", "react"},
-		"测试": {"测试", "bug", "错误", "验证", "test", "qa"},
-		"运维": {"部署", "服务器", "日志", "监控", "deploy", "ops"},
-		"全栈": {"api", "ui", "数据库", "部署"},
-	}
-
-	textLower := strings.ToLower(text)
-	for _, kw := range keywords[role] {
-		if strings.Contains(textLower, strings.ToLower(kw)) {
-			return true
-		}
-	}
-
-	// 默认：不相关（减少噪音）
-	return false
-}
-
 // CreateCLIAgent 新建一个 CLI backend 的 agent。
 func (s *Sidecar) CreateCLIAgent(name, role, backend string) AgentView {
 	a := s.mgr.CreateWithBackend("", name, role, backend)
