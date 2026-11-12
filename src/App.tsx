@@ -99,6 +99,7 @@ export default function App() {
           workDir={s.workDir}
           tokenUsage={activeAgent ? s.tokenUsage[activeAgent.id] : undefined}
           agents={s.agents}
+          disableRoute  // 单聊模式：禁用 @ 路由
           onPrompt={(text) => activeAgent && s.send('agent.prompt', { agentId: activeAgent.id, text })}
           onStop={() => activeAgent && s.send('agent.stop', { id: activeAgent.id })}
           onShell={(command) => {

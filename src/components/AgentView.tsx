@@ -15,6 +15,8 @@ type Props = {
   onShell: (command: string) => void
   onToggleInspector: () => void
   inspectorOpen: boolean
+  /** 单聊模式：禁用 @ 路由功能 */
+  disableRoute?: boolean
   onRoute?: (targetName: string, text: string) => void
   agents?: Agent[]
   /** 会话级配置变更（工作目录 / 模型），只影响当前会话 */
@@ -134,7 +136,8 @@ export default function AgentView(p: Props) {
       p.onShell(text)
     } else {
       const { targets, message } = parseMentions(text)
-      if (targets.length > 0 && p.onRoute && p.agents) {
+      // 单聊模式：禁用 @ 路由，直接作为普通消息发送
+      if (!p.disableRoute && targets.length > 0 && p.onRoute && p.agents) {
         // 多选 @：发给多个 agent
         targets.forEach((targetName) => {
           const target = p.agents!.find((a) => a.name === targetName || a.id === targetName)
