@@ -9,7 +9,7 @@ type Props = {
   version: string
   provider: string
   onSelect: (id: string) => void
-  onCreate: (name: string, role: string) => void
+  onCreate: (name: string, role: string, backend: string) => void
   onDelete: (id: string) => void
   onOpenSettings: () => void
 }
@@ -18,11 +18,12 @@ export default function Sidebar(p: Props) {
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const [role, setRole] = useState(ROLE_PRESETS[0].role)
+  const [backend, setBackend] = useState('mock')
 
   const submit = () => {
     const n = name.trim()
     if (!n) return
-    p.onCreate(n, role)
+    p.onCreate(n, role, backend)
     setName('')
     setAdding(false)
   }
@@ -249,6 +250,15 @@ export default function Sidebar(p: Props) {
                   {r.name}
                 </option>
               ))}
+            </select>
+            <select
+              value={backend}
+              onChange={(e) => setBackend(e.target.value)}
+              style={{ width: '100%', marginBottom: 7, fontSize: 'var(--text-xs)' }}
+            >
+              <option value="mock">Mock（内置）</option>
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
             </select>
             <div style={{ display: 'flex', gap: 5 }}>
               <button className="c-btn c-btn--primary c-btn--sm" style={{ flex: 1 }} onClick={submit}>

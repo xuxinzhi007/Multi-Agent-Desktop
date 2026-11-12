@@ -37,7 +37,11 @@ export default function App() {
         version={s.version}
         provider={s.llm.provider}
         onSelect={setActiveId}
-        onCreate={(name, role) => s.send('agent.create', { name, role })}
+        onCreate={(name, role, backend) =>
+          backend === 'mock'
+            ? s.send('agent.create', { name, role })
+            : s.send('agent.createCLI', { name, role, backend })
+        }
         onDelete={(id) => s.send('agent.delete', { id })}
         onOpenSettings={() => setSettingsOpen(true)}
       />

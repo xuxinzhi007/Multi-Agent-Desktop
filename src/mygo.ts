@@ -13,6 +13,23 @@ export interface Agent {
   createdAt: number;
   messages: Message[];
   queueLen: number;
+  backend: string;
+}
+
+export interface Channel {
+  id: string;
+  name: string;
+  members: string[];
+  messages: ChannelMessage[];
+}
+
+export interface ChannelMessage {
+  id: string;
+  channelId: string;
+  fromId: string;
+  fromName: string;
+  text: string;
+  at: number;
 }
 
 export interface Config {
@@ -123,6 +140,14 @@ export const Sidecar = {
   createAgent(req: CreateAgentRequest): Promise<Agent> {
     return call("Sidecar.CreateAgent", req);
   },
+  /** CreateCLIAgent 新建一个 CLI backend 的 agent。 */
+  createCLIAgent(name: string, role: string, backend: string): Promise<Agent> {
+    return call("Sidecar.CreateCLIAgent", name, role, backend);
+  },
+  /** CreateChannel 新建频道。 */
+  createChannel(name: string, members: string[]): Promise<Channel> {
+    return call("Sidecar.CreateChannel", name, members);
+  },
   /** DeleteAgent 删除一个 agent。 */
   deleteAgent(id: string): Promise<boolean> {
     return call("Sidecar.DeleteAgent", id);
@@ -147,6 +172,10 @@ export const Sidecar = {
   listAgents(): Promise<Agent[]> {
     return call("Sidecar.ListAgents");
   },
+  /** ListChannels 返回所有频道。 */
+  listChannels(): Promise<Channel[]> {
+    return call("Sidecar.ListChannels");
+  },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("Sidecar.PickDirectory");
@@ -162,6 +191,10 @@ export const Sidecar = {
   /** RunShell 执行 shell 命令。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
+  },
+  /** SendToChannel 发消息到频道，并触发所有成员 agent。 */
+  sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
+    return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);
   },
   /** SetAlwaysOnTop 控制窗口置顶（悬浮）。 */
   setAlwaysOnTop(v: boolean): Promise<boolean> {

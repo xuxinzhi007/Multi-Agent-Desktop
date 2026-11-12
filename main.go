@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,15 +11,17 @@ import (
 	"github.com/egoist/mygo"
 
 	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
 )
 
 // Sidecar 暴露给前端的 API。`mygo generate` 会生成 typed TS client。
 type Sidecar struct {
-	mgr    *agent.Manager
-	runner *pty.Runner
-	win    *mygo.Window
+	mgr      *agent.Manager
+	runner   *pty.Runner
+	channels *channel.Manager
+	win      *mygo.Window
 }
 
 // Agent 是前端可见的会话视图。
@@ -161,6 +164,46 @@ func (s *Sidecar) StopAgent(id string) bool {
 // RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。
 func (s *Sidecar) RouteAgent(fromId, toId, text string) error {
 	return s.mgr.Route(fromId, toId, text)
+}
+
+// CreateChannel 新建频道。
+func (s *Sidecar) CreateChannel(name string, members []string) channel.Channel {
+	ch := s.channels.Create("", name, members)
+	return *ch
+}
+
+// ListChannels 返回所有频道。
+func (s *Sidecar) ListChannels() []channel.Channel {
+	list := s.channels.List()
+	out := make([]channel.Channel, len(list))
+	for i, ch := range list {
+		out[i] = *ch
+	}
+	return out
+}
+
+// SendToChannel 发消息到频道，并触发所有成员 agent。
+func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
+	recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
+	if err != nil {
+		return err
+	}
+
+	// 触发每个成员 agent 执行
+	for _, agentId := range recipients {
+		s.mgr.Prompt(context.Background(), agent.PromptRequest{
+			AgentID: agentId,
+			Text:    fmt.Sprintf("[%s] %s: %s", channelId, fromName, text),
+		})
+	}
+
+	return nil
+}
+
+// CreateCLIAgent 新建一个 CLI backend 的 agent。
+func (s *Sidecar) CreateCLIAgent(name, role, backend string) Agent {
+	a := s.mgr.CreateWithBackend("", name, role, backend)
+	return *a
 }
 
 // PromptAgent 发消息并流式回流。
@@ -336,6 +379,7 @@ func main() {
 
 	mgr = agent.NewManager(cfg, emit)
 	runner := pty.NewRunner(mustHome())
+	channels := channel.NewManager()
 
 	// 持久化到用户数据目录
 	dataDir := mustDataDir()
@@ -343,7 +387,7 @@ func main() {
 		mgr.SetStore(filepath.Join(dataDir, "agents.json"))
 	}
 
-	sidecar := &Sidecar{mgr: mgr, runner: runner}
+	sidecar := &Sidecar{mgr: mgr, runner: runner, channels: channels}
 
 	mygo.Bind(sidecar)
 

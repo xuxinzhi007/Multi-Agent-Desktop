@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"multi-agent-desktop/internal/cli"
 	"multi-agent-desktop/internal/llm"
 )
 
@@ -31,6 +33,7 @@ type Agent struct {
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
 	QueueLen  int           `json:"queueLen"` // 排队中的消息数
+	Backend   string        `json:"backend"`  // mock / claude / codex
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -43,12 +46,13 @@ type Emitter func(event string, data any)
 
 // Manager 管理所有 agent 会话，并发安全。
 type Manager struct {
-	mu     sync.RWMutex
-	agents map[string]*Agent
-	order  []string
-	llmCfg llm.Config
-	emit   Emitter
-	store  string // 持久化文件路径，空则不持久化
+	mu      sync.RWMutex
+	agents  map[string]*Agent
+	order   []string
+	llmCfg  llm.Config
+	emit    Emitter
+	store   string // 持久化文件路径，空则不持久化
+	workDir string // CLI agent 工作目录
 }
 
 func NewManager(cfg llm.Config, emit Emitter) *Manager {
@@ -57,6 +61,13 @@ func NewManager(cfg llm.Config, emit Emitter) *Manager {
 		llmCfg: cfg,
 		emit:   emit,
 	}
+}
+
+// SetWorkDir 设置 CLI agent 工作目录。
+func (m *Manager) SetWorkDir(dir string) {
+	m.mu.Lock()
+	m.workDir = dir
+	m.mu.Unlock()
 }
 
 // SetStore 设置持久化文件路径，并尝试加载。
@@ -187,6 +198,15 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	return a
 }
 
+// CreateWithBackend 新建一个指定 backend 的 agent。
+func (m *Manager) CreateWithBackend(id, name, role, backend string) *Agent {
+	a := m.Create(id, name, role)
+	a.mu.Lock()
+	a.Backend = backend
+	a.mu.Unlock()
+	return a
+}
+
 func (m *Manager) Get(id string) (*Agent, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -307,26 +327,45 @@ func (a *Agent) workerLoop(m *Manager) {
 
 // execute 执行一条消息（阻塞，完成后取下一个）。
 func (a *Agent) execute(m *Manager, req PromptRequest) {
-	client := llm.New(m.LLMConfig())
-
 	a.mu.Lock()
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text})
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
 	runCtx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
-	history := append([]llm.Message(nil), a.Messages...)
 	a.mu.Unlock()
 
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusRunning})
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
 
+	// 根据 backend 选择执行方式
+	backend := a.Backend
+	if backend == "" {
+		backend = "mock"
+	}
+
+	switch backend {
+	case "claude", "codex":
+		a.executeCLI(m, runCtx, backend, req.Text)
+	default:
+		a.executeMock(m, runCtx, req.Text)
+	}
+
+	cancel()
+}
+
+// executeMock 用内置 mock LLM 执行。
+func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
+	client := llm.New(m.LLMConfig())
+
+	a.mu.Lock()
+	history := append([]llm.Message(nil), a.Messages...)
+	a.mu.Unlock()
+
 	// mock provider 下推一组检查器事件
 	if m.LLMConfig().Provider == "" || m.LLMConfig().Provider == "mock" {
 		m.demoTrail(a.ID, a.Name)
 	}
-
-	defer cancel()
 
 	stream, err := client.Stream(runCtx, history)
 	if err != nil {
@@ -347,20 +386,100 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	}
 
 	if runCtx.Err() != nil {
-		// 用户停止
-		a.mu.Lock()
-		a.Status = StatusIdle
-		a.QueueLen = len(a.queue)
-		if len(a.queue) > 0 {
-			a.Status = StatusQueued
-		}
-		a.mu.Unlock()
-		m.emit("agent.status", map[string]any{"id": a.ID, "status": a.Status})
+		a.setIdleOrQueued(m)
 		return
 	}
 
 	a.mu.Lock()
 	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full})
+	a.mu.Unlock()
+
+	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full}})
+	a.setIdleOrQueued(m)
+}
+
+// executeCLI 用外部 CLI agent 执行。
+func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text string) {
+	var runner interface {
+		Run(ctx context.Context, prompt string) (<-chan cli.Event, error)
+	}
+
+	switch backend {
+	case "claude":
+		runner = cli.NewClaudeRunner(m.workDir, "")
+	case "codex":
+		runner = cli.NewCodexRunner(m.workDir, "")
+	default:
+		m.finish(a, StatusError, "unknown backend: "+backend)
+		return
+	}
+
+	events, err := runner.Run(runCtx, text)
+	if err != nil {
+		m.finish(a, StatusError, fmt.Sprintf("%s: %v", backend, err))
+		return
+	}
+
+	var fullText string
+	var toolCalls []string
+
+	for ev := range events {
+		if runCtx.Err() != nil {
+			return // 用户停止
+		}
+
+		switch ev.Type {
+		case "assistant":
+			if ev.Text != "" {
+				fullText += ev.Text
+				m.emit("agent.delta", map[string]any{"id": a.ID, "delta": ev.Text})
+			}
+
+		case "tool_use":
+			toolInfo := fmt.Sprintf("[%s]", ev.Tool)
+			if ev.ToolInput != "" {
+				toolInfo += " " + ev.ToolInput
+			}
+			toolCalls = append(toolCalls, toolInfo)
+			m.emit("tool.start", map[string]any{
+				"id":      fmt.Sprintf("%s-%d", a.ID, len(toolCalls)),
+				"agentId": a.ID,
+				"tool":    ev.Tool,
+				"target":  ev.ToolInput,
+			})
+
+		case "error":
+			m.finish(a, StatusError, ev.Error)
+			return
+
+		case "result":
+			if ev.Text != "" {
+				fullText = ev.Text
+			}
+		}
+	}
+
+	if runCtx.Err() != nil {
+		a.setIdleOrQueued(m)
+		return
+	}
+
+	// 附加工具调用记录
+	if len(toolCalls) > 0 {
+		fullText += "\n\n--- 工具调用 ---\n" + strings.Join(toolCalls, "\n")
+	}
+
+	a.mu.Lock()
+	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: fullText})
+	a.mu.Unlock()
+
+	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText}})
+	a.setIdleOrQueued(m)
+}
+
+// setIdleOrQueued 设置状态为 idle 或 queued（还有排队消息）。
+func (a *Agent) setIdleOrQueued(m *Manager) {
+	a.mu.Lock()
 	a.Status = StatusIdle
 	a.QueueLen = len(a.queue)
 	if len(a.queue) > 0 {
@@ -368,9 +487,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	}
 	a.cancel = nil
 	a.mu.Unlock()
-
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": a.Status})
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full}})
 }
 
 func (m *Manager) finish(a *Agent, st Status, msg string) {

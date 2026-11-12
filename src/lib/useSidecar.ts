@@ -110,6 +110,12 @@ export function useSidecar() {
     switch (action) {
       case 'agent.create':
         return Sidecar.createAgent(data as { name: string; role: string })
+      case 'agent.createCLI':
+        return Sidecar.createCLIAgent(
+          (data as { name: string }).name,
+          (data as { role: string }).role,
+          (data as { backend: string }).backend,
+        )
       case 'agent.delete':
         return Sidecar.deleteAgent((data as { id: string }).id)
       case 'agent.stop':
