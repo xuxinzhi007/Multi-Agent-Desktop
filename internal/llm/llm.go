@@ -14,9 +14,11 @@ type Message struct {
 
 // Chunk 是流式返回的一个片段。
 type Chunk struct {
-	Delta string `json:"delta,omitempty"`
-	Done  bool   `json:"done,omitempty"`
-	Err   string `json:"error,omitempty"`
+	Delta      string `json:"delta,omitempty"`
+	Done      bool   `json:"done,omitempty"`
+	Err       string `json:"error,omitempty"`
+	TokensIn  int    `json:"tokensIn,omitempty"`
+	TokensOut int    `json:"tokensOut,omitempty"`
 }
 
 // Client 是一个流式对话客户端。实现必须支持 ctx 取消。

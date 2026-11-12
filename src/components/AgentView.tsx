@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Agent, Message } from '../lib/mygo'
+import type { AgentView as Agent, Message } from '../mygo'
 
 type Props = {
   agent: Agent | null
   streaming: string
   error?: string
   workDir: string
+  tokenUsage?: { in: number; out: number }
   onPrompt: (text: string) => void
   onStop: () => void
   onShell: (command: string) => void
@@ -234,7 +235,13 @@ export default function AgentView(p: Props) {
         )}
 
         {visible.map((m, i) => (
-          <Bubble key={i} m={m} color={p.agent!.color} onContextMenu={handleContextMenu} />
+          <Bubble
+            key={i}
+            m={m}
+            color={p.agent!.color}
+            tokens={i === visible.length - 1 && m.role === 'assistant' ? p.tokenUsage : undefined}
+            onContextMenu={handleContextMenu}
+          />
         ))}
 
         {p.streaming && <Bubble m={{ role: 'assistant', content: p.streaming }} color={p.agent.color} live />}
@@ -655,7 +662,7 @@ function EmptyChat({ color, name }: { color: string; name: string }) {
   )
 }
 
-function Bubble({ m, color, live, onContextMenu }: { m: Message; color: string; live?: boolean; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
+function Bubble({ m, color, live, tokens, onContextMenu }: { m: Message; color: string; live?: boolean; tokens?: { in: number; out: number }; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
   const isUser = m.role === 'user'
 
   // 检测路由消息：[from xxx] 或 [to xxx]
@@ -735,7 +742,26 @@ function Bubble({ m, color, live, onContextMenu }: { m: Message; color: string; 
         >
           {displayContent}
         </div>
+        {tokens && (tokens.in > 0 || tokens.out > 0) && (
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-disabled)',
+              display: 'flex',
+              gap: 8,
+            }}
+          >
+            <span>↑ {formatTokens(tokens.in)}</span>
+            <span>↓ {formatTokens(tokens.out)}</span>
+          </div>
+        )}
       </div>
     </div>
   )
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return `${n}`
 }

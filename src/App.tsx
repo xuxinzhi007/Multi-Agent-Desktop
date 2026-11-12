@@ -4,6 +4,7 @@ import AgentView from './components/AgentView'
 import Inspector, { type InspectorTab } from './components/Inspector'
 import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
+import ActivityFeed from './components/ActivityFeed'
 import { useSidecar } from './lib/useSidecar'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useSidecar'
@@ -51,6 +52,7 @@ export default function App() {
         streaming={streaming}
         error={err}
         workDir={s.workDir}
+        tokenUsage={activeId ? s.tokenUsage[activeId] : undefined}
         agents={s.agents}
         onPrompt={(text) => active && s.send('agent.prompt', { agentId: active.id, text })}
         onStop={() => active && s.send('agent.stop', { id: active.id })}
@@ -79,6 +81,8 @@ export default function App() {
           todos={s.todos}
           tools={s.tools}
           onClose={() => setInspectorOpen(false)}
+          onApprove={s.approveTool}
+          onReject={s.rejectTool}
         />
       )}
 
@@ -90,6 +94,8 @@ export default function App() {
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
         onWorkDir={(dir) => s.send('workdir.set', { dir })}
       />
+
+      <ActivityFeed activities={s.activities} />
     </div>
   )
 }

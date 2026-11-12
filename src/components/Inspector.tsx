@@ -56,6 +56,8 @@ export default function Inspector({
   todos,
   tools,
   onClose,
+  onApprove,
+  onReject,
 }: {
   tab: Tab
   onTab: (t: Tab) => void
@@ -63,6 +65,8 @@ export default function Inspector({
   todos: TodoItem[]
   tools: ToolCall[]
   onClose: () => void
+  onApprove?: (id: string) => void
+  onReject?: (id: string) => void
 }) {
   const totalAdd = changes.reduce((n, c) => n + c.added, 0)
   const totalDel = changes.reduce((n, c) => n + c.removed, 0)
@@ -494,8 +498,18 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
             )}
             {t.status === 'waiting' && (
               <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                <button className="c-btn c-btn--success c-btn--sm">允许</button>
-                <button className="c-btn c-btn--danger c-btn--sm">拒绝</button>
+                <button
+                  className="c-btn c-btn--success c-btn--sm"
+                  onClick={() => onApprove?.(t.id)}
+                >
+                  允许
+                </button>
+                <button
+                  className="c-btn c-btn--danger c-btn--sm"
+                  onClick={() => onReject?.(t.id)}
+                >
+                  拒绝
+                </button>
               </div>
             )}
           </div>

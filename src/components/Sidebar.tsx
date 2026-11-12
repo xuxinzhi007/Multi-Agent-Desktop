@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
-import { Sidecar, type Agent } from '../mygo'
+import { Sidecar, type AgentView as Agent } from '../mygo'
 
 type Props = {
   agents: Agent[]

@@ -38,6 +38,10 @@ type chatResp struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -144,8 +148,13 @@ func (c *openAICompat) Stream(ctx context.Context, msgs []Message) (<-chan Chunk
 			}
 			for _, ch := range r.Choices {
 				if ch.Delta.Content != "" {
+					chunk := Chunk{Delta: ch.Delta.Content}
+					if r.Usage != nil {
+						chunk.TokensIn = r.Usage.PromptTokens
+						chunk.TokensOut = r.Usage.CompletionTokens
+					}
 					select {
-					case out <- Chunk{Delta: ch.Delta.Content}:
+					case out <- chunk:
 					case <-ctx.Done():
 						return
 					}

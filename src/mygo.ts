@@ -71,6 +71,8 @@ export interface Message {
 export interface MessageEvent {
   id: string;
   message: Message;
+  tokensIn?: number;
+  tokensOut?: number;
 }
 
 /** MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。 */
@@ -130,6 +132,14 @@ export interface SystemInfo {
   arch: string;
   goVersion: string;
   mygo: boolean;
+}
+
+/** ToolStartEvent 是工具调用开始。 */
+export interface ToolStartEvent {
+  id: string;
+  agentId: string;
+  tool: string;
+  target: string;
 }
 
 /** WorkDirEvent 是工作目录变更。 */
@@ -236,6 +246,7 @@ export const events = {
   agentDelta: event<DeltaEvent>("agent.delta"),
   agentMessage: event<MessageEvent>("agent.message"),
   agentError: event<ErrorEvent>("agent.error"),
+  toolStart: event<ToolStartEvent>("tool.start"),
   shellStart: event<ShellEvent>("shell.start"),
   shellResult: event<ShellResultEvent>("shell.result"),
   llmConfig: event<Config>("llm.config"),

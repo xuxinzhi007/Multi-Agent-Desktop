@@ -56,6 +56,7 @@ var (
 	AgentDelta   = mygo.NewEvent[DeltaEvent]("agent.delta")
 	AgentMessage = mygo.NewEvent[MessageEvent]("agent.message")
 	AgentError   = mygo.NewEvent[ErrorEvent]("agent.error")
+	ToolStart    = mygo.NewEvent[ToolStartEvent]("tool.start")
 	ShellStart   = mygo.NewEvent[ShellEvent]("shell.start")
 	ShellResult_ = mygo.NewEvent[ShellResultEvent]("shell.result")
 	LLMConfigEvt = mygo.NewEvent[LLMConfig]("llm.config")
@@ -68,6 +69,14 @@ type StatusEvent struct {
 	Status string `json:"status"`
 }
 
+// ToolStartEvent 是工具调用开始。
+type ToolStartEvent struct {
+	ID      string `json:"id"`
+	AgentID string `json:"agentId"`
+	Tool    string `json:"tool"`
+	Target  string `json:"target"`
+}
+
 // DeltaEvent 是流式输出片段。
 type DeltaEvent struct {
 	ID    string `json:"id"`
@@ -76,8 +85,10 @@ type DeltaEvent struct {
 
 // MessageEvent 是一条完整消息。
 type MessageEvent struct {
-	ID      string      `json:"id"`
-	Message llm.Message `json:"message"`
+	ID        string      `json:"id"`
+	Message   llm.Message `json:"message"`
+	TokensIn  int         `json:"tokensIn,omitempty"`
+	TokensOut int         `json:"tokensOut,omitempty"`
 }
 
 // ErrorEvent 是错误。
@@ -181,6 +192,40 @@ func toAgentView(a *agent.Agent) AgentView {
 		QueueLen:  a.QueueLen,
 		Backend:   a.Backend,
 	}
+}
+
+// agentViewFromMap 把 emitter 的 map 负载转成前端 AgentView。
+// 全部使用 comma-ok，负载畸形时不 panic。
+func agentViewFromMap(m map[string]any) AgentView {
+	v := AgentView{}
+	v.ID, _ = m["id"].(string)
+	v.Name, _ = m["name"].(string)
+	v.Role, _ = m["role"].(string)
+	v.Color, _ = m["color"].(string)
+	v.Status, _ = m["status"].(string)
+	v.Backend, _ = m["backend"].(string)
+	switch ts := m["createdAt"].(type) {
+	case int64:
+		v.CreatedAt = ts
+	case float64: // 防御：若负载经过一次 JSON 编解码
+		v.CreatedAt = int64(ts)
+	case int:
+		v.CreatedAt = int64(ts)
+	}
+	switch q := m["queueLen"].(type) {
+	case int:
+		v.QueueLen = q
+	case float64:
+		v.QueueLen = int(q)
+	case int64:
+		v.QueueLen = int(q)
+	}
+	if msgs, ok := m["messages"].([]llm.Message); ok {
+		v.Messages = msgs
+	} else {
+		v.Messages = []llm.Message{}
+	}
+	return v
 }
 
 func (s *Sidecar) ListAgents() []AgentView {
@@ -370,6 +415,121 @@ func (s *Sidecar) ToggleMiniWindow(show bool) bool {
 // miniWindowRef 包级引用，main 里赋值。
 var miniWindowRef *mygo.Window
 
+// getStr 从 map 安全取 string。
+func getStr(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
+func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, event string, data any) {
+	// 主窗口
+	if win != nil && !win.IsDestroyed() {
+		switch event {
+		case "agent.created":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.created: unexpected payload type %T", data)
+				break
+			}
+			AgentCreated.Emit(win, agentViewFromMap(m))
+		case "agent.deleted":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.deleted: unexpected payload type %T", data)
+				break
+			}
+			id, ok := m["id"].(string)
+			if !ok {
+				log.Printf("emit: agent.deleted: unexpected id type %T", m["id"])
+				break
+			}
+			AgentDeleted.Emit(win, id)
+		case "agent.status":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.status: unexpected payload type %T", data)
+				break
+			}
+			id, _ := m["id"].(string)
+			var st string
+			switch v := m["status"].(type) {
+			case agent.Status:
+				st = string(v)
+			case string:
+				st = v
+			default:
+				log.Printf("emit: agent.status: unexpected status type %T", m["status"])
+			}
+			if id != "" && st != "" {
+				AgentStatus.Emit(win, StatusEvent{ID: id, Status: st})
+			}
+		case "agent.delta":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.delta: unexpected payload type %T", data)
+				break
+			}
+			id, _ := m["id"].(string)
+			delta, _ := m["delta"].(string)
+			if id != "" {
+				AgentDelta.Emit(win, DeltaEvent{ID: id, Delta: delta})
+			}
+		case "agent.message":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.message: unexpected payload type %T", data)
+				break
+			}
+			id, _ := m["id"].(string)
+			msg, ok := m["message"].(llm.Message)
+			if id != "" && ok {
+				evt := MessageEvent{ID: id, Message: msg}
+				if ti, ok := m["tokensIn"].(int); ok {
+					evt.TokensIn = ti
+				}
+				if to, ok := m["tokensOut"].(int); ok {
+					evt.TokensOut = to
+				}
+				AgentMessage.Emit(win, evt)
+			}
+		case "agent.error":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: agent.error: unexpected payload type %T", data)
+				break
+			}
+			id, _ := m["id"].(string)
+			errMsg, _ := m["error"].(string)
+			if id != "" {
+				AgentError.Emit(win, ErrorEvent{ID: id, Error: errMsg})
+			}
+		case "tool.start":
+			m, ok := data.(map[string]any)
+			if !ok {
+				log.Printf("emit: tool.start: unexpected payload type %T", data)
+				break
+			}
+			ToolStart.Emit(win, ToolStartEvent{
+				ID:      getStr(m, "id"),
+				AgentID: getStr(m, "agentId"),
+				Tool:    getStr(m, "tool"),
+				Target:  getStr(m, "target"),
+			})
+		}
+	}
+
+	// 迷你悬浮窗也推（只有状态变化才推，减少流量）
+	if miniWin != nil && !miniWin.IsDestroyed() {
+		switch event {
+		case "agent.created", "agent.deleted", "agent.status":
+			MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
+		}
+	}
+}
+
 func main() {
 	cfg := llm.Config{Provider: "mock"}
 	var mgr *agent.Manager
@@ -378,55 +538,7 @@ func main() {
 
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	emit := func(event string, data any) {
-		// 主窗口
-		if win != nil && !win.IsDestroyed() {
-			switch event {
-			case "agent.created":
-				if a, ok := data.(Agent); ok {
-					AgentCreated.Emit(win, a)
-				}
-			case "agent.deleted":
-				if id, ok := data.(map[string]any)["id"].(string); ok {
-					AgentDeleted.Emit(win, id)
-				}
-			case "agent.status":
-				if m, ok := data.(map[string]any); ok {
-					AgentStatus.Emit(win, StatusEvent{
-						ID:     m["id"].(string),
-						Status: string(m["status"].(agent.Status)),
-					})
-				}
-			case "agent.delta":
-				if m, ok := data.(map[string]any); ok {
-					AgentDelta.Emit(win, DeltaEvent{
-						ID:    m["id"].(string),
-						Delta: m["delta"].(string),
-					})
-				}
-			case "agent.message":
-				if m, ok := data.(map[string]any); ok {
-					AgentMessage.Emit(win, MessageEvent{
-						ID:      m["id"].(string),
-						Message: m["message"].(llm.Message),
-					})
-				}
-			case "agent.error":
-				if m, ok := data.(map[string]any); ok {
-					AgentError.Emit(win, ErrorEvent{
-						ID:    m["id"].(string),
-						Error: m["error"].(string),
-					})
-				}
-			}
-		}
-
-		// 迷你悬浮窗也推（只有状态变化才推，减少流量）
-		if miniWin != nil && !miniWin.IsDestroyed() {
-			switch event {
-			case "agent.created", "agent.deleted", "agent.status":
-				MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
-			}
-		}
+		emitToWindow(win, miniWin, mgr, event, data)
 	}
 
 	mgr = agent.NewManager(cfg, emit)

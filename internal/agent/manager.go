@@ -96,6 +96,7 @@ func (m *Manager) Save() error {
 				Status:    StatusIdle, // 重启后都是空闲
 				CreatedAt: a.CreatedAt,
 				Messages:  a.Messages,
+				Backend:   a.Backend,
 			})
 			a.mu.Unlock()
 		}
@@ -135,6 +136,7 @@ func (m *Manager) Load() error {
 			Status:    StatusIdle,
 			CreatedAt: saved.CreatedAt,
 			Messages:  saved.Messages,
+			Backend:   saved.Backend,
 			queue:     make(chan PromptRequest, 32),
 			done:      make(chan struct{}),
 		}
@@ -193,7 +195,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	// 启动 worker goroutine 消费队列
 	go a.workerLoop(m)
 
-	go m.emit("agent.created", *a.snapshot())
+	go m.emit("agent.created", a.viewMap())
 	go m.Save() // 异步保存
 	return a
 }
@@ -374,6 +376,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 	}
 
 	var full string
+	var tokensIn, tokensOut int
 	for chunk := range stream {
 		if chunk.Err != "" {
 			m.finish(a, StatusError, chunk.Err)
@@ -382,6 +385,12 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 		if chunk.Delta != "" {
 			full += chunk.Delta
 			m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta})
+		}
+		if chunk.TokensIn > 0 {
+			tokensIn = chunk.TokensIn
+		}
+		if chunk.TokensOut > 0 {
+			tokensOut = chunk.TokensOut
 		}
 	}
 
@@ -394,7 +403,12 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()})
 	a.mu.Unlock()
 
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()}})
+	m.emit("agent.message", map[string]any{
+		"id":        a.ID,
+		"message":   llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()},
+		"tokensIn":  tokensIn,
+		"tokensOut": tokensOut,
+	})
 	a.setIdleOrQueued(m)
 }
 
@@ -547,5 +561,22 @@ func (a *Agent) snapshot() *Agent {
 		Messages:  append([]llm.Message(nil), a.Messages...),
 		QueueLen:  a.QueueLen,
 		Backend:   a.Backend,
+	}
+}
+
+// viewMap 返回前端视图的 JSON 安全表示，与其它事件负载形状一致。
+func (a *Agent) viewMap() map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return map[string]any{
+		"id":        a.ID,
+		"name":      a.Name,
+		"role":      a.Role,
+		"color":     a.Color,
+		"status":    string(a.Status),
+		"createdAt": a.CreatedAt,
+		"messages":  append([]llm.Message(nil), a.Messages...),
+		"queueLen":  a.QueueLen,
+		"backend":   a.Backend,
 	}
 }
