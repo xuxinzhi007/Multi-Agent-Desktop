@@ -44,7 +44,7 @@ func NewClaudeRunner(workDir, model string) *ClaudeRunner {
 }
 
 // Run 执行 claude，事件通过 channel 流式返回。
-func (r *ClaudeRunner) Run(ctx context.Context, prompt string) (<-chan Event, error) {
+func (r *ClaudeRunner) Run(ctx context.Context, req Request) (<-chan Event, error) {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -55,6 +55,12 @@ func (r *ClaudeRunner) Run(ctx context.Context, prompt string) (<-chan Event, er
 	if r.WorkDir != "" {
 		args = append(args, "--add-dir", r.WorkDir)
 	}
+	if req.System != "" {
+		args = append(args, "--append-system-prompt", req.System)
+	}
+
+	// 组装完整 prompt：history + 本轮输入
+	prompt := assemblePrompt(req)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = r.WorkDir
@@ -183,11 +189,14 @@ func NewCodexRunner(workDir, model string) *CodexRunner {
 }
 
 // Run 执行 codex，事件通过 channel 流式返回。
-func (r *CodexRunner) Run(ctx context.Context, prompt string) (<-chan Event, error) {
+func (r *CodexRunner) Run(ctx context.Context, req Request) (<-chan Event, error) {
 	args := []string{"exec", "--json"}
 	if r.Model != "" {
 		args = append(args, "-c", fmt.Sprintf("model=%q", r.Model))
 	}
+
+	// 组装完整 prompt：history + 本轮输入
+	prompt := assemblePrompt(req)
 	args = append(args, prompt)
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
@@ -290,4 +299,22 @@ func (r *CodexRunner) Name() string { return "codex" }
 func (r *CodexRunner) Available() bool {
 	_, err := exec.LookPath("codex")
 	return err == nil
+}
+
+// assemblePrompt 组装完整 prompt：history + 本轮输入。
+func assemblePrompt(req Request) string {
+	if len(req.History) == 0 {
+		return req.Prompt
+	}
+
+	var b strings.Builder
+	for _, m := range req.History {
+		b.WriteString(m.Role)
+		b.WriteString(": ")
+		b.WriteString(m.Content)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("user: ")
+	b.WriteString(req.Prompt)
+	return b.String()
 }

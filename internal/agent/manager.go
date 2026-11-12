@@ -618,7 +618,29 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 		return
 	}
 
-	events, err := runner.Run(runCtx, text)
+	// 组装 Request：system（知识库）+ history + prompt
+	a.mu.Lock()
+	history := make([]cli.Message, 0, len(a.Messages))
+	for _, m := range a.Messages {
+		history = append(history, cli.Message{Role: m.Role, Content: m.Content})
+	}
+	knowledgeIDs := append([]string(nil), a.Knowledge...)
+	a.mu.Unlock()
+
+	// 获取知识库 system prompt
+	systemPrompt := ""
+	if m.knowledge != nil {
+		block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 0)
+		systemPrompt = block
+	}
+
+	req := cli.Request{
+		System:  systemPrompt,
+		History: history,
+		Prompt:  text,
+	}
+
+	events, err := runner.Run(runCtx, req)
 	if err != nil {
 		m.finish(a, StatusError, fmt.Sprintf("%s: %v", backend, err))
 		return
