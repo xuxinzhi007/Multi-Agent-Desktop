@@ -1,14 +1,51 @@
-import { StrictMode, useEffect, useState } from 'react'
+import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { events, Sidecar, type MiniStatus } from './mygo'
+import { events, Sidecar, type MiniStatus, type MiniAgentStatus } from './mygo'
+
+// 扩展 MiniAgentStatus 类型
+type AgentStatus = MiniAgentStatus & {
+  startedAt?: number
+  errorMsg?: string
+  lastOutput?: string
+}
+
+type ExtendedStatus = {
+  agents: AgentStatus[]
+}
 
 function MiniApp() {
-  const [status, setStatus] = useState<MiniStatus>({ agents: [] })
+  const [status, setStatus] = useState<ExtendedStatus>({ agents: [] })
   const [expanded, setExpanded] = useState(false)
   const [hovered, setHovered] = useState<string | null>(null)
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const expandedRef = useRef<HTMLDivElement>(null)
+
+  // 记录任务开始时间
+  const startTimes = useRef<Record<string, number>>({})
 
   useEffect(() => {
-    const unsub = events.miniStatus.on((s) => setStatus(s))
+    const unsub = events.miniStatus.on((s) => {
+      const now = Date.now()
+      const agents: AgentStatus[] = s.agents.map((a) => {
+        const prev = status.agents.find((x) => x.id === a.id)
+        // 记录开始时间
+        if (a.status === 'running' && !startTimes.current[a.id]) {
+          startTimes.current[a.id] = now
+        }
+        // 任务结束清除时间
+        if (a.status !== 'running' && startTimes.current[a.id]) {
+          delete startTimes.current[a.id]
+        }
+        return {
+          ...a,
+          startedAt: startTimes.current[a.id],
+          errorMsg: a.status === 'error' ? prev?.errorMsg || '执行出错' : undefined,
+          lastOutput: prev?.lastOutput,
+        }
+      })
+      setStatus({ agents })
+    })
+
     Sidecar.listAgents().then((agents) => {
       setStatus({
         agents: agents.map((a) => ({
@@ -23,15 +60,47 @@ function MiniApp() {
     return unsub
   }, [])
 
+  // 展开时调整窗口高度
+  useEffect(() => {
+    const height = expanded ? 52 + Math.min(status.agents.length * 44 + 20, 300) : 52
+    // 通过 CSS 让内容自然撑开，但窗口高度需要通知主窗口
+    window.parent.postMessage({ type: 'resize', height }, '*')
+  }, [expanded, status.agents.length])
+
   const running = status.agents.filter((a) => a.status === 'running').length
   const queued = status.agents.filter((a) => a.status === 'queued').length
   const errors = status.agents.filter((a) => a.status === 'error').length
+  const done = status.agents.filter((a) => a.status === 'idle').length
 
   const statusColor = (s: string) =>
     s === 'running' ? '#e8a33d' : s === 'queued' ? '#4d8cf0' : s === 'error' ? '#e5534b' : '#6e7789'
 
   const statusLabel = (s: string) =>
-    s === 'running' ? '运行中' : s === 'queued' ? '排队' : s === 'error' ? '出错' : '空闲'
+    s === 'running' ? '运行中' : s === 'queued' ? '排队' : s === 'error' ? '出错' : '完成'
+
+  // 格式化运行时间
+  const formatElapsed = (startedAt?: number): string => {
+    if (!startedAt) return ''
+    const secs = Math.floor((Date.now() - startedAt) / 1000)
+    if (secs < 60) return `${secs}s`
+    const mins = Math.floor(secs / 60)
+    if (mins < 60) return `${mins}m`
+    return `${Math.floor(mins / 60)}h${mins % 60}m`
+  }
+
+  // 双击状态点：聚焦主窗口并切换到该 agent
+  const handleAgentClick = (agentId: string) => {
+    setSelectedAgent(agentId)
+    // 通知主窗口切换 agent
+    window.parent.postMessage({ type: 'focus-agent', agentId }, '*')
+  }
+
+  // 右键菜单
+  const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
+    e.preventDefault()
+    // 简化：右键停止 agent
+    Sidecar.stopAgent(agentId)
+  }
 
   return (
     <div
@@ -60,7 +129,7 @@ function MiniApp() {
           borderBottom: expanded ? 'none' : undefined,
           height: 52,
           boxSizing: 'border-box',
-          transition: 'border-radius 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+          transition: 'border-radius 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
           position: 'relative',
         }}
       >
@@ -70,16 +139,19 @@ function MiniApp() {
         </span>
 
         {/* Agent 状态点 */}
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1, overflow: 'hidden' }}>
           {status.agents.length === 0 && (
             <span style={{ fontSize: 11, color: '#6e7789' }}>无 agent</span>
           )}
-          {status.agents.slice(0, 6).map((a) => (
+          {status.agents.slice(0, 8).map((a) => (
             <div
               key={a.id}
-              style={{ position: 'relative' }}
+              style={{ position: 'relative', flexShrink: 0 }}
               onMouseEnter={() => setHovered(a.id)}
               onMouseLeave={() => setHovered(null)}
+              onClick={() => handleAgentClick(a.id)}
+              onDoubleClick={() => handleAgentClick(a.id)}
+              onContextMenu={(e) => handleContextMenu(e, a.id)}
             >
               <span
                 style={{
@@ -152,7 +224,15 @@ function MiniApp() {
                   }}
                 >
                   <div style={{ fontWeight: 600, marginBottom: 2 }}>{a.name}</div>
-                  <div style={{ color: statusColor(a.status), fontSize: 10 }}>{statusLabel(a.status)}</div>
+                  <div style={{ color: statusColor(a.status), fontSize: 10 }}>
+                    {statusLabel(a.status)}
+                    {a.startedAt && a.status === 'running' && ` · ${formatElapsed(a.startedAt)}`}
+                  </div>
+                  {a.errorMsg && a.status === 'error' && (
+                    <div style={{ color: '#e5534b', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal' }}>
+                      {a.errorMsg}
+                    </div>
+                  )}
                   {a.task && (
                     <div style={{ color: '#a4adbd', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal', wordBreak: 'break-all' }}>
                       {a.task}
@@ -162,19 +242,18 @@ function MiniApp() {
               )}
             </div>
           ))}
-          {status.agents.length > 6 && (
-            <span style={{ fontSize: 10, color: '#6e7789' }}>+{status.agents.length - 6}</span>
+          {status.agents.length > 8 && (
+            <span style={{ fontSize: 10, color: '#6e7789' }}>+{status.agents.length - 8}</span>
           )}
         </div>
 
         {/* 统计 */}
-        {(running > 0 || queued > 0 || errors > 0) && (
-          <span style={{ fontSize: 11, color: '#a4adbd', display: 'flex', gap: 6 }}>
-            {running > 0 && <span style={{ color: '#e8a33d' }}>{running} 运行</span>}
-            {queued > 0 && <span style={{ color: '#4d8cf0' }}>{queued} 排队</span>}
-            {errors > 0 && <span style={{ color: '#e5534b' }}>{errors} 出错</span>}
-          </span>
-        )}
+        <span style={{ fontSize: 11, color: '#a4adbd', display: 'flex', gap: 6, flexShrink: 0 }}>
+          {running > 0 && <span style={{ color: '#e8a33d' }}>{running} 运行</span>}
+          {queued > 0 && <span style={{ color: '#4d8cf0' }}>{queued} 排队</span>}
+          {errors > 0 && <span style={{ color: '#e5534b' }}>{errors} 错</span>}
+          {done > 0 && running === 0 && <span style={{ color: '#3ecf8e' }}>{done} 完成</span>}
+        </span>
 
         {/* 展开/收起 */}
         <button
@@ -190,7 +269,7 @@ function MiniApp() {
             cursor: 'pointer',
             display: 'grid',
             placeItems: 'center',
-            transition: 'all 0.2s',
+            transition: 'all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
             transform: expanded ? 'rotate(180deg)' : 'none',
           }}
           title={expanded ? '收起' : '展开详情'}
@@ -219,8 +298,9 @@ function MiniApp() {
         </button>
       </div>
 
-      {/* 展开详情面板（带动画） */}
+      {/* 展开详情面板（可滚动） */}
       <div
+        ref={expandedRef}
         style={{
           background: 'rgba(15, 17, 26, 0.92)',
           borderRadius: '0 0 20px 20px',
@@ -228,22 +308,27 @@ function MiniApp() {
           borderTop: '1px solid rgba(255,255,255,0.06)',
           backdropFilter: 'blur(20px) saturate(180%)',
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          maxHeight: expanded ? 220 : 0,
-          overflow: 'hidden',
-          transition: 'max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s',
+          maxHeight: expanded ? 280 : 0,
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          transition: 'max-height 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s',
           opacity: expanded ? 1 : 0,
-        }}
+          // @ts-ignore
+          '--app-region': 'no-drag',
+        } as React.CSSProperties}
       >
         <div style={{ padding: '12px 16px' }}>
           {status.agents.map((a) => (
             <div
               key={a.id}
+              onClick={() => handleAgentClick(a.id)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
                 padding: '8px 0',
                 borderBottom: '1px solid rgba(255,255,255,0.05)',
+                cursor: 'pointer',
               }}
             >
               <span
@@ -255,17 +340,30 @@ function MiniApp() {
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow: a.status === 'running' ? `0 0 8px ${a.color}` : 'none',
                   animation: a.status === 'running' ? 'pulse 1s infinite' : a.status === 'error' ? 'errorPulse 0.8s infinite' : 'none',
+                  flexShrink: 0,
                 }}
               />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, color: '#e8ebf1', fontWeight: 500 }}>{a.name}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 12, color: '#e8ebf1', fontWeight: 500 }}>{a.name}</span>
+                  {a.startedAt && a.status === 'running' && (
+                    <span style={{ fontSize: 10, color: '#6e7789' }}>
+                      {formatElapsed(a.startedAt)}
+                    </span>
+                  )}
+                </div>
                 {a.task && (
                   <div style={{ fontSize: 10, color: '#6e7789', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {a.task}
                   </div>
                 )}
+                {a.errorMsg && a.status === 'error' && (
+                  <div style={{ fontSize: 10, color: '#e5534b', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {a.errorMsg}
+                  </div>
+                )}
               </div>
-              <span style={{ fontSize: 10, color: statusColor(a.status), fontWeight: 600 }}>
+              <span style={{ fontSize: 10, color: statusColor(a.status), fontWeight: 600, flexShrink: 0 }}>
                 {statusLabel(a.status)}
               </span>
             </div>
@@ -282,6 +380,20 @@ function MiniApp() {
         @keyframes errorPulse {
           0%, 100% { opacity: 1; box-shadow: 0 0 10px #e5534b; }
           50% { opacity: 0.6; box-shadow: 0 0 20px #e5534b; }
+        }
+        /* 细滚动条 */
+        ::-webkit-scrollbar {
+          width: 4px;
+        }
+        ::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+          background: rgba(255,255,255,0.1);
+          border-radius: 2px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+          background: rgba(255,255,255,0.2);
         }
       `}</style>
     </div>
