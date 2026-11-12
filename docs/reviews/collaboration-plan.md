@@ -4,6 +4,12 @@
 > 前置评审：`chat-architecture-review.html`（问题取证）、`knowledge-architecture-review.html`。
 > 本文只写要建什么、按什么顺序、怎样算可用。
 
+> **决策状态（2025-11-12 已定）**
+> - P1 群聊语义 → **共享 transcript + 协作**，不是纯广播。记于 [`ADR-0001`](../adr/0001-group-chat-discussion-model.md)。
+> - P2 `create_agent` → **可指定 backend**，仅限用户已配置的 provider。
+> - P3 子 agent 位置 → **侧栏嵌套在父 agent 下方**。
+> - P4 → ADR 已记。
+
 ---
 
 ## 0. 三个问题的真实结论
@@ -95,6 +101,8 @@ Append(convID, msg)        → Message        落一条（agent 回复用）
   Delivery{ AgentID, Status(queued|ran|failed|skipped), Reason }
   ```
 - `Members` 保留，但**只用于投递决策**，不再用于渲染（渲染用 `FromName` 快照）。
+- `Conversation` 增加 `Kind(dm|channel)` 与 `Policy`。单聊固定 `PolicyDirect`，群聊建时可选定 `PolicyDiscuss`（默认）。
+- 消息结构带 `Kind` 字段区分 `user` / `agent` / `system`，因为回合策略需要知道「这条是谁说的」才能决定下一轮谁回。
 - 单聊收敛为 `Kind=dm` 的 Conversation，`agent.Messages` 降级为**该 agent 的私有轮次**（不含群上下文）。
 - 补 `Delete`。
 - 抽 `Collection[T]`：有序集合 + 原子落盘，channel/agent 共用一份实现。
@@ -126,14 +134,31 @@ Append(convID, msg)        → Message        落一条（agent 回复用）
   ```
 - `@` 解析**只有一份**，前后端共用同一份语义（后端导出、前端复刻同样的规则，或改为后端提供 `ParseMentions`）。
 
-**关于「广播 vs 讨论」的决策（必须你拍）**
+**语义已定（ADR-0001）：共享 transcript + 显式回合策略**
 
-`docs/design.md` 写着「语义保持广播，不做多轮收敛编排」。本阶段会**推翻这条**：
+不是纯广播，也不是自由讨论，而是**互相可见 + 受控回合**：
 
-- 维持广播 → 只做 2.1 + 修 `isRelevantToRole`，群聊仍各说各话
-- 改为讨论 → 做本阶段，agent 能看到彼此的发言
+```
+用户发言
+  └→ 一轮成员回复（每个被选中的成员都能看到 transcript）
+       └→ 回复写入 transcript
+            └→ 停止（不自动再触发下一轮）
+```
 
-**我的建议是做讨论**，因为你的原话是「协作 + 讨论」，而广播模式下「协作」不可能成立。
+关键约束：**一次用户发言最多传播一轮**。A 看到 B 的发言是在**同一轮内**（transcript 已含 B 之前的发言），
+但 A 的回复不会再自动触发 B。这既保证「互相可见」，又避免往复风暴。
+
+要实现「多轮讨论」，由用户再发一句（或 agent 在 2.3 用 `send_message` 显式发起），而不是自动收敛。
+
+**`TurnPolicy` 三种的具体语义**
+
+| Policy | 谁能回 | transcript 进谁的 prompt | 用例 |
+|---|---|---|---|
+| `PolicyDirect` | 只有被点名者 | 只有被点名者 | 单聊；群里 @ 一人 |
+| `PolicyDiscuss` | 被 @ 或显式指派者 | **所有成员** | 群里 @ 多人 / @all |
+| `PolicyRoundRobin` | 按成员顺序轮流 | 所有成员 | 评审、头脑风暴 |
+
+单聊固定 `PolicyDirect`。群聊建频道时可选，默认 `PolicyDiscuss`。
 
 **怎样算可用**
 1. 群里 A 说「用 REST」，B 被 @ 后**能在 prompt 里看到 A 的那句话**（测试断言 prompt 内容）
@@ -176,7 +201,7 @@ type Message struct {
 | 工具 | 作用 | 为什么必须 |
 |---|---|---|
 | `list_agents` | 看有哪些 agent、各自角色和状态 | 派活前得知道谁能干 |
-| `create_agent` | 建一个子 agent（可指定 role、backend） | **派活的核心动作** |
+| `create_agent` | 建一个子 agent（name / role / **可选 backend**） | **派活的核心动作**。backend 必须在用户已配置的 provider 白名单内，否则报错给模型 |
 | `send_message` | 给某 agent / 某 conversation 发消息 | 派活 / 回话 |
 | `wait_for` | 等某个 agent 或某个 conversation 到达某状态 | **同步语义，防失控** |
 | `report` | 把结果汇报给用户（结束本轮） | 终止条件 |
@@ -204,6 +229,9 @@ loop (max 8 turns):
 
 - `create_agent` 创建的子 agent 记 `ParentID`。
 - 父 agent 结束后，子 agent **保留**（用户能看到它们干了什么），但标记 `Orphaned`。
+- `ParentID` 进 `Agent` 结构体，**必须同步四处白名单**（`Save` / `Load` / `Snapshot` / `viewMap`）——
+  这是仓库既有约定，`manager_test.go` 的 round-trip 测试会守住。
+- 侧栏按 `ParentID` 做**一层缩进嵌套**（P3 已定），不建独立分组。
 - 防环：`ParentID` 链深度上限（如 3），超过则 `create_agent` 直接返回错误给模型。
 - 防风暴：同一父 agent 在单轮内创建 agent 数量受限。
 
@@ -223,7 +251,7 @@ loop (max 8 turns):
 - **composer module**：草稿 + 补全 + 校验 + 提交，单聊/群聊共用。
 - 切换会话保留草稿、滚动位置。
 - 消息上的 `Deliveries` 变成可见状态（✓ / ✕ 队列满 / — 跳过原因）。
-- agent 状态面板：显示 `ParentID` 关系，让用户看出「这个 agent 是谁派出来的」。
+- 侧栏按 `ParentID` 嵌套在父 agent 下方（一层缩进）。父 agent 停止后子 agent 标「孤立」但仍可操作。
 
 **怎样算可用**
 1. 在 A 会话输入一半切到 B 再切回，草稿还在
@@ -257,19 +285,44 @@ loop (max 8 turns):
 
 ---
 
-## 4. 待拍板（阻塞项）
+## 4. 已拍板的决策
 
-**P1 · 群聊语义**：维持广播，还是改成讨论？
-→ 影响 2.2 做不做。不改则 2.3 的派活只能靠用户手动派。
+### P1 · 群聊 = 共享 transcript + 协作（已定）
+记于 [`ADR-0001`](../adr/0001-group-chat-discussion-model.md)。
+互相可见，但**一次用户发言最多传播一轮**，避免往复风暴。多轮讨论由用户再发或 agent 显式发起。
 
-**P2 · 派活的权限边界**：agent 能创建的 agent，backend 是继承父的还是可指定？
-→ 影响 `create_agent` 的签名。**建议可指定**，但仅限用户已配置过的 provider。
+### P2 · `create_agent` 可指定 backend（已定）
 
-**P3 · 子 agent 的可见性**：默认在侧栏建一个子分组，还是折叠在父 agent 下面？
-→ 影响 2.4 的侧栏结构。
+签名形状：
 
-**P4 · 是否接受推翻 `docs/design.md` 的「广播」决定**
-→ 要的话我记一条 ADR，否则下一轮评审会又提一遍。
+```
+create_agent(name, role, backend?) → AgentRef
+
+backend 省略时继承父 agent 的 backend。
+backend 显式给出时，必须在「用户已配置的 provider 白名单」内，否则返回错误给模型。
+```
+
+**白名单从哪来**：`SettingsModal` 里用户配过的 provider（`mock` 恒可用；`ollama`/`openai`/`deepseek`/`claude`
+以用户填过 `baseUrl` 或 `apiKey` 的为准）。**不接受模型自己编 provider 名**——那是提权路径。
+
+### P3 · 子 agent 在侧栏嵌套于父 agent 下（已定）
+
+侧栏结构：
+
+```
+▼ 后端 agent        [运行中]
+    ├ 前端 agent    [运行中]   ← 由后端 create_agent 创建
+    └ 测试 agent    [空闲]
+▶ 前端 agent        [空闲]
+● #评审频道         3 成员
+```
+
+- 缩进一层，不建独立分组 —— 独立分组会让「谁派了谁」在视觉上断掉。
+- 父子关系来自 `Agent.ParentID`。
+- 父 agent 停止时，子 agent 不自动停（它们可能还在干有用的事），但 UI 标「孤立」。
+
+### P4 · ADR 已记（已定）
+`docs/adr/0001-group-chat-discussion-model.md`。
 
 ---
 

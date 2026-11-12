@@ -8,7 +8,7 @@
 | [`knowledge-architecture-review.html`](knowledge-architecture-review.html) | 知识库存储与联动（scope / 注入路径 / CLI 与频道） | 提案，待决策 |
 | [`chat-architecture-review.html`](chat-architecture-review.html) | 群聊与单聊（投递 fan-out / 共享 transcript / 双 manager 重复） | 提案，待决策 |
 | [`knowledge-plan.md`](knowledge-plan.md) | 知识库修复实施计划（分步 + 验收命令） | 待执行 |
-| [`collaboration-plan.md`](collaboration-plan.md) | 协作/讨论/主动派活 从 0 到 1 实现方案 | 待拍板 |
+| [`collaboration-plan.md`](collaboration-plan.md) | 协作/讨论/主动派活 从 0 到 1 实现方案 | 决策已定，待实施 |
 
 ## 直接读纯文本
 

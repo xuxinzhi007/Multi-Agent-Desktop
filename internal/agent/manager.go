@@ -45,8 +45,9 @@ type Agent struct {
 }
 
 // KnowledgeProvider 是 agent 包对知识库的最小依赖（避免反向依赖具体存储实现）。
+// View 返回该 agent 该看到的知识库 prompt 段。
 type KnowledgeProvider interface {
-	NotesForSystemPrompt() []string
+	View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (block string, ids []string)
 }
 
 // Emitter 把事件推给前端。由 server 层注入，避免 agent 直连 WS。
@@ -107,11 +108,11 @@ func systemPromptFor(role string, kb KnowledgeProvider) string {
 	if kb == nil {
 		return base
 	}
-	lines := kb.NotesForSystemPrompt()
-	if len(lines) == 0 {
+	block, _ := kb.View("", role, nil, "", 0)
+	if block == "" {
 		return base
 	}
-	return "## 知识库\n- " + strings.Join(lines, "\n- ") + "\n\n" + base
+	return block + "\n" + base
 }
 
 // SetStore 设置持久化文件路径，并尝试加载。

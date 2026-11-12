@@ -1075,3 +1075,16 @@ func (k *knowledgeProvider) NotesForSystemPrompt() []string {
 	}
 	return out
 }
+
+// View 实现 agent.KnowledgeProvider 接口。
+func (k *knowledgeProvider) View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (string, []string) {
+	if k == nil || k.store == nil {
+		return "", nil
+	}
+	notes := k.store.Query(knowledge.Query{})
+	if len(notes) == 0 {
+		return "", nil
+	}
+	v := knowledge.ViewFromNotes(notes, agentID, role, knowledgeIDs, recentText, budget)
+	return v.Block, v.IDs
+}

@@ -355,7 +355,7 @@ func TestSystemPromptFor(t *testing.T) {
 		{
 			name:      "TC-019 两条笔记前置注入",
 			kb:        &stubKnowledge{lines: []string{"约定: 用 Go 风格", "术语: agent=会话"}},
-			wantHas:   []string{"## 知识库\n- 约定: 用 Go 风格\n- 术语: agent=会话\n\n", base},
+			wantHas:   []string{"## 知识库\n- 约定: 用 Go 风格\n- 术语: agent=会话\n", base},
 			wantExact: "",
 		},
 	}
@@ -523,4 +523,13 @@ func TestAgentConcurrentSaveKeepsFileValid(t *testing.T) {
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("Save(%q) left temporary file behind: stat err = %v", path, err)
 	}
+}
+
+// View 实现 KnowledgeProvider 接口。
+func (s *stubKnowledge) View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (string, []string) {
+	s.calls++
+	if len(s.lines) == 0 {
+		return "", nil
+	}
+	return "## 知识库\n- " + strings.Join(s.lines, "\n- "), nil
 }

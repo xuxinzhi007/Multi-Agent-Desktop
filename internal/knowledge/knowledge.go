@@ -264,6 +264,99 @@ func Render(notes []Note) string {
 	return b.String()
 }
 
+// View 是知识库视图：一个 agent 该看到什么。
+// 返回 prompt 段和命中的笔记 ID 列表。
+type View struct {
+	Block string   // 渲染后的 prompt 段
+	IDs   []string // 命中的笔记 ID
+}
+
+// ViewForAgent 为指定 agent 生成知识库视图。
+// agentID: agent 的 ID（用于匹配 agent 私有笔记）
+// role: agent 的角色（用于角色相关性匹配）
+// knowledgeIDs: agent 显式附加的知识 ID 列表
+// recentText: 最近对话文本（用于相关性排序，可为空）
+// budget: 字符预算（0 表示不限制）
+func ViewForAgent(agentID, role string, knowledgeIDs []string, recentText string, budget int) View {
+	// 这里需要访问 store，所以是包级函数
+	// 实际实现需要传入 store
+	return View{}
+}
+
+// ViewFromNotes 从笔记列表生成视图（纯函数，便于测试）。
+func ViewFromNotes(notes []Note, agentID, role string, knowledgeIDs []string, recentText string, budget int) View {
+	if len(notes) == 0 {
+		return View{}
+	}
+
+	// 1. 收集命中的笔记
+	var matched []Note
+	seen := make(map[string]bool)
+
+	// 1.1 agent 显式附加的（最高优先级）
+	for _, id := range knowledgeIDs {
+		for _, n := range notes {
+			if n.ID == id && !seen[n.ID] {
+				matched = append(matched, n)
+				seen[n.ID] = true
+			}
+		}
+	}
+
+	// 1.2 agent 私有的
+	for _, n := range notes {
+		if n.Scope == agentID && !seen[n.ID] {
+			matched = append(matched, n)
+			seen[n.ID] = true
+		}
+	}
+
+	// 1.3 全局的
+	for _, n := range notes {
+		if (n.Scope == "" || n.Scope == "global") && !seen[n.ID] {
+			matched = append(matched, n)
+			seen[n.ID] = true
+		}
+	}
+
+	// 1.4 角色相关的
+	for _, n := range MatchNotesForAgent(role, notes) {
+		if !seen[n.ID] {
+			matched = append(matched, n)
+			seen[n.ID] = true
+		}
+	}
+
+	// 2. 字符预算裁剪
+	if budget > 0 {
+		matched = trimByBudget(matched, budget)
+	}
+
+	// 3. 渲染
+	block := Render(matched)
+	var ids []string
+	for _, n := range matched {
+		ids = append(ids, n.ID)
+	}
+
+	return View{Block: block, IDs: ids}
+}
+
+// trimByBudget 按字符预算裁剪笔记列表。
+func trimByBudget(notes []Note, budget int) []Note {
+	var out []Note
+	used := 0
+	for _, n := range notes {
+		size := len(n.Title) + len(n.Body) + 10 // 估算
+		if used+size > budget && len(out) > 0 {
+			break
+		}
+		out = append(out, n)
+		used += size
+	}
+	return out
+}
+
 // MatchNotesForAgent 根据 agent 角色匹配相关知识。
 func MatchNotesForAgent(role string, notes []Note) []Note {
 	var matched []Note
