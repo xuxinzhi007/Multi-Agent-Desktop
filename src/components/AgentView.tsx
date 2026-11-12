@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { AgentView as Agent, Message } from '../mygo'
+import { Sidecar, type AgentView as Agent, type Config, type Message } from '../mygo'
+import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 
 type Props = {
   agent: Agent | null
@@ -16,6 +17,8 @@ type Props = {
   inspectorOpen: boolean
   onRoute?: (targetName: string, text: string) => void
   agents?: Agent[]
+  /** 会话级配置变更（工作目录 / 模型），只影响当前会话 */
+  onConfig: (patch: { workDir?: string; llm?: Config }) => void
 }
 
 export default function AgentView(p: Props) {
@@ -230,6 +233,11 @@ export default function AgentView(p: Props) {
         </div>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <SessionConfigChips
+            agent={p.agent}
+            fallbackWorkDir={p.workDir}
+            onConfig={p.onConfig}
+          />
           {running && (
             <button className="c-btn c-btn--danger c-btn--sm" onClick={p.onStop}>
               停止
@@ -593,6 +601,307 @@ export default function AgentView(p: Props) {
       )}
     </div>
   )
+}
+
+function SessionConfigChips({
+  agent,
+  fallbackWorkDir,
+  onConfig,
+}: {
+  agent: Agent
+  fallbackWorkDir: string
+  onConfig: (patch: { workDir?: string; llm?: Config }) => void
+}) {
+  const [open, setOpen] = useState<'none' | 'dir' | 'model'>('none')
+  const [dirDraft, setDirDraft] = useState('')
+  const [cfgDraft, setCfgDraft] = useState<Config>(
+    agent.llm ?? { provider: 'mock', baseUrl: '', apiKey: '', model: '' },
+  )
+  const [models, setModels] = useState<string[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelHint, setModelHint] = useState('')
+
+  const effectiveDir = agent.workDir || fallbackWorkDir
+  const effectiveProvider = agent.llm?.provider || 'mock'
+  const effectiveModel = agent.llm?.model || ''
+
+  // 切换会话时重置草稿，避免把上个会话的配置带过去
+  useEffect(() => {
+    setOpen('none')
+    setCfgDraft(agent.llm ?? { provider: 'mock', baseUrl: '', apiKey: '', model: '' })
+    setModels([])
+    setModelHint('')
+  }, [agent.id, agent.llm])
+
+  const loadModels = async () => {
+    setLoadingModels(true)
+    setModelHint('')
+    try {
+      const list = await Sidecar.listModelsFor(agent.id, cfgDraft)
+      setModels(list)
+      if (list.length === 0) setModelHint('未获取到模型列表')
+    } catch (e) {
+      // 内联提示，不弹 toast：ListModels 失败是常见的未配置态
+      setModelHint(e instanceof Error ? e.message : '加载失败')
+    } finally {
+      setLoadingModels(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4 }}>
+      {/* 工作目录 chip */}
+      <button
+        className="mono"
+        onClick={() => {
+          setOpen(open === 'dir' ? 'none' : 'dir')
+          setDirDraft(effectiveDir)
+        }}
+        title={`工作目录：${effectiveDir || '未设置'}`}
+        style={chipStyle(open === 'dir')}
+      >
+        📁 {shortPath(effectiveDir)}
+      </button>
+
+      {/* 模型 chip */}
+      <button
+        className="mono"
+        onClick={() => setOpen(open === 'model' ? 'none' : 'model')}
+        title={`模型：${effectiveProvider}${effectiveModel ? ' / ' + effectiveModel : ''}`}
+        style={chipStyle(open === 'model')}
+      >
+        ✦ {effectiveModel || effectiveProvider}
+      </button>
+
+      {open !== 'none' && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 900 }}
+            onClick={() => setOpen('none')}
+          />
+          <div
+            className="fade-up"
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 6px)',
+              right: 0,
+              width: 320,
+              zIndex: 901,
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: 'var(--shadow-lg)',
+              padding: 12,
+            }}
+          >
+            {open === 'dir' ? (
+              <>
+                <div style={popoverLabel}>本会话工作目录</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    value={dirDraft}
+                    onChange={(e) => setDirDraft(e.target.value)}
+                    placeholder="/path/to/project"
+                    className="mono"
+                    style={inputStyle}
+                  />
+                  <button
+                    className="c-btn c-btn--secondary c-btn--sm"
+                    onClick={async () => {
+                      const picked = await Sidecar.pickDirectory()
+                      if (picked) setDirDraft(picked)
+                    }}
+                  >
+                    浏览…
+                  </button>
+                </div>
+                <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                  <button
+                    className="c-btn c-btn--primary c-btn--sm"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      onConfig({ workDir: dirDraft })
+                      setOpen('none')
+                    }}
+                  >
+                    应用
+                  </button>
+                  <button
+                    className="c-btn c-btn--ghost c-btn--sm"
+                    onClick={() => {
+                      onConfig({ workDir: '' })
+                      setOpen('none')
+                    }}
+                    title="回落到全局默认目录"
+                  >
+                    跟随全局
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={popoverLabel}>本会话模型</div>
+                <div style={{ display: 'grid', gap: 3, marginBottom: 8 }}>
+                  {PROVIDERS.map((x) => {
+                    const on = cfgDraft.provider === x.id
+                    return (
+                      <button
+                        key={x.id}
+                        onClick={() => {
+                          setCfgDraft({
+                            provider: x.id,
+                            baseUrl: DEFAULT_BASE[x.id] ?? '',
+                            apiKey: x.id === cfgDraft.provider ? cfgDraft.apiKey : '',
+                            model: DEFAULT_MODEL[x.id] ?? '',
+                          })
+                          setModels([])
+                          setModelHint('')
+                        }}
+                        style={{
+                          textAlign: 'left',
+                          padding: '6px 9px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: `1px solid ${on ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+                          background: on ? 'var(--accent-dim)' : 'var(--bg-surface)',
+                          color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
+                          fontSize: 'var(--text-xs)',
+                        }}
+                      >
+                        {x.label}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {cfgDraft.provider !== 'mock' && (
+                  <>
+                    <input
+                      value={cfgDraft.baseUrl}
+                      onChange={(e) => setCfgDraft({ ...cfgDraft, baseUrl: e.target.value })}
+                      placeholder={DEFAULT_BASE[cfgDraft.provider] ?? 'Base URL'}
+                      className="mono"
+                      style={{ ...inputStyle, marginBottom: 6 }}
+                    />
+                    <input
+                      type="password"
+                      value={cfgDraft.apiKey}
+                      onChange={(e) => setCfgDraft({ ...cfgDraft, apiKey: e.target.value })}
+                      placeholder="API Key（可留空）"
+                      className="mono"
+                      style={{ ...inputStyle, marginBottom: 6 }}
+                    />
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        value={cfgDraft.model}
+                        onChange={(e) => setCfgDraft({ ...cfgDraft, model: e.target.value })}
+                        placeholder={DEFAULT_MODEL[cfgDraft.provider] ?? '模型名'}
+                        className="mono"
+                        style={inputStyle}
+                      />
+                      <button
+                        className="c-btn c-btn--secondary c-btn--sm"
+                        onClick={loadModels}
+                        disabled={loadingModels}
+                      >
+                        {loadingModels ? '…' : '列表'}
+                      </button>
+                    </div>
+                    {models.length > 0 && (
+                      <select
+                        value={cfgDraft.model}
+                        onChange={(e) => setCfgDraft({ ...cfgDraft, model: e.target.value })}
+                        style={{ ...inputStyle, marginTop: 6 }}
+                      >
+                        <option value="">选择模型…</option>
+                        {models.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {modelHint && <div style={hintStyle}>{modelHint}</div>}
+                  </>
+                )}
+
+                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                  <button
+                    className="c-btn c-btn--primary c-btn--sm"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      onConfig({ llm: cfgDraft })
+                      setOpen('none')
+                    }}
+                  >
+                    应用
+                  </button>
+                  <button
+                    className="c-btn c-btn--ghost c-btn--sm"
+                    onClick={() => {
+                      onConfig({ llm: { provider: 'mock', baseUrl: '', apiKey: '', model: '' } })
+                      setOpen('none')
+                    }}
+                    title="回落到全局默认模型"
+                  >
+                    跟随全局
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function chipStyle(active: boolean): React.CSSProperties {
+  return {
+    maxWidth: 150,
+    padding: '3px 8px',
+    borderRadius: 'var(--radius-full)',
+    border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+    background: active ? 'var(--accent-dim)' : 'var(--bg-surface)',
+    color: active ? 'var(--accent-bright)' : 'var(--text-tertiary)',
+    fontSize: 'var(--text-xs)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    cursor: 'pointer',
+    flexShrink: 0,
+  }
+}
+
+const popoverLabel: React.CSSProperties = {
+  fontSize: 'var(--text-xs)',
+  color: 'var(--text-tertiary)',
+  marginBottom: 6,
+  fontWeight: 500,
+}
+
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  padding: '6px 9px',
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--border-default)',
+  background: 'var(--bg-surface)',
+  color: 'var(--text-primary)',
+  fontSize: 'var(--text-xs)',
+  minWidth: 0,
+}
+
+const hintStyle: React.CSSProperties = {
+  fontSize: 'var(--text-xs)',
+  color: 'var(--text-disabled)',
+  marginTop: 4,
+  lineHeight: 'var(--leading-normal)',
+}
+
+function shortPath(dir: string): string {
+  if (!dir) return '未设置'
+  const parts = dir.split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : dir
 }
 
 function ModeBtn({

@@ -14,6 +14,20 @@ export const PROVIDERS = [
   { id: 'claude', label: 'Claude', hint: '需 OpenAI 兼容网关' },
 ]
 
+export const DEFAULT_BASE: Record<string, string> = {
+  ollama: 'http://127.0.0.1:11434',
+  openai: 'https://api.openai.com',
+  deepseek: 'https://api.deepseek.com',
+  claude: 'https://api.anthropic.com',
+}
+
+export const DEFAULT_MODEL: Record<string, string> = {
+  ollama: 'qwen2.5-coder:7b',
+  openai: 'gpt-4o-mini',
+  deepseek: 'deepseek-chat',
+  claude: 'claude-3-5-sonnet-20241022',
+}
+
 export const AGENT_COLORS = [
   'var(--agent-1)',
   'var(--agent-2)',

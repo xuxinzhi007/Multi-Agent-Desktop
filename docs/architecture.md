@@ -58,34 +58,37 @@
 | 进程退出 | kill 进程组 | taskkill /T | `SysProcAttr{Setpgid:true}` / `CREATE_NEW_PROCESS_GROUP` |
 | 自动更新 | Tauri updater 需签名 | 同 | v1.0 前关掉 |
 
-## 四、目录结构
+## 四、目录结构（MyGo 迁移后）
+
+> 注：原 Tauri 骨架（`src-tauri/`）与 WS sidecar 方案已废弃，现为单 Go 进程 + React 前端。
 
 ```
 multi-agent-desktop/
-├── src-tauri/              # Rust 壳（几乎不动）
-│   ├── src/main.rs
-│   └── tauri.conf.json
-├── src/                    # React 前端
-│   ├── pages/AgentPanel.tsx
-│   ├── components/PetWidget.tsx
-│   └── lib/ws.ts
-├── sidecar/                # Go 后端（核心）
-│   ├── main.go
-│   ├── internal/
-│   │   ├── supervisor/
-│   │   ├── worktree/
-│   │   ├── pty/
-│   │   ├── llm/
-│   │   └── events/
-│   └── go.mod
-├── assets/pet/             # 小鲸鱼素材（从 dsh-pet 复制）
-├── tools/
-│   └── build-sidecar.sh    # 三端交叉编译
-├── docs/
-│   ├── research.md
-│   └── architecture.md
+├── main.go                    # Sidecar：绑定 API + 窗口 + 事件转发
+├── internal/
+│   ├── agent/                 # N 个会话：队列、worker、会话级配置、持久化
+│   ├── channel/               # 频道（群聊）：广播 + channels.json 持久化
+│   ├── knowledge/             # 知识库：JSONL 存储 + system prompt 注入
+│   ├── cli/                   # claude / codex CLI runner
+│   ├── llm/                   # mock / ollama / openai 兼容流式客户端
+│   └── pty/                   # shell 执行
+├── src/                       # React 前端
+│   ├── App.tsx                # 选中态（agent | channel）、外壳布局
+│   ├── components/
+│   │   ├── AgentView.tsx      # 会话视图 + 头部配置 chip
+│   │   ├── ChannelView.tsx    # 群聊视图
+│   │   ├── KnowledgePanel.tsx # 知识库面板（检查器 Tab）
+│   │   ├── Inspector.tsx      # 改动 / 任务 / 工具 / 知识
+│   │   ├── Sidebar.tsx        # 频道 + Agent 列表
+│   │   └── SettingsModal.tsx  # 仅外观 + 全局默认提供方
+│   ├── lib/useSidecar.ts      # 单一状态源 + send() 协议
+│   └── mygo.ts                # `npm run generate` 生成，勿手改
+├── docs/                      # design.md / architecture.md / research.md
+├── specs/                     # 每个 wave 的 decision / check / evidence
 └── README.md
 ```
+
+**已删除**：`internal/supervisor`、`internal/worktree`、`internal/events`（死代码）。
 
 ## 五、里程碑（4 周）
 

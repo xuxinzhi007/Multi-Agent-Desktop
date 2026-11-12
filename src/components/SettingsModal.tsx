@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { PROVIDERS } from '../lib/presets'
+import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 import { useTheme, type Theme } from '../lib/useTheme'
 import { Sidecar } from '../mygo'
 import type { LLMConfig } from '../lib/useSidecar'
@@ -7,31 +7,13 @@ import type { LLMConfig } from '../lib/useSidecar'
 type Props = {
   open: boolean
   llm: LLMConfig
-  workDir: string
   onClose: () => void
   onSave: (cfg: LLMConfig) => void
-  onWorkDir: (dir: string) => void
-}
-
-const DEFAULT_BASE: Record<string, string> = {
-  ollama: 'http://127.0.0.1:11434',
-  openai: 'https://api.openai.com',
-  deepseek: 'https://api.deepseek.com',
-  claude: 'https://api.anthropic.com',
-}
-
-const DEFAULT_MODEL: Record<string, string> = {
-  ollama: 'qwen2.5-coder:7b',
-  openai: 'gpt-4o-mini',
-  deepseek: 'deepseek-chat',
-  claude: 'claude-3-5-sonnet-20241022',
 }
 
 export default function SettingsModal(p: Props) {
   const [cfg, setCfg] = useState<LLMConfig>(p.llm)
-  const [dir, setDir] = useState(p.workDir)
   const { theme, setTheme } = useTheme()
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [models, setModels] = useState<string[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [modelError, setModelError] = useState('')
@@ -39,9 +21,8 @@ export default function SettingsModal(p: Props) {
   useEffect(() => {
     if (p.open) {
       setCfg(p.llm)
-      setDir(p.workDir)
     }
-  }, [p.open, p.llm, p.workDir])
+  }, [p.open, p.llm])
 
   if (!p.open) return null
 
@@ -138,61 +119,7 @@ export default function SettingsModal(p: Props) {
           </div>
         </Field>
 
-        <Field label="窗口">
-          <button
-            onClick={() => {
-              const next = !alwaysOnTop
-              setAlwaysOnTop(next)
-              Sidecar.setAlwaysOnTop(next)
-            }}
-            style={{
-              width: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '9px 12px',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--bg-surface)',
-              border: `1px solid ${alwaysOnTop ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
-              transition: 'all var(--dur-fast) var(--ease)',
-            }}
-          >
-            <span
-              style={{
-                fontSize: 'var(--text-base)',
-                color: alwaysOnTop ? 'var(--accent-bright)' : 'var(--text-primary)',
-                fontWeight: alwaysOnTop ? 600 : 400,
-              }}
-            >
-              悬浮窗口（置顶）
-            </span>
-            <span
-              style={{
-                width: 32,
-                height: 18,
-                borderRadius: 'var(--radius-full)',
-                background: alwaysOnTop ? 'var(--accent-primary)' : 'var(--border-default)',
-                position: 'relative',
-                transition: 'background var(--dur-fast) var(--ease)',
-              }}
-            >
-              <span
-                style={{
-                  position: 'absolute',
-                  top: 2,
-                  left: alwaysOnTop ? 16 : 2,
-                  width: 14,
-                  height: 14,
-                  borderRadius: 'var(--radius-full)',
-                  background: '#fff',
-                  transition: 'left var(--dur-fast) var(--ease)',
-                }}
-              />
-            </span>
-          </button>
-        </Field>
-
-        <Field label="模型提供方">
+        <Field label="默认模型提供方">
           <div style={{ display: 'grid', gap: 4 }}>
             {PROVIDERS.map((x) => {
               const on = cfg.provider === x.id
@@ -307,30 +234,6 @@ export default function SettingsModal(p: Props) {
           </>
         )}
 
-        <Field label="工作目录">
-          <div style={{ display: 'flex', gap: 6 }}>
-            <input
-              value={dir}
-              onChange={(e) => setDir(e.target.value)}
-              className="mono"
-              style={{ flex: 1 }}
-              placeholder="/path/to/project"
-            />
-            <button
-              className="c-btn c-btn--secondary c-btn--sm"
-              onClick={async () => {
-                const picked = await Sidecar.pickDirectory()
-                if (picked) setDir(picked)
-              }}
-            >
-              浏览…
-            </button>
-          </div>
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginTop: 4 }}>
-            shell 命令在此执行
-          </div>
-        </Field>
-
         {cfg.provider === 'mock' && (
           <div
             style={{
@@ -356,7 +259,6 @@ export default function SettingsModal(p: Props) {
             style={{ flex: 1 }}
             onClick={() => {
               p.onSave(cfg)
-              if (dir !== p.workDir) p.onWorkDir(dir)
               p.onClose()
             }}
           >

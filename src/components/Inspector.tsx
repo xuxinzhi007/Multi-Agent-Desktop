@@ -47,7 +47,7 @@ const TOOL_META = {
   waiting: { icon: '!', color: 'var(--accent-primary)', label: '待批准' },
 } as const
 
-type Tab = 'changes' | 'todo' | 'tools'
+type Tab = 'changes' | 'todo' | 'tools' | 'knowledge'
 
 export default function Inspector({
   tab,
@@ -58,6 +58,7 @@ export default function Inspector({
   onClose,
   onApprove,
   onReject,
+  knowledge,
 }: {
   tab: Tab
   onTab: (t: Tab) => void
@@ -67,6 +68,8 @@ export default function Inspector({
   onClose: () => void
   onApprove?: (id: string) => void
   onReject?: (id: string) => void
+  /** 知识库面板内容；不传则不显示该 Tab */
+  knowledge?: { count: number; node: React.ReactNode }
 }) {
   const totalAdd = changes.reduce((n, c) => n + c.added, 0)
   const totalDel = changes.reduce((n, c) => n + c.removed, 0)
@@ -133,6 +136,14 @@ export default function Inspector({
           active={tab === 'tools'}
           onClick={() => onTab('tools')}
         />
+        {knowledge && (
+          <TabBtn
+            label="知识"
+            count={knowledge.count}
+            active={tab === 'knowledge'}
+            onClick={() => onTab('knowledge')}
+          />
+        )}
       </div>
 
       {/* 汇总 */}
@@ -158,6 +169,7 @@ export default function Inspector({
         {tab === 'changes' && <ChangesList changes={changes} />}
         {tab === 'todo' && <TodoList todos={todos} />}
         {tab === 'tools' && <ToolList tools={tools} />}
+        {tab === 'knowledge' && knowledge && knowledge.node}
       </div>
     </aside>
   )

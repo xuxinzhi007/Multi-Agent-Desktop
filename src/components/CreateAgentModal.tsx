@@ -1,22 +1,25 @@
 import { useEffect, useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
+import { Sidecar } from '../mygo'
 
 type Props = {
   open: boolean
   onClose: () => void
-  onCreate: (name: string, role: string, backend: string) => void
+  onCreate: (name: string, role: string, backend: string, workDir?: string) => void
 }
 
 export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
   const [name, setName] = useState('')
   const [role, setRole] = useState(ROLE_PRESETS[0].role)
   const [backend, setBackend] = useState('mock')
+  const [workDir, setWorkDir] = useState('')
 
   useEffect(() => {
     if (open) {
       setName('')
       setRole(ROLE_PRESETS[0].role)
       setBackend('mock')
+      setWorkDir('')
     }
   }, [open])
 
@@ -25,7 +28,7 @@ export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
   const submit = () => {
     const n = name.trim()
     if (!n) return
-    onCreate(n, role, backend)
+    onCreate(n, role, backend, workDir.trim() || undefined)
     onClose()
   }
 
@@ -132,6 +135,39 @@ export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: 6 }}>
+              工作目录（可选，仅本会话）
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                value={workDir}
+                onChange={(e) => setWorkDir(e.target.value)}
+                placeholder="留空则跟随全局默认"
+                className="mono"
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '8px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--border-default)',
+                  background: 'var(--bg-surface)',
+                  color: 'var(--text-primary)',
+                  fontSize: 'var(--text-xs)',
+                }}
+              />
+              <button
+                className="c-btn c-btn--secondary c-btn--sm"
+                onClick={async () => {
+                  const picked = await Sidecar.pickDirectory()
+                  if (picked) setWorkDir(picked)
+                }}
+              >
+                浏览…
+              </button>
+            </div>
           </div>
 
           <div>

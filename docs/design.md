@@ -152,32 +152,8 @@ Go Event → useSidecar reducer → React state → 组件渲染
 
 ## 5. 多 Agent 并发模型
 
-### 5.1 当前实现：Goroutine per Prompt
+### 5.1 实现：Queue + Worker（已落地）
 
-**现状**：每次 `Prompt` 起新 goroutine，独立 stream，无排队机制。
-
-```go
-func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
-    a := m.Get(req.AgentID)
-    runCtx, cancel := context.WithCancel(ctx)
-    a.cancel = cancel
-    
-    go func() {
-        stream, _ := client.Stream(runCtx, history)
-        for chunk := range stream {
-            m.emit("agent.delta", ...)
-        }
-        m.emit("agent.message", ...)
-    }()
-}
-```
-
-**问题**：
-- 用户连发两条消息 → 两个 goroutine 同时跑 → 历史乱序
-- 没有「执行中」状态管理，用户不知道当前在跑第几条
-- 停止按钮只能停当前，不能清队列
-
-### 5.2 目标实现：Queue + Worker
 
 **每个 agent 一个消息队列**：
 
@@ -213,11 +189,11 @@ idle --Prompt--> running --完成--> idle
 - **停止**：取消当前 running，清空 queue
 - **跳过**：取消当前，取 queue 下一个
 
-### 5.3 Agent 间协作
+### 5.2 Agent 间协作（已落地）
 
-**现状**：完全孤立，agent 不知道其他 agent 存在。
+**现状**：`Manager.Route(from, to, text)` 已实现，消息带 `[from X]` / `[to X]` 前缀，UI 里显示为路由气泡。
 
-**需要加的能力**：
+**能力矩阵**：
 
 | 能力 | 说明 | 实现 |
 |---|---|---|
@@ -256,7 +232,7 @@ Supervisor: "拆解任务：@前端 写UI，@后端 写API"
   → Manager.Route("frontend", "supervisor", "已完成")
 ```
 
-### 5.4 群聊 vs 私聊
+### 5.3 群聊 vs 私聊（已落地）
 
 **两层并存**：
 
@@ -266,22 +242,20 @@ Supervisor: "拆解任务：@前端 写UI，@后端 写API"
   #frontend              @前端 ↔ @后端
 ```
 
-**Channel 实现**：
+**Channel 实现**（`internal/channel/channel.go`）：
 ```go
 type Channel struct {
-    ID       string
-    Name     string
-    Members  []string  // agent IDs
-    Messages []Message // 共享历史
+    ID       string    `json:"id"`
+    Name     string    `json:"name"`
+    Members  []string  `json:"members"`  // agent IDs
+    Messages []Message `json:"messages"` // 共享历史
 }
 
-// 发消息到频道，所有成员收到
-func (m *Manager) Broadcast(channelId, fromId, text string) {
-    for _, memberId := range channel.Members {
-        m.Route(fromId, memberId, text)
-    }
-}
+// 发消息到频道：返回创建的消息 + 除发送者外的成员 ID
+// 即使 0 个成员也会记录消息（用户能看到自己发的）
+func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message, []string, error)
 ```
+持久化：`<dataDir>/channels.json`；`DeleteAgent` 会调用 `RemoveMember` 清理残留成员。
 
 **前端 UI**：
 - 侧栏加「频道」分组（类似 Slack）
@@ -290,11 +264,39 @@ func (m *Manager) Broadcast(channelId, fromId, text string) {
 
 ---
 
-### 5.2 事件广播
+### 5.4 事件广播
 
 `agent.Manager` 持 `Emitter` 函数，把事件转成 MyGo `Event.Emit`：
 - 解耦：agent 包不依赖 MyGo
 - 可测试：单测时换成 channel 收集事件
+- `emitToWindow` 只做「字符串事件 → 强类型 payload → Emit」的转发，每个 `toXxx(data)` 是纯函数，`win == nil` 时可单测
+- **新子系统不走 `map[string]any` 协议**：channel / knowledge 事件直接在 Sidecar 层用 typed `Event.Emit`
+
+### 5.5 会话级配置（单一事实源）
+
+配置的作用域是**会话**，不是全局：
+
+| 字段 | 作用域 | 回落 |
+|---|---|---|
+| `Agent.WorkDir` | 单会话的 CLI / shell 目录 | 空则用 `Manager.workDir`（全局默认） |
+| `Agent.LLMCfg` | 单会话的模型提供方 / 模型 | `nil` 则用 `Manager.llmCfg`（设置里的默认） |
+
+前端在 AgentView 头部用两个 chip（📁 / ✦）就地编辑，走 `agent.workDir` / `agent.llm` 协议，
+后端回 `agent.config` 事件（携带完整 `AgentView`）。设置弹窗只保留**外观**与**全局默认提供方**。
+
+> **持久化白名单**：`Agent` 新增字段必须同步 4 处 —— `Save` / `Load` / `snapshot` / `viewMap`，
+> 否则会静默丢字段。`internal/agent/manager_test.go` 的 round-trip 测试守住这个不变量。
+
+### 5.6 知识库
+
+`internal/knowledge` 提供人类编写的短笔记（约定 / 术语 / 偏好）：
+
+- 存储：`<dataDir>/knowledge.jsonl`（追加 O(1) 且崩溃安全，删除时整体重写）
+- 注入：`Manager.SetKnowledge(KnowledgeProvider)` —— **接口**注入，`agent` 包零新增依赖
+- 时机：`Create` 时把 top-8 全局笔记前置到 system prompt
+- 运行时：`AttachNoteToAgent` 把单条笔记追加为 system message
+
+---
 
 ---
 
@@ -371,16 +373,19 @@ useEffect(() => {
 
 ## 7. 已知限制 & 下一步
 
-| 限制 | 优先级 | 计划 |
+| 限制 | 状态 | 位置 |
 |---|---|---|
-| 连续对话会乱序（无队列） | 🔴 高 | 加 Queue + Worker，见 5.2 |
-| agent 不能互相通信 | 🔴 高 | 加 Manager.Route，见 5.3 |
-| 检查器面板是演示数据 | 🟡 中 | W3：接 CLI agent 产生真实数据 |
-| agent 不能读写代码 | 🟡 中 | W3：加 tools 包 |
-| 无 git worktree 隔离 | 🟡 中 | W3：worktree 包 |
-| 会话不持久化 | 🟢 低 | W4：落盘或 localStorage |
-| 未接小鲸鱼桌宠 | 🟢 低 | W4：PetWidget 组件 |
-| 无群聊/频道 | 🟡 中 | 见 5.4，需先实现 5.3 |
+| 连续对话会乱序（无队列） | ✅ 完成 | `internal/agent/manager.go` `workerLoop` |
+| agent 不能互相通信 | ✅ 完成 | `Manager.Route` |
+| 会话不持久化 | ✅ 完成 | `Manager.SetStore` / `agents.json` |
+| 无群聊/频道 | ✅ 完成 | `internal/channel` + `ChannelView.tsx` |
+| 配置只能全局设置 | ✅ 完成 | `Agent.WorkDir` / `Agent.LLMCfg` + 会话头部 chip |
+| 无知识库 | ✅ 完成 | `internal/knowledge` + `KnowledgePanel.tsx` |
+| 检查器面板是演示数据 | 🟡 中 | 接 CLI agent 产生真实数据 |
+| agent 不能读写代码 | 🟡 中 | 加 tools 包 |
+| 无 git worktree 隔离 | 🟡 中 | worktree 包 |
+| LLMCfg 的 API Key 明文落盘 | 🟡 中 | 迁移到 `mygo.Secrets`（`// TODO(secrets)`） |
+| 频道是广播触发，非讨论收敛 | 🟡 中 | 语义保持为「广播」，不做多轮收敛编排 |
 
 ---
 

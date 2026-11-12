@@ -32,13 +32,20 @@ type Agent struct {
 	Status    Status        `json:"status"`
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
-	QueueLen  int           `json:"queueLen"` // 排队中的消息数
-	Backend   string        `json:"backend"`  // mock / claude / codex
+	QueueLen  int           `json:"queueLen"`          // 排队中的消息数
+	Backend   string        `json:"backend"`           // mock / claude / codex
+	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
+	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`  // 会话级模型配置，nil 则回落 Manager.llmCfg
 
-	mu     sync.Mutex       `json:"-"`
+	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
 	queue  chan PromptRequest `json:"-"` // 待处理消息队列
 	done   chan struct{}      `json:"-"` // worker 退出信号
+}
+
+// KnowledgeProvider 是 agent 包对知识库的最小依赖（避免反向依赖具体存储实现）。
+type KnowledgeProvider interface {
+	NotesForSystemPrompt() []string
 }
 
 // Emitter 把事件推给前端。由 server 层注入，避免 agent 直连 WS。
@@ -46,13 +53,20 @@ type Emitter func(event string, data any)
 
 // Manager 管理所有 agent 会话，并发安全。
 type Manager struct {
-	mu      sync.RWMutex
-	agents  map[string]*Agent
-	order   []string
-	llmCfg  llm.Config
-	emit    Emitter
-	store   string // 持久化文件路径，空则不持久化
-	workDir string // CLI agent 工作目录
+	mu        sync.RWMutex
+	agents    map[string]*Agent
+	order     []string
+	llmCfg    llm.Config
+	emit      Emitter
+	store     string // 持久化文件路径，空则不持久化
+	workDir   string // CLI agent 默认工作目录
+	knowledge KnowledgeProvider
+
+	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
+	// 并发写同一个文件会互相截断产生损坏的 JSON。
+	saveMu sync.Mutex
+	// saveWG 跟踪异步 Save，测试可用 waitSaves 等待落盘结束。
+	saveWG sync.WaitGroup
 }
 
 func NewManager(cfg llm.Config, emit Emitter) *Manager {
@@ -63,24 +77,63 @@ func NewManager(cfg llm.Config, emit Emitter) *Manager {
 	}
 }
 
-// SetWorkDir 设置 CLI agent 工作目录。
+// SetWorkDir 设置 CLI agent 默认工作目录。
 func (m *Manager) SetWorkDir(dir string) {
 	m.mu.Lock()
 	m.workDir = dir
 	m.mu.Unlock()
 }
 
+// SetKnowledge 注入知识库；传 nil 表示不注入（测试/无数据目录）。
+func (m *Manager) SetKnowledge(k KnowledgeProvider) {
+	m.mu.Lock()
+	m.knowledge = k
+	m.mu.Unlock()
+}
+
+// buildSystemPrompt 生成会话 system message，前置知识库要点。
+// 注意：必须在持有 m.mu 之前调用（它会自己取 RLock）。
+func (m *Manager) buildSystemPrompt(role string) string {
+	m.mu.RLock()
+	kb := m.knowledge
+	m.mu.RUnlock()
+	return systemPromptFor(role, kb)
+}
+
+// systemPromptFor 是无锁的纯函数，供 Create 在持锁时调用。
+func systemPromptFor(role string, kb KnowledgeProvider) string {
+	base := "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"
+	if kb == nil {
+		return base
+	}
+	lines := kb.NotesForSystemPrompt()
+	if len(lines) == 0 {
+		return base
+	}
+	return "## 知识库\n- " + strings.Join(lines, "\n- ") + "\n\n" + base
+}
+
 // SetStore 设置持久化文件路径，并尝试加载。
 func (m *Manager) SetStore(path string) error {
+	m.mu.Lock()
 	m.store = path
+	m.mu.Unlock()
 	return m.Load()
 }
 
 // Save 把所有 agent 序列化到磁盘。
+// 串行写 + 写临时文件再 rename，保证读者永远看到完整 JSON。
 func (m *Manager) Save() error {
-	if m.store == "" {
+	m.mu.RLock()
+	store := m.store
+	m.mu.RUnlock()
+	if store == "" {
 		return nil
 	}
+
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -95,8 +148,10 @@ func (m *Manager) Save() error {
 				Color:     a.Color,
 				Status:    StatusIdle, // 重启后都是空闲
 				CreatedAt: a.CreatedAt,
-				Messages:  a.Messages,
+				Messages:  append([]llm.Message(nil), a.Messages...),
 				Backend:   a.Backend,
+				WorkDir:   a.WorkDir,
+				LLMCfg:    a.LLMCfg,
 			})
 			a.mu.Unlock()
 		}
@@ -106,15 +161,45 @@ func (m *Manager) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.store, buf, 0644)
+	return writeFileAtomic(store, buf)
+}
+
+// goSave 异步落盘，并登记到 saveWG 便于测试同步等待。
+// Add 在锁外调用，避免与 Wait 竞争。
+func (m *Manager) goSave() {
+	m.saveWG.Add(1)
+	go func() {
+		defer m.saveWG.Done()
+		_ = m.Save()
+	}()
+}
+
+// waitSaves 阻塞直到所有异步落盘结束（测试用）。
+func (m *Manager) waitSaves() { m.saveWG.Wait() }
+
+// writeFileAtomic 先写同目录临时文件再 rename，避免并发/崩溃留下半个文件。
+func writeFileAtomic(path string, buf []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Load 从磁盘恢复 agent。
 func (m *Manager) Load() error {
-	if m.store == "" {
+	m.mu.RLock()
+	store := m.store
+	m.mu.RUnlock()
+	if store == "" {
 		return nil
 	}
-	buf, err := os.ReadFile(m.store)
+
+	// 与 Save 互斥，避免读到正在被替换的文件。
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
+	buf, err := os.ReadFile(store)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -127,6 +212,8 @@ func (m *Manager) Load() error {
 		return err
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, saved := range data {
 		a := &Agent{
 			ID:        saved.ID,
@@ -137,6 +224,8 @@ func (m *Manager) Load() error {
 			CreatedAt: saved.CreatedAt,
 			Messages:  saved.Messages,
 			Backend:   saved.Backend,
+			WorkDir:   saved.WorkDir,
+			LLMCfg:    saved.LLMCfg,
 			queue:     make(chan PromptRequest, 32),
 			done:      make(chan struct{}),
 		}
@@ -159,9 +248,49 @@ func (m *Manager) LLMConfig() llm.Config {
 	return m.llmCfg
 }
 
+// LLMConfigFor 返回某个会话的生效模型配置（会话级优先，回落全局）。
+func (m *Manager) LLMConfigFor(id string) llm.Config {
+	a, ok := m.Get(id)
+	if !ok {
+		return m.LLMConfig()
+	}
+	return a.EffectiveLLM(m)
+}
+
+// SetAgentWorkDir 设置会话级工作目录（不影响其他会话）。
+func (m *Manager) SetAgentWorkDir(id, dir string) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	a.mu.Lock()
+	a.WorkDir = dir
+	a.mu.Unlock()
+	m.goSave()
+	return nil
+}
+
+// SetAgentLLM 设置会话级模型配置（不影响其他会话）。
+// TODO(secrets): LLMCfg 含 API Key，目前明文落盘到 agents.json，后续迁移到 mygo.Secrets。
+func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	a.mu.Lock()
+	a.LLMCfg = &cfg
+	a.mu.Unlock()
+	m.goSave()
+	return nil
+}
+
 var palette = []string{"#5b9dff", "#3ecf8e", "#e8a33d", "#c47aff", "#ff7a8a", "#4dd0e1"}
 
 func (m *Manager) Create(id, name, role string) *Agent {
+	m.mu.RLock()
+	kb := m.knowledge
+	m.mu.RUnlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -183,7 +312,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Status:    StatusIdle,
 		CreatedAt: time.Now().Unix(),
 		Messages: []llm.Message{
-			{Role: "system", Content: "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"},
+			{Role: "system", Content: systemPromptFor(role, kb)},
 		},
 		queue: make(chan PromptRequest, 32),
 		done:  make(chan struct{}),
@@ -196,7 +325,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	go a.workerLoop(m)
 
 	go m.emit("agent.created", a.viewMap())
-	go m.Save() // 异步保存
+	m.goSave() // 异步保存
 	return a
 }
 
@@ -250,7 +379,7 @@ func (m *Manager) Delete(id string) bool {
 	close(a.done)
 	a.stop()
 	go m.emit("agent.deleted", map[string]any{"id": id})
-	go m.Save() // 异步保存
+	m.goSave() // 异步保存
 	return true
 }
 
@@ -358,14 +487,16 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 
 // executeMock 用内置 mock LLM 执行。
 func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
-	client := llm.New(m.LLMConfig())
+	// 每轮开始时对配置取一次快照：中途改配置只影响下一轮。
+	cfg := a.EffectiveLLM(m)
+	client := llm.New(cfg)
 
 	a.mu.Lock()
 	history := append([]llm.Message(nil), a.Messages...)
 	a.mu.Unlock()
 
 	// mock provider 下推一组检查器事件
-	if m.LLMConfig().Provider == "" || m.LLMConfig().Provider == "mock" {
+	if cfg.Provider == "" || cfg.Provider == "mock" {
 		m.demoTrail(a.ID, a.Name)
 	}
 
@@ -414,7 +545,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 
 // executeCLI 用外部 CLI agent 执行。
 func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text string) {
-	runner, err := cli.NewCLIRunner(backend, m.workDir, "")
+	runner, err := cli.NewCLIRunner(backend, a.EffectiveWorkDir(m), a.EffectiveLLM(m).Model)
 	if err != nil {
 		m.finish(a, StatusError, err.Error())
 		return
@@ -488,6 +619,35 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 	a.setIdleOrQueued(m)
 }
 
+// EffectiveWorkDir 返回会话级工作目录，未设置时回落到全局默认。
+func (a *Agent) EffectiveWorkDir(m *Manager) string {
+	a.mu.Lock()
+	dir := a.WorkDir
+	a.mu.Unlock()
+	if dir != "" {
+		return dir
+	}
+	return m.workDir
+}
+
+// EffectiveLLM 返回会话级模型配置，未设置时回落到全局默认。
+func (a *Agent) EffectiveLLM(m *Manager) llm.Config {
+	a.mu.Lock()
+	cfg := a.LLMCfg
+	a.mu.Unlock()
+	if cfg != nil {
+		return *cfg
+	}
+	return m.LLMConfig()
+}
+
+// AppendSystemMessage 追加一条 system message（用于注入知识库内容）。
+func (a *Agent) AppendSystemMessage(content string) {
+	a.mu.Lock()
+	a.Messages = append(a.Messages, llm.Message{Role: "system", Content: content})
+	a.mu.Unlock()
+}
+
 // setIdleOrQueued 设置状态为 idle 或 queued（还有排队消息）。
 func (a *Agent) setIdleOrQueued(m *Manager) {
 	a.mu.Lock()
@@ -545,7 +705,9 @@ emptied:
 	a.mu.Unlock()
 }
 
-func (a *Agent) snapshot() *Agent {
+// Snapshot 在锁内返回 Agent 的一致性拷贝，供跨 goroutine 读取历史/状态。
+// 前端视图与测试都走这里，避免与 worker 的 append 竞争。
+func (a *Agent) Snapshot() *Agent {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &Agent{
@@ -558,6 +720,8 @@ func (a *Agent) snapshot() *Agent {
 		Messages:  append([]llm.Message(nil), a.Messages...),
 		QueueLen:  a.QueueLen,
 		Backend:   a.Backend,
+		WorkDir:   a.WorkDir,
+		LLMCfg:    a.LLMCfg,
 	}
 }
 
@@ -575,5 +739,7 @@ func (a *Agent) viewMap() map[string]any {
 		"messages":  append([]llm.Message(nil), a.Messages...),
 		"queueLen":  a.QueueLen,
 		"backend":   a.Backend,
+		"workDir":   a.WorkDir,
+		"llmCfg":    a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
 	}
 }

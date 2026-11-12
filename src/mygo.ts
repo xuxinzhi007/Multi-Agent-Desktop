@@ -23,6 +23,8 @@ export interface AgentView {
   messages: Message[];
   queueLen: number;
   backend: string;
+  workDir: string;
+  llm?: Config;
 }
 
 export interface Channel {
@@ -95,9 +97,25 @@ export interface MiniStatus {
   agents: MiniAgentStatus[];
 }
 
+export interface Note {
+  id: string;
+  title: string;
+  body: string;
+  tags?: string[];
+  scope?: string;
+  at: number;
+}
+
 export interface PromptRequest {
   agentId: string;
   text: string;
+}
+
+export interface Query {
+  Scope: string;
+  Tags: string[];
+  Text: string;
+  Limit: number;
 }
 
 export interface Result {
@@ -156,6 +174,13 @@ export interface WorkDirEvent {
 
 /** Sidecar 暴露给前端的 API。`mygo generate` 会生成 typed TS client。 */
 export const Sidecar = {
+  /**
+   * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
+   * 后续对话会把它作为上下文。返回更新后的会话视图。
+   */
+  attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
+    return call("Sidecar.AttachNoteToAgent", noteId, agentId);
+  },
   /** CreateAgent 新建一个 agent。 */
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("Sidecar.CreateAgent", req);
@@ -168,13 +193,21 @@ export const Sidecar = {
   createChannel(name: string, members: string[]): Promise<Channel> {
     return call("Sidecar.CreateChannel", name, members);
   },
-  /** DeleteAgent 删除一个 agent。 */
+  /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
     return call("Sidecar.DeleteAgent", id);
+  },
+  /** DeleteNote 删除一条笔记。 */
+  deleteNote(id: string): Promise<boolean> {
+    return call("Sidecar.DeleteNote", id);
   },
   /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
   focusAgent(agentId: string): Promise<void> {
     return call("Sidecar.FocusAgent", agentId);
+  },
+  /** GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。 */
+  getAgentConfig(agentId: string): Promise<Config> {
+    return call("Sidecar.GetAgentConfig", agentId);
   },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
@@ -203,6 +236,13 @@ export const Sidecar = {
   listModels(cfg: Config): Promise<string[]> {
     return call("Sidecar.ListModels", cfg);
   },
+  /**
+   * ListModelsFor 用会话级配置拉取可用模型列表。
+   * mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
+   */
+  listModelsFor(agentId: string, cfg: Config): Promise<string[]> {
+    return call("Sidecar.ListModelsFor", agentId, cfg);
+  },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("Sidecar.PickDirectory");
@@ -210,6 +250,10 @@ export const Sidecar = {
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
     return call("Sidecar.PromptAgent", req);
+  },
+  /** QueryNotes 按 scope / tags / 文本查询笔记。 */
+  queryNotes(q: Query): Promise<Note[]> {
+    return call("Sidecar.QueryNotes", q);
   },
   /** ResizeMiniWindow 调整迷你悬浮窗大小。 */
   resizeMiniWindow(height: number): Promise<void> {
@@ -223,9 +267,20 @@ export const Sidecar = {
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
   },
-  /** SendToChannel 发消息到频道，并触发所有成员 agent。 */
+  /**
+   * SendToChannel 发消息到频道，并触发所有成员 agent。
+   * 不因单个接收者排队已满而中断，错误合并返回。
+   */
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);
+  },
+  /** SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。 */
+  setAgentLLM(agentId: string, cfg: Config): Promise<AgentView> {
+    return call("Sidecar.SetAgentLLM", agentId, cfg);
+  },
+  /** SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。 */
+  setAgentWorkDir(agentId: string, dir: string): Promise<AgentView> {
+    return call("Sidecar.SetAgentWorkDir", agentId, dir);
   },
   /** SetAlwaysOnTop 控制窗口置顶（悬浮）。 */
   setAlwaysOnTop(v: boolean): Promise<boolean> {
@@ -235,7 +290,7 @@ export const Sidecar = {
   setLLMConfig(cfg: Config): Promise<Config> {
     return call("Sidecar.SetLLMConfig", cfg);
   },
-  /** SetWorkDir 切换工作目录。 */
+  /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。 */
   setWorkDir(dir: string): Promise<string> {
     return call("Sidecar.SetWorkDir", dir);
   },
@@ -246,6 +301,10 @@ export const Sidecar = {
   /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
   toggleMiniWindow(show: boolean): Promise<boolean> {
     return call("Sidecar.ToggleMiniWindow", show);
+  },
+  /** UpsertNote 新增或覆盖一条知识笔记。 */
+  upsertNote(n: Note): Promise<Note> {
+    return call("Sidecar.UpsertNote", n);
   },
 } as const;
 
@@ -264,6 +323,14 @@ export const events = {
   shellResult: event<ShellResultEvent>("shell.result"),
   llmConfig: event<Config>("llm.config"),
   workdir: event<WorkDirEvent>("workdir"),
+  /** 会话级配置变更：携带完整 AgentView，前端整体替换即可。 */
+  agentConfig: event<AgentView>("agent.config"),
+  /** 频道事件（由 Sidecar 直接 Emit，不走 emitToWindow 的 map 协议）。 */
+  channelCreated: event<Channel>("channel.created"),
+  channelMessage: event<ChannelMessage>("channel.message"),
+  /** 知识库事件。 */
+  knowledgeChanged: event<Note>("knowledge.changed"),
+  knowledgeDeleted: event<string>("knowledge.deleted"),
   /** MiniStatusEvent 事件，推给悬浮窗。 */
   miniStatus: event<MiniStatus>("mini.status"),
   /** AgentFocused 事件。 */

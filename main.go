@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/egoist/mygo"
 
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/channel"
+	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
 )
@@ -21,6 +23,7 @@ type Sidecar struct {
 	mgr      *agent.Manager
 	runner   *pty.Runner
 	channels *channel.Manager
+	kb       knowledge.Store
 	win      *mygo.Window
 }
 
@@ -61,6 +64,15 @@ var (
 	ShellResult_ = mygo.NewEvent[ShellResultEvent]("shell.result")
 	LLMConfigEvt = mygo.NewEvent[LLMConfig]("llm.config")
 	WorkDirEvt   = mygo.NewEvent[WorkDirEvent]("workdir")
+
+	// 会话级配置变更：携带完整 AgentView，前端整体替换即可。
+	AgentConfig = mygo.NewEvent[AgentView]("agent.config")
+	// 频道事件（由 Sidecar 直接 Emit，不走 emitToWindow 的 map 协议）。
+	ChannelCreated = mygo.NewEvent[channel.Channel]("channel.created")
+	ChannelMessage = mygo.NewEvent[channel.Message]("channel.message")
+	// 知识库事件。
+	KnowledgeChanged = mygo.NewEvent[knowledge.Note]("knowledge.changed")
+	KnowledgeDeleted = mygo.NewEvent[string]("knowledge.deleted")
 )
 
 // StatusEvent 是 agent 状态变化。
@@ -178,19 +190,25 @@ type AgentView struct {
 	Messages  []llm.Message `json:"messages"`
 	QueueLen  int           `json:"queueLen"`
 	Backend   string        `json:"backend"`
+	WorkDir   string        `json:"workDir"`
+	LLM       *LLMConfig    `json:"llm,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
+	// Snapshot 在 agent 锁内拷贝，避免与 worker 的 append 竞争。
+	s := a.Snapshot()
 	return AgentView{
-		ID:        a.ID,
-		Name:      a.Name,
-		Role:      a.Role,
-		Color:     a.Color,
-		Status:    string(a.Status),
-		CreatedAt: a.CreatedAt,
-		Messages:  a.Messages,
-		QueueLen:  a.QueueLen,
-		Backend:   a.Backend,
+		ID:        s.ID,
+		Name:      s.Name,
+		Role:      s.Role,
+		Color:     s.Color,
+		Status:    string(s.Status),
+		CreatedAt: s.CreatedAt,
+		Messages:  s.Messages,
+		QueueLen:  s.QueueLen,
+		Backend:   s.Backend,
+		WorkDir:   s.WorkDir,
+		LLM:       s.LLMCfg,
 	}
 }
 
@@ -204,6 +222,21 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.Color, _ = m["color"].(string)
 	v.Status, _ = m["status"].(string)
 	v.Backend, _ = m["backend"].(string)
+	v.WorkDir, _ = m["workDir"].(string)
+	switch lc := m["llmCfg"].(type) {
+	case *llm.Config:
+		v.LLM = lc
+	case llm.Config:
+		cfg := lc
+		v.LLM = &cfg
+	case map[string]any: // 防御：负载经过一次 JSON 编解码
+		cfg := llm.Config{}
+		cfg.Provider, _ = lc["provider"].(string)
+		cfg.BaseURL, _ = lc["baseUrl"].(string)
+		cfg.APIKey, _ = lc["apiKey"].(string)
+		cfg.Model, _ = lc["model"].(string)
+		v.LLM = &cfg
+	}
 	switch ts := m["createdAt"].(type) {
 	case int64:
 		v.CreatedAt = ts
@@ -243,9 +276,13 @@ func (s *Sidecar) CreateAgent(req CreateAgentRequest) AgentView {
 	return toAgentView(a)
 }
 
-// DeleteAgent 删除一个 agent。
+// DeleteAgent 删除一个 agent，并从所有频道成员中剔除。
 func (s *Sidecar) DeleteAgent(id string) bool {
-	return s.mgr.Delete(id)
+	ok := s.mgr.Delete(id)
+	if ok {
+		s.channels.RemoveMember(id)
+	}
+	return ok
 }
 
 // StopAgent 停止一个 agent 的推理并清空队列。
@@ -261,6 +298,7 @@ func (s *Sidecar) RouteAgent(fromId, toId, text string) error {
 // CreateChannel 新建频道。
 func (s *Sidecar) CreateChannel(name string, members []string) channel.Channel {
 	ch := s.channels.Create("", name, members)
+	ChannelCreated.Emit(s.win, *ch)
 	return *ch
 }
 
@@ -275,20 +313,29 @@ func (s *Sidecar) ListChannels() []channel.Channel {
 }
 
 // SendToChannel 发消息到频道，并触发所有成员 agent。
+// 不因单个接收者排队已满而中断，错误合并返回。
 func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
-	recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
+	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
 	if err != nil {
 		return err
 	}
 
-	// 触发每个成员 agent 执行
+	// 先推消息（即使 0 个接收者，用户自己的消息也要展示）
+	ChannelMessage.Emit(s.win, *msg)
+
+	var errs []string
 	for _, agentId := range recipients {
-		s.mgr.Prompt(context.Background(), agent.PromptRequest{
+		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
 			AgentID: agentId,
 			Text:    fmt.Sprintf("[%s] %s: %s", channelId, fromName, text),
 		})
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
-
+	if len(errs) > 0 {
+		return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }
 
@@ -338,11 +385,59 @@ func (s *Sidecar) GetWorkDir() string {
 	return s.runner.Dir()
 }
 
-// SetWorkDir 切换工作目录。
+// SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。
 func (s *Sidecar) SetWorkDir(dir string) string {
 	s.runner.SetDir(dir)
 	WorkDirEvt.Emit(s.win, WorkDirEvent{Dir: dir})
 	return dir
+}
+
+// SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。
+func (s *Sidecar) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
+	if err := s.mgr.SetAgentWorkDir(agentId, dir); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(agentId)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, v)
+	return v, nil
+}
+
+// SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。
+func (s *Sidecar) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
+	if err := s.mgr.SetAgentLLM(agentId, cfg); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(agentId)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, v)
+	return v, nil
+}
+
+// GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。
+func (s *Sidecar) GetAgentConfig(agentId string) LLMConfig {
+	return s.mgr.LLMConfigFor(agentId)
+}
+
+// ListModelsFor 用会话级配置拉取可用模型列表。
+// mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
+func (s *Sidecar) ListModelsFor(agentId string, cfg LLMConfig) ([]string, error) {
+	if cfg.Provider == "" {
+		cfg = s.mgr.LLMConfigFor(agentId)
+	}
+	if cfg.Provider == "" || cfg.Provider == "mock" {
+		return []string{"mock"}, nil
+	}
+	if cfg.BaseURL == "" {
+		return nil, llm.ErrNotConfigured
+	}
+	return llm.ListModels(context.Background(), cfg)
 }
 
 // SystemInfo 描述运行环境。
@@ -361,6 +456,81 @@ func (s *Sidecar) Info() SystemInfo {
 		GoVersion: runtime.Version(),
 		MyGo:      true,
 	}
+}
+
+// ---- 知识库 ----
+
+// KnowledgeNote 是前端可见的知识笔记。
+type KnowledgeNote = knowledge.Note
+
+// KnowledgeQuery 是知识库查询条件。
+type KnowledgeQuery = knowledge.Query
+
+// UpsertNote 新增或覆盖一条知识笔记。
+func (s *Sidecar) UpsertNote(n KnowledgeNote) (KnowledgeNote, error) {
+	if s.kb == nil {
+		return KnowledgeNote{}, fmt.Errorf("知识库未初始化")
+	}
+	saved, err := s.kb.Upsert(n)
+	if err != nil {
+		return KnowledgeNote{}, err
+	}
+	KnowledgeChanged.Emit(s.win, saved)
+	return saved, nil
+}
+
+// QueryNotes 按 scope / tags / 文本查询笔记。
+func (s *Sidecar) QueryNotes(q KnowledgeQuery) []KnowledgeNote {
+	if s.kb == nil {
+		return []KnowledgeNote{}
+	}
+	out := s.kb.Query(q)
+	if out == nil {
+		return []KnowledgeNote{}
+	}
+	return out
+}
+
+// DeleteNote 删除一条笔记。
+func (s *Sidecar) DeleteNote(id string) bool {
+	if s.kb == nil {
+		return false
+	}
+	ok := s.kb.Delete(id)
+	if ok {
+		KnowledgeDeleted.Emit(s.win, id)
+	}
+	return ok
+}
+
+// AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
+// 后续对话会把它作为上下文。返回更新后的会话视图。
+func (s *Sidecar) AttachNoteToAgent(noteId, agentId string) (AgentView, error) {
+	if s.kb == nil {
+		return AgentView{}, fmt.Errorf("知识库未初始化")
+	}
+	a, ok := s.mgr.Get(agentId)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
+	}
+
+	notes := s.kb.Query(knowledge.Query{})
+	var found *KnowledgeNote
+	for i := range notes {
+		if notes[i].ID == noteId {
+			found = &notes[i]
+			break
+		}
+	}
+	if found == nil {
+		return AgentView{}, fmt.Errorf("note %s not found", noteId)
+	}
+
+	text := knowledge.Render([]knowledge.Note{*found})
+	a.AppendSystemMessage("[知识] " + text)
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, v)
+	return v, nil
 }
 
 // SetAlwaysOnTop 控制窗口置顶（悬浮）。
@@ -452,101 +622,149 @@ func getStr(m map[string]any, key string) string {
 	return ""
 }
 
+// 每个 toXxx 把 emitter 的 map 负载解析成强类型 payload。
+// 负载非法时返回 ok=false，不 panic；因此可在 win == nil 时单测。
+
+func toAgentCreated(data any) (AgentView, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.created: unexpected payload type %T", data)
+		return AgentView{}, false
+	}
+	return agentViewFromMap(m), true
+}
+
+func toAgentDeleted(data any) (string, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.deleted: unexpected payload type %T", data)
+		return "", false
+	}
+	id, ok := m["id"].(string)
+	if !ok {
+		log.Printf("emit: agent.deleted: unexpected id type %T", m["id"])
+		return "", false
+	}
+	return id, true
+}
+
+func toAgentStatus(data any) (StatusEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.status: unexpected payload type %T", data)
+		return StatusEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	var st string
+	switch v := m["status"].(type) {
+	case agent.Status:
+		st = string(v)
+	case string:
+		st = v
+	default:
+		log.Printf("emit: agent.status: unexpected status type %T", m["status"])
+	}
+	if id == "" || st == "" {
+		return StatusEvent{}, false
+	}
+	return StatusEvent{ID: id, Status: st}, true
+}
+
+func toAgentDelta(data any) (DeltaEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.delta: unexpected payload type %T", data)
+		return DeltaEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	delta, _ := m["delta"].(string)
+	if id == "" {
+		return DeltaEvent{}, false
+	}
+	return DeltaEvent{ID: id, Delta: delta}, true
+}
+
+func toAgentMessage(data any) (MessageEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.message: unexpected payload type %T", data)
+		return MessageEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	msg, ok := m["message"].(llm.Message)
+	if id == "" || !ok {
+		return MessageEvent{}, false
+	}
+	evt := MessageEvent{ID: id, Message: msg}
+	if ti, ok := m["tokensIn"].(int); ok {
+		evt.TokensIn = ti
+	}
+	if to, ok := m["tokensOut"].(int); ok {
+		evt.TokensOut = to
+	}
+	return evt, true
+}
+
+func toAgentError(data any) (ErrorEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: agent.error: unexpected payload type %T", data)
+		return ErrorEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	errMsg, _ := m["error"].(string)
+	if id == "" {
+		return ErrorEvent{}, false
+	}
+	return ErrorEvent{ID: id, Error: errMsg}, true
+}
+
+func toToolStart(data any) (ToolStartEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		log.Printf("emit: tool.start: unexpected payload type %T", data)
+		return ToolStartEvent{}, false
+	}
+	return ToolStartEvent{
+		ID:      getStr(m, "id"),
+		AgentID: getStr(m, "agentId"),
+		Tool:    getStr(m, "tool"),
+		Target:  getStr(m, "target"),
+	}, true
+}
+
 // emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
 func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, event string, data any) {
-	// 主窗口
 	if win != nil && !win.IsDestroyed() {
 		switch event {
 		case "agent.created":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.created: unexpected payload type %T", data)
-				break
+			if v, ok := toAgentCreated(data); ok {
+				AgentCreated.Emit(win, v)
 			}
-			AgentCreated.Emit(win, agentViewFromMap(m))
 		case "agent.deleted":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.deleted: unexpected payload type %T", data)
-				break
+			if v, ok := toAgentDeleted(data); ok {
+				AgentDeleted.Emit(win, v)
 			}
-			id, ok := m["id"].(string)
-			if !ok {
-				log.Printf("emit: agent.deleted: unexpected id type %T", m["id"])
-				break
-			}
-			AgentDeleted.Emit(win, id)
 		case "agent.status":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.status: unexpected payload type %T", data)
-				break
-			}
-			id, _ := m["id"].(string)
-			var st string
-			switch v := m["status"].(type) {
-			case agent.Status:
-				st = string(v)
-			case string:
-				st = v
-			default:
-				log.Printf("emit: agent.status: unexpected status type %T", m["status"])
-			}
-			if id != "" && st != "" {
-				AgentStatus.Emit(win, StatusEvent{ID: id, Status: st})
+			if v, ok := toAgentStatus(data); ok {
+				AgentStatus.Emit(win, v)
 			}
 		case "agent.delta":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.delta: unexpected payload type %T", data)
-				break
-			}
-			id, _ := m["id"].(string)
-			delta, _ := m["delta"].(string)
-			if id != "" {
-				AgentDelta.Emit(win, DeltaEvent{ID: id, Delta: delta})
+			if v, ok := toAgentDelta(data); ok {
+				AgentDelta.Emit(win, v)
 			}
 		case "agent.message":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.message: unexpected payload type %T", data)
-				break
-			}
-			id, _ := m["id"].(string)
-			msg, ok := m["message"].(llm.Message)
-			if id != "" && ok {
-				evt := MessageEvent{ID: id, Message: msg}
-				if ti, ok := m["tokensIn"].(int); ok {
-					evt.TokensIn = ti
-				}
-				if to, ok := m["tokensOut"].(int); ok {
-					evt.TokensOut = to
-				}
-				AgentMessage.Emit(win, evt)
+			if v, ok := toAgentMessage(data); ok {
+				AgentMessage.Emit(win, v)
 			}
 		case "agent.error":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: agent.error: unexpected payload type %T", data)
-				break
-			}
-			id, _ := m["id"].(string)
-			errMsg, _ := m["error"].(string)
-			if id != "" {
-				AgentError.Emit(win, ErrorEvent{ID: id, Error: errMsg})
+			if v, ok := toAgentError(data); ok {
+				AgentError.Emit(win, v)
 			}
 		case "tool.start":
-			m, ok := data.(map[string]any)
-			if !ok {
-				log.Printf("emit: tool.start: unexpected payload type %T", data)
-				break
+			if v, ok := toToolStart(data); ok {
+				ToolStart.Emit(win, v)
 			}
-			ToolStart.Emit(win, ToolStartEvent{
-				ID:      getStr(m, "id"),
-				AgentID: getStr(m, "agentId"),
-				Tool:    getStr(m, "tool"),
-				Target:  getStr(m, "target"),
-			})
 		}
 	}
 
@@ -577,10 +795,27 @@ func main() {
 	// 持久化到用户数据目录
 	dataDir := mustDataDir()
 	if err := os.MkdirAll(dataDir, 0755); err == nil {
-		mgr.SetStore(filepath.Join(dataDir, "agents.json"))
+		if err := mgr.SetStore(filepath.Join(dataDir, "agents.json")); err != nil {
+			log.Printf("load agents: %v", err)
+		}
+		if err := channels.SetStore(filepath.Join(dataDir, "channels.json")); err != nil {
+			log.Printf("load channels: %v", err)
+		}
 	}
 
-	sidecar := &Sidecar{mgr: mgr, runner: runner, channels: channels}
+	// 知识库：全局笔记在 agent 创建时注入 system prompt
+	var kbStore knowledge.Store
+	if kb, err := knowledge.NewFileStore(filepath.Join(dataDir, "knowledge.jsonl")); err != nil {
+		log.Printf("load knowledge: %v", err)
+	} else {
+		kbStore = kb
+	}
+	if kbStore == nil {
+		kbStore = knowledge.NewMemoryStore()
+	}
+	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
+
+	sidecar := &Sidecar{mgr: mgr, runner: runner, channels: channels, kb: kbStore}
 
 	mygo.Bind(sidecar)
 
@@ -648,4 +883,36 @@ func mustDataDir() string {
 		}
 		return filepath.Join(xdg, "multi-agent-desktop")
 	}
+}
+
+// knowledgeProvider 把 knowledge.Store 适配成 agent.KnowledgeProvider，
+// 让 agent 包不依赖具体存储实现。
+type knowledgeProvider struct {
+	store knowledge.Store
+}
+
+// maxKnowledgeLines 限制注入的全局笔记条数，避免 system prompt 无限膨胀。
+const maxKnowledgeLines = 8
+
+func (k *knowledgeProvider) NotesForSystemPrompt() []string {
+	if k == nil || k.store == nil {
+		return nil
+	}
+	notes := k.store.Query(knowledge.Query{Scope: "", Limit: maxKnowledgeLines})
+	if len(notes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(notes))
+	for _, n := range notes {
+		title := n.Title
+		if title == "" {
+			title = n.ID
+		}
+		if body := strings.TrimSpace(n.Body); body != "" {
+			out = append(out, title+": "+body)
+		} else {
+			out = append(out, title)
+		}
+	}
+	return out
 }

@@ -12,13 +12,13 @@ import (
 
 // Event 是 CLI agent 的结构化输出。
 type Event struct {
-	Type      string `json:"type"`                // system / assistant / result / tool_use / tool_result
-	Text      string `json:"text,omitempty"`      // assistant 文本
-	Tool      string `json:"tool,omitempty"`      // 工具名
-	ToolInput string `json:"toolInput,omitempty"` // 工具输入
-	Error     string `json:"error,omitempty"`     // 错误
-	Done      bool   `json:"done,omitempty"`      // 是否完成
-	CostUSD   float64 `json:"costUSD,omitempty"`  // 成本
+	Type      string  `json:"type"`                // system / assistant / result / tool_use / tool_result
+	Text      string  `json:"text,omitempty"`      // assistant 文本
+	Tool      string  `json:"tool,omitempty"`      // 工具名
+	ToolInput string  `json:"toolInput,omitempty"` // 工具输入
+	Error     string  `json:"error,omitempty"`     // 错误
+	Done      bool    `json:"done,omitempty"`      // 是否完成
+	CostUSD   float64 `json:"costUSD,omitempty"`   // 成本
 }
 
 // Runner 执行 CLI agent 并解析输出。

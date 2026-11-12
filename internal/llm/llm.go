@@ -14,7 +14,7 @@ type Message struct {
 
 // Chunk 是流式返回的一个片段。
 type Chunk struct {
-	Delta      string `json:"delta,omitempty"`
+	Delta     string `json:"delta,omitempty"`
 	Done      bool   `json:"done,omitempty"`
 	Err       string `json:"error,omitempty"`
 	TokensIn  int    `json:"tokensIn,omitempty"`
