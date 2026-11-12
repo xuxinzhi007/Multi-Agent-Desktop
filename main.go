@@ -312,8 +312,8 @@ func (s *Sidecar) ListChannels() []channel.Channel {
 	return out
 }
 
-// SendToChannel 发消息到频道，并触发所有成员 agent。
-// 不因单个接收者排队已满而中断，错误合并返回。
+// SendToChannel 发消息到频道，并触发相关成员 agent。
+// @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
 // 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
 func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
@@ -324,22 +324,94 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 	// 先推消息（即使 0 个接收者，用户自己的消息也要展示）
 	ChannelMessage.Emit(s.win, *msg)
 
+	// 解析 @提及
+	mentions := parseMentions(text)
+	fmt.Printf("[channel] mentions: %v, text: %s\n", mentions, text)
+
 	var errs []string
 	for _, agentId := range recipients {
-		// 给成员的 prompt 加频道标记，回复时识别并路由回频道
-		prompt := fmt.Sprintf("[channel:%s] %s: %s", channelId, fromName, text)
-		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
-			AgentID: agentId,
-			Text:    prompt,
-		})
-		if err != nil {
-			errs = append(errs, err.Error())
+		a, ok := s.mgr.Get(agentId)
+		if !ok {
+			continue
+		}
+
+		// 判断是否需要回复
+		shouldReply := false
+
+		// 被 @ 必须回复
+		for _, mention := range mentions {
+			if mention == a.Name || mention == agentId || mention == "all" {
+				shouldReply = true
+				fmt.Printf("[channel] %s 被 @，必须回复\n", a.Name)
+				break
+			}
+		}
+
+		// 没被 @：根据角色相关性判断（减少噪音）
+		if !shouldReply && len(mentions) == 0 {
+			shouldReply = isRelevantToRole(text, a.Role)
+			if shouldReply {
+				fmt.Printf("[channel] %s 角色相关，选择性回复\n", a.Name)
+			}
+		}
+
+		if shouldReply {
+			// 给成员的 prompt 加频道标记，回复时识别并路由回频道
+			prompt := fmt.Sprintf("[channel:%s] %s: %s", channelId, fromName, text)
+			err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
+				AgentID: agentId,
+				Text:    prompt,
+			})
+			if err != nil {
+				errs = append(errs, err.Error())
+			}
+		} else {
+			fmt.Printf("[channel] %s 不相关，跳过\n", a.Name)
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// parseMentions 解析 @提及。
+func parseMentions(text string) []string {
+	var mentions []string
+	words := strings.Fields(text)
+	for _, word := range words {
+		if strings.HasPrefix(word, "@") {
+			mention := strings.TrimPrefix(word, "@")
+			// 去掉标点
+			mention = strings.TrimRight(mention, ",.!?:;，。！？：；")
+			if mention != "" {
+				mentions = append(mentions, mention)
+			}
+		}
+	}
+	return mentions
+}
+
+// isRelevantToRole 判断消息是否与角色相关。
+func isRelevantToRole(text, role string) bool {
+	// 简单关键词匹配
+	keywords := map[string][]string{
+		"后端": {"api", "数据库", "服务", "接口", "sql", "server", "backend"},
+		"前端": {"ui", "页面", "组件", "样式", "css", "frontend", "react"},
+		"测试": {"测试", "bug", "错误", "验证", "test", "qa"},
+		"运维": {"部署", "服务器", "日志", "监控", "deploy", "ops"},
+		"全栈": {"api", "ui", "数据库", "部署"},
+	}
+
+	textLower := strings.ToLower(text)
+	for _, kw := range keywords[role] {
+		if strings.Contains(textLower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+
+	// 默认：不相关（减少噪音）
+	return false
 }
 
 // CreateCLIAgent 新建一个 CLI backend 的 agent。

@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>架构评审 · 知识库 (multi-agent-desktop)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+</script>
+<style>
+  body { font-feature-settings: "kern"; }
+  .seam { stroke-dasharray: 5 5; }
+  .leak { stroke: #dc2626; stroke-width: 2; }
+  .ghost { opacity: .38; }
+  .tag { font-size: 10px; letter-spacing: .12em; }
+  .lbl { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+  .deepfill { background: linear-gradient(135deg,#0f172a,#1e293b); }
+  .cell { border:1px solid #cbd5e1; border-radius:6px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="max-w-6xl mx-auto px-8 py-14 space-y-14">
+
+  <header class="space-y-4">
+    <p class="lbl text-slate-400">Architecture review</p>
+    <h1 class="font-serif text-4xl tracking-tight">知识库 · 存储与联动</h1>
+    <p class="text-slate-500 text-sm">multi-agent-desktop · 2025-11-12</p>
+    <div class="flex flex-wrap gap-5 text-xs text-slate-600 pt-3 border-t border-slate-200">
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 border border-slate-400 rounded-sm"></span>module</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#475569" class="seam"/></svg>seam</span>
+      <span class="flex items-center gap-2"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="#dc2626" stroke-width="2"/></svg>leakage</span>
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-3 deepfill rounded-sm"></span>deep module</span>
+    </div>
+  </header>
+
+  <!-- ============ 现状基线 ============ -->
+  <section class="space-y-5">
+    <h2 class="font-serif text-2xl">现状：一条注入通道，五种行为</h2>
+    <div class="grid md:grid-cols-2 gap-6">
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">今天怎么流动</p>
+        <pre class="mermaid">
+flowchart TB
+  UI["KnowledgePanel<br/>notes[] 全量拉取"] -->|"note.upsert / delete"| SC["Sidecar<br/>UpsertNote / DeleteNote"]
+  SC --> ST[("fileStore<br/>knowledge.jsonl")]
+  UI -->|"note.attach"| AT["AttachNoteToAgent"]
+  AT -->|"AppendSystemMessage"| MSG["Agent.Messages<br/>system"]
+  AT -.->|"每次 attach 全量 Query 线性扫描"| ST
+  KP["knowledgeProvider<br/>maxKnowledgeLines=8"] -->|"Query Scope==''"| ST
+  KP -->|"NotesForSystemPrompt"| CR["Manager.Create<br/>首条 system"]
+  MSG -.->|"永久留在 history"| LLM["Stream(history)"]
+  CR --> LLM
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class AT,MSG leak
+        </pre>
+      </div>
+      <div class="rounded-lg border border-slate-200 bg-white p-5">
+        <p class="lbl text-slate-400 mb-3">五条注入路径的语义</p>
+        <table class="w-full text-xs">
+          <thead class="text-slate-400 lbl"><tr><th class="text-left pb-2">触发</th><th class="text-left pb-2">内容</th><th class="text-left pb-2">可撤销</th></tr></thead>
+          <tbody class="text-slate-700">
+            <tr class="border-t border-slate-100"><td class="py-2">Create</td><td>top-8 全局笔记</td><td class="text-red-600">否</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2">attach</td><td>单条笔记</td><td class="text-red-600">否</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2">Channel 广播</td><td>无</td><td class="text-slate-400">—</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2">CLI agent</td><td class="text-red-600">无（prompt 被丢弃）</td><td class="text-slate-400">—</td></tr>
+            <tr class="border-t border-slate-100"><td class="py-2">删除笔记后</td><td class="text-red-600">仍在 history 里</td><td class="text-red-600">否</td></tr>
+          </tbody>
+        </table>
+        <p class="text-xs text-slate-500 mt-3">左侧 <span class="font-mono">Scope</span> 字段被存了，但 <span class="font-mono">knowledgeProvider</span> 只查 <span class="font-mono">Scope==""</span>，<span class="font-mono">AttachNoteToAgent</span> 又不看 Scope。<b>Scope 是一个没有实现的 interface。</b></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Candidates ============ -->
+  <section id="candidates" class="space-y-12">
+
+    <!-- ========== 1 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">1 · knowledge 是 shallow 的：interface 只有名字是对的</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">internal/knowledge/knowledge.go · internal/agent/manager.go:104</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · interface ≈ implementation</p>
+          <div class="flex items-end gap-4 h-56">
+            <div class="flex flex-col items-center gap-1">
+              <div class="w-24 h-20 border-2 border-slate-400 bg-white rounded-sm flex items-center justify-center text-[10px] text-slate-600 text-center leading-tight">Store<br/>Upsert·Query·Delete</div>
+              <div class="w-24 h-20 border border-slate-300 bg-slate-100 rounded-sm flex items-center justify-center text-[10px] text-slate-500 text-center leading-tight">JSONL<br/>append / rewrite</div>
+              <span class="lbl text-red-500">3 : 2</span>
+            </div>
+            <div class="flex flex-col items-center gap-1">
+              <div class="w-24 h-24 border-2 border-slate-400 bg-white rounded-sm flex items-center justify-center text-[10px] text-slate-600 text-center leading-tight">KnowledgeProvider<br/>NotesForSystemPrompt()</div>
+              <div class="w-24 h-6 border border-slate-300 bg-slate-100 rounded-sm flex items-center justify-center text-[10px] text-slate-500">Query+格式化</div>
+              <span class="lbl text-red-500">1 : 1</span>
+            </div>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-3"><span class="font-mono">NotesForSystemPrompt</span> 只是一个 <span class="font-mono">Query</span> + <span class="font-mono">strings.Join</span> 的 adapter。删掉它，复杂度不会消失，只会搬到 <span class="font-mono">Manager</span> 里 —— 它没通过 deletion test。</p>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 一个 deep module</p>
+          <div class="flex items-end gap-4 h-56">
+            <div class="flex flex-col items-center gap-1">
+              <div class="w-40 h-9 deepfill rounded-sm flex items-center justify-center text-[10px] text-slate-100 text-center leading-tight">Select(agent) []Note</div>
+              <div class="w-40 h-40 deepfill/40 border border-slate-700 rounded-sm flex flex-col items-center justify-center gap-1 text-[10px] text-slate-300 px-2 leading-tight text-center">
+                <span>score · 预算 · 稳定序</span>
+                <span>scope 解析</span>
+                <span>attach 解析</span>
+                <span>prompt 渲染</span>
+                <span>变更检测</span>
+                <span class="ghost">fileStore · memoryStore</span>
+              </div>
+              <span class="lbl text-emerald-600">1 : 6</span>
+            </div>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-3"><span class="font-mono">fileStore</span> / <span class="font-mono">memoryStore</span> 保留在 interface 里 —— 两个真实 adapter，seam 成立。但 <b>选哪些、怎么渲染</b> 收进同一个 module。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">选笔记的策略（谁可见、多少条、什么顺序）散在 <span class="font-mono text-xs">main.go</span> 的 <span class="font-mono text-xs">knowledgeProvider</span> 和 <span class="font-mono text-xs">agent.systemPromptFor</span> 两处，两处都在 <span class="font-mono text-xs">internal/knowledge</span> 之外。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">在 <span class="font-mono text-xs">knowledge</span> 里加一个 <span class="font-mono text-xs">View</span>：入参是 agent 的 <span class="font-mono text-xs">(id, role, backend)</span>，出参是「渲染好的 prompt 段 + 命中的 Note ID」。删除 <span class="font-mono text-xs">knowledgeProvider</span>，<span class="font-mono text-xs">agent</span> 依赖收窄成 <span class="font-mono text-xs">View</span>。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· <b>locality</b>：注入策略一处改，五个触发点全跟</li>
+            <li>· <b>leverage</b>：一个 <span class="font-mono text-xs">View</span> 承担 Create / attach / Preview 三个调用点</li>
+            <li>· 删除 <span class="font-mono text-xs">knowledgeProvider</span> 与 <span class="font-mono text-xs">maxKnowledgeLines</span></li>
+            <li>· <b>interface is the test surface</b>：<span class="font-mono text-xs">TestSystemPromptFor</span> 的表驱动用例直接下移到 <span class="font-mono text-xs">knowledge</span></li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="lbl text-amber-700 mb-2">注意</p>
+          <p class="text-xs text-amber-900 leading-relaxed">这会让 <span class="font-mono">internal/agent</span> 反向 import <span class="font-mono">internal/knowledge</span>。要么接受（agent 已经 import <span class="font-mono">llm</span>/<span class="font-mono">cli</span>，无循环），要么把 <span class="font-mono">View</span> 定义成 <span class="font-mono">Note</span> 的纯函数、让 Sidecar 渲染。<b>前者更 deep，后者更松。</b>这是唯一需要你拍板的点。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- ========== 2 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">2 · attach 泄漏进 history：service 层自己拼 note 到 agent 上</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:511 AttachNoteToAgent · internal/agent/manager.go:667 AppendSystemMessage</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 注入写进消息流</p>
+          <svg viewBox="0 0 400 210" class="w-full h-56">
+            <text x="0" y="12" class="lbl" fill="#94a3b8" font-size="9">Agent.Messages</text>
+            <rect x="0" y="22" width="180" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="39" font-size="10" fill="#475569">system · 角色 + KB</text>
+            <rect x="0" y="54" width="150" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="71" font-size="10" fill="#475569">user · 问题</text>
+            <rect x="0" y="86" width="164" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="103" font-size="10" fill="#475569">assistant</text>
+            <rect x="0" y="118" width="180" height="26" rx="4" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+            <text x="8" y="135" font-size="10" fill="#b91c1c">system · [知识] 笔记</text>
+            <rect x="0" y="150" width="150" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="167" font-size="10" fill="#475569">user · 下一轮</text>
+            <path d="M200 131 C 240 131, 240 40, 275 40" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#ar)"/>
+            <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#dc2626"/></marker></defs>
+            <text x="212" y="112" font-size="9" fill="#b91c1c">整段 history</text>
+            <rect x="272" y="24" width="118" height="40" rx="4" fill="#fff" stroke="#94a3b8"/>
+            <text x="282" y="42" font-size="10" fill="#334155">Stream(</text>
+            <text x="282" y="56" font-size="10" fill="#334155">msgs[0:n])</text>
+            <text x="0" y="200" font-size="9" fill="#dc2626">删除笔记 → 这段文字永久留在 history，无路撤回</text>
+          </svg>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · history 只放对话，note 每轮现算</p>
+          <svg viewBox="0 0 400 210" class="w-full h-56">
+            <text x="0" y="12" class="lbl" fill="#94a3b8" font-size="9">Agent.Messages（纯对话）</text>
+            <rect x="0" y="22" width="180" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="39" font-size="10" fill="#475569">system · 角色</text>
+            <rect x="0" y="54" width="150" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="71" font-size="10" fill="#475569">user · 问题</text>
+            <rect x="0" y="86" width="164" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="103" font-size="10" fill="#475569">assistant</text>
+            <rect x="0" y="118" width="150" height="26" rx="4" fill="#f1f5f9" stroke="#cbd5e1"/>
+            <text x="8" y="135" font-size="10" fill="#475569">user · 下一轮</text>
+            <text x="0" y="165" class="lbl" fill="#94a3b8" font-size="9">Agent.Knowledge（引用）</text>
+            <rect x="0" y="172" width="180" height="26" rx="4" fill="#ecfdf5" stroke="#059669"/>
+            <text x="8" y="189" font-size="10" fill="#047857">note-1, note-4 · scope</text>
+            <path d="M200 130 C 240 130, 240 60, 272 60" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#ag)"/>
+            <defs><marker id="ag" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#059669"/></marker></defs>
+            <text x="206" y="108" font-size="9" fill="#047857">每轮 assemble</text>
+            <rect x="272" y="38" width="118" height="76" rx="4" fill="#fff" stroke="#059669"/>
+            <text x="282" y="56" font-size="10" fill="#065f46">View(agent)</text>
+            <text x="282" y="70" font-size="9" fill="#64748b">→ prompt 段</text>
+            <text x="282" y="86" font-size="9" fill="#64748b">history + 段</text>
+            <text x="282" y="102" font-size="9" fill="#64748b">→ Stream</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">AttachNoteToAgent</span> 在 service 层做三件业务事：全量扫 store 找 note、渲染、往 agent 的 <span class="font-mono text-xs">Messages</span> 追加 system。它绕过 <span class="font-mono text-xs">KnowledgeProvider</span> 这条唯一的 seam，也不写 <span class="font-mono text-xs">Scope</span>、不记「哪个 agent 引了哪条」。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">给 <span class="font-mono text-xs">Agent</span> 加一个引用集合 <span class="font-mono text-xs">Knowledge []string</span>（走已有 4 处白名单：Save/Load/Snapshot/viewMap），<span class="font-mono text-xs">AppendSystemMessage</span> 删除。注入只发生在 <span class="font-mono text-xs">executeMock</span>/<span class="font-mono text-xs">executeCLI</span> 组装 history 的那一行。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· <b>locality</b>：note 的可见性收敛到 <span class="font-mono text-xs">View</span>，不再有第二条路</li>
+            <li>· attach 变幂等：重复 attach 不复制 history</li>
+            <li>· 删除笔记立刻生效，不用重建会话</li>
+            <li>· <b>leverage</b>：UI 上的 "已注入 N 条" 直接读 <span class="font-mono text-xs">Agent.Knowledge</span></li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">接口形状（不写代码，只定形）</p>
+          <div class="font-mono text-[11px] text-slate-700 bg-stone-100 rounded p-3 leading-relaxed">
+            Attach(agentId, noteIds []string) → AgentView<br/>
+            Detach(agentId, noteId) → AgentView<br/>
+            <span class="text-slate-400">— 两者都是「改引用集合」，不碰 Messages</span>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ========== 3 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">3 · Scope 存了但没人实现：agent 私有的知识等于全局知识</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">knowledge.Query{Scope} · main.go:938 · KnowledgePanel.tsx:192</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold">Strong</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 文档说的 vs 代码做的</p>
+          <pre class="mermaid">
+flowchart LR
+  N1["note scope='' 全局"] --> Q1{"Query<br/>Scope: ''"}
+  N2["note scope='a1' 私有"] -.->|"永远查不到"| Q1
+  Q1 --> P["system prompt"]
+  Q1 --> A1["agent a1"]
+  Q1 --> A2["agent a2"]
+  A1 --> X1["a2 想要 a1 的私有笔记<br/>只能靠 attach 硬塞"]
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class Q1,X1 leak
+          </pre>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 三种 scope，一个解析函数</p>
+          <div class="space-y-2 pt-2">
+            <div class="cell bg-white p-3">
+              <p class="lbl text-slate-400 mb-1">ScopeGlobal</p>
+              <p class="text-[11px] text-slate-600">所有 agent · 受预算约束</p>
+            </div>
+            <div class="cell bg-white p-3">
+              <p class="lbl text-slate-400 mb-1">ScopeAgent(id)</p>
+              <p class="text-[11px] text-slate-600">只有该 agent · 不占全局预算</p>
+            </div>
+            <div class="cell bg-white p-3">
+              <p class="lbl text-slate-400 mb-1">ScopeChannel(id)</p>
+              <p class="text-[11px] text-slate-600">频道成员 · 广播时生效</p>
+            </div>
+            <p class="text-[11px] text-slate-500 pt-1">渲染顺序：agent 私有 → channel → global。同一 key 后者覆盖前者。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700">UI 的 select 允许用户选「仅 Agent X」，<span class="font-mono text-xs">Note.Scope</span> 被写进 JSONL —— 然后没有任何读取路径会用上它。用户以为写了一条私有约定，实际它永远不生效。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">View(agent)</span> 按三层 scope 取并集、去重、排序。<span class="font-mono text-xs">Query.Scope</span> 保持精确匹配语义不动（它是 store 层的 primitive），解析放在 View。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· 承诺与行为对齐，UI 不再说谎</li>
+            <li>· 「这个 agent 专属的自定义指令」成为真实能力</li>
+            <li>· 为 #4 的相关性筛选提供天然分区</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="lbl text-amber-700 mb-2">向后兼容</p>
+          <p class="text-xs text-amber-900 leading-relaxed">现有 <span class="font-mono">knowledge.jsonl</span> 里 <span class="font-mono">scope</span> 为空或 agent ID，两种都是新语义的子集，<b>无需迁移</b>。旧的 <span class="font-mono">TestQueryFilters</span> 的 scope 用例保持绿。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- ========== 4 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">4 · 固定 top-8：知识库长到 200 条时，注入的是最近写的 8 条</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">main.go:932 maxKnowledgeLines · knowledge.Query 线性扫描</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Worth exploring</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 无排序，无相关度</p>
+          <div class="space-y-1.5 pt-1">
+            <p class="text-[11px] text-slate-500 mb-2">200 条笔记 · 插入序 · 截断取前 8</p>
+            <div class="flex gap-1 flex-wrap">
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]" title="early">1</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">2</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">3</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">4</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">5</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">6</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">7</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-400 grid place-items-center text-[9px]">8</span>
+              <span class="w-7 h-7 cell bg-slate-100 text-slate-300 grid place-items-center text-[9px]">…</span>
+              <span class="w-7 h-7 cell bg-red-50 border-red-300 text-red-500 grid place-items-center text-[9px]">200</span>
+            </div>
+            <p class="text-[11px] text-red-600 mt-2">第 200 条（昨天刚写的关键约定）被丢弃。<br/>判据是「写入早」，不是「相关」，也不是「重要」。</p>
+          </div>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 相关性 + 分档预算</p>
+          <div class="space-y-1.5 pt-1">
+            <p class="text-[11px] text-slate-500 mb-2">同一份数据 · 按 agent / 最近对话打分</p>
+            <div class="flex gap-1 flex-wrap">
+              <span class="w-7 h-7 cell bg-emerald-500 border-emerald-600 text-white grid place-items-center text-[9px]">r</span>
+              <span class="w-7 h-7 cell bg-emerald-400 border-emerald-500 text-white grid place-items-center text-[9px]">r</span>
+              <span class="w-7 h-7 cell bg-emerald-300 border-emerald-400 grid place-items-center text-[9px]">t</span>
+              <span class="w-7 h-7 cell bg-emerald-200 border-emerald-300 grid place-items-center text-[9px]">t</span>
+              <span class="w-7 h-7 cell bg-emerald-100 border-emerald-300 grid place-items-center text-[9px]">s</span>
+              <span class="w-7 h-7 cell bg-amber-100 border-amber-300 grid place-items-center text-[9px]">8</span>
+              <span class="w-7 h-7 cell bg-amber-50 border-amber-200 text-slate-500 grid place-items-center text-[9px]">200</span>
+              <span class="w-7 h-7 cell bg-slate-100 text-slate-300 grid place-items-center text-[9px]">…</span>
+            </div>
+            <div class="text-[11px] text-slate-600 mt-3 space-y-0.5">
+              <p><span class="inline-block w-2 h-2 rounded-sm bg-emerald-500"></span> 必选：scope 命中（agent / channel）</p>
+              <p><span class="inline-block w-2 h-2 rounded-sm bg-emerald-300"></span> 相关：tags 命中最近 3 轮文本</p>
+              <p><span class="inline-block w-2 h-2 rounded-sm bg-amber-100"></span> 兜底：最近写入，填满预算</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">Query</span> 只支持精确 scope、AND 标签、子串匹配、截断；排序就是插入序。谁被注入完全由写入时间决定，而 <span class="font-mono text-xs">maxKnowledgeLines</span> 是个魔数，没有 token 概念。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700">把「选几条」从条数改成字符预算，按三档排序后贪心填充。<span class="font-mono text-xs">View(agent, recentText)</span> —— <span class="font-mono text-xs">recentText</span> 由调用方从最近消息里取，View 保持纯函数。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· 关键约定不会因为写得晚而消失</li>
+            <li>· prompt 大小可预测（字符预算 vs 条数）</li>
+            <li>· <b>locality</b>：排序规则只有一个实现，可单测</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="lbl text-amber-700 mb-2">为什么不推荐先做向量检索</p>
+          <p class="text-xs text-amber-900 leading-relaxed">笔记规模是「人写的几十到几百条」，标签 + 子串 + 时间已经足够。引入 embedding 会把一个 nil 依赖的纯内存 module 变成需要外部服务的 adapter —— 在笔记真的上千条之前，这是负的 depth。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- ========== 5 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">5 · CLI agent 完全看不到知识库，Channel 广播也不带</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">internal/agent/manager.go:558 executeCLI · main.go:318 SendToChannel</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Worth exploring</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 三条后端，两条没接</p>
+          <pre class="mermaid">
+flowchart TB
+  KB[("knowledge")] --> MP["mock<br/>✅ history 首条"]
+  KB -.-> CLI["claude / codex<br/>❌ runner.Run(text)<br/>只传最后一句"]
+  KB -.-> CH["channel 广播<br/>❌ prompt 只有一句话"]
+  subgraph W["每个 agent 独立 history"]
+    A1["a1"] --- A2["a2"] --- A3["a3"]
+  end
+  CH --> W
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class CLI,CH leak
+          </pre>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 组装点唯一，后端只消费</p>
+          <pre class="mermaid">
+flowchart TB
+  V["knowledge.View(agent)"] --> AS["assemble(agent)<br/>→ []llm.Message + prompt 段"]
+  AS --> MP["mock: Stream(msgs)"]
+  AS --> CLI["claude: --append-system-prompt"]
+  AS --> CH["channel: 成员 prompt 前缀"]
+  style AS fill:#0f172a,color:#e2e8f0,stroke:#0f172a
+          </pre>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 text-sm">
+        <div>
+          <p class="lbl text-slate-400 mb-2">Problem</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">executeCLI</span> 调 <span class="font-mono text-xs">runner.Run(ctx, text)</span>，<span class="font-mono text-xs">text</span> 是这一次的 prompt，会话 history 和知识库都不参与 —— CLI agent 实际上是个无状态单轮调用，而 UI 表现得它有记忆。</p>
+        </div>
+        <div>
+          <p class="lbl text-slate-400 mb-2">Solution</p>
+          <p class="text-slate-700"><span class="font-mono text-xs">CLIRunner.Run</span> 的入参从 <span class="font-mono text-xs">string</span> 改成 <span class="font-mono text-xs">Request{System, History, Prompt}</span>。<span class="font-mono text-xs">claude -p</span> 支持 <span class="font-mono text-xs">--append-system-prompt</span>，history 拼进 <span class="font-mono text-xs">-p</span> 正文。Channel 广播复用同一个 assemble。</p>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">Wins</p>
+          <ul class="text-sm space-y-1.5 text-slate-700">
+            <li>· 三个后端共享同一份「agent 看到了什么」</li>
+            <li>· <b>leverage</b>：<span class="font-mono text-xs">assemble</span> 一个函数服务 3 个 adapter</li>
+            <li>· 可测：<span class="font-mono text-xs">assemble</span> 是纯函数，直接快照比对</li>
+          </ul>
+        </div>
+        <div class="rounded-lg border border-slate-200 p-4">
+          <p class="lbl text-slate-400 mb-3">注意</p>
+          <p class="text-xs text-slate-600 leading-relaxed">这是本报告里 <b>唯一会改变外部行为</b> 的一项 —— CLI agent 的输入变长，token 成本和输出风格都会变。建议独立于 #1~#3 提交，单独验证。</p>
+        </div>
+      </div>
+    </article>
+
+    <!-- ========== 6 ========== -->
+    <article class="rounded-xl border border-slate-200 bg-white p-8 space-y-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="font-serif text-2xl">6 · note.attach 看不见，也没有 Detach</h2>
+          <p class="text-sm text-slate-500 mt-1 font-mono">Sidecar.AttachNoteToAgent → AgentConfig.Emit（只有 AgentView）</p>
+        </div>
+        <div class="flex flex-col items-end gap-2 shrink-0">
+          <span class="text-xs px-3 py-1 rounded-full bg-slate-200 text-slate-700 font-semibold">Speculative</span>
+          <span class="tag text-slate-400">in-process</span>
+        </div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-5">
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">Before · 单向，无回读</p>
+          <svg viewBox="0 0 380 150" class="w-full h-40">
+            <rect x="0" y="24" width="110" height="34" rx="4" fill="#fff" stroke="#94a3b8"/>
+            <text x="10" y="45" font-size="10" fill="#475569">KnowledgePanel</text>
+            <rect x="140" y="24" width="100" height="34" rx="4" fill="#fff" stroke="#94a3b8"/>
+            <text x="150" y="45" font-size="10" fill="#475569">Sidecar</text>
+            <rect x="270" y="24" width="105" height="34" rx="4" fill="#fff" stroke="#94a3b8"/>
+            <text x="280" y="45" font-size="10" fill="#475569">AgentView</text>
+            <line x1="110" y1="41" x2="138" y2="41" stroke="#334155" stroke-width="1.6" marker-end="url(#a2)"/>
+            <line x1="240" y1="41" x2="268" y2="41" stroke="#334155" stroke-width="1.6" marker-end="url(#a2)"/>
+            <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#334155"/></marker></defs>
+            <text x="0" y="92" font-size="10" fill="#dc2626">✕ 没有 detach</text>
+            <text x="0" y="110" font-size="10" fill="#dc2626">✕ AgentView 里看不到引用了哪些 note</text>
+            <text x="0" y="128" font-size="10" fill="#dc2626">✕ 用户只能从聊天记录里猜</text>
+          </svg>
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-stone-50 p-4">
+          <p class="lbl text-slate-400 mb-3">After · 引用是一个可见集合</p>
+          <div class="rounded border border-emerald-300 bg-emerald-50 p-3 text-[11px] text-emerald-900 font-mono leading-relaxed">
+            AgentView.knowledge<br/>&nbsp;&nbsp;[ "Go 风格" ✕ ]<br/>&nbsp;&nbsp;[ "部署约定" ✕ ]<br/>&nbsp;&nbsp;+ 从知识库选择
+          </div>
+          <p class="text-[11px] text-slate-500 mt-3">AgentView 头部多一行 chip，和现有的 📁 / ✦ 两个 chip 同构。</p>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 p-4">
+        <p class="lbl text-slate-400 mb-3">Wins</p>
+        <ul class="text-sm space-y-1.5 text-slate-700 grid md:grid-cols-2">
+          <li>· attach 变成可逆操作</li>
+          <li>· <b>interface is the test surface</b>：<span class="font-mono text-xs">AgentView</span> 是唯一事实</li>
+          <li>· 复用 #2 的 <span class="font-mono text-xs">Knowledge []string</span>，零新增状态</li>
+          <li>· 用户第一次能看出 agent 在按什么规则回答</li>
+        </ul>
+      </div>
+      <div class="rounded-lg border border-slate-300 bg-slate-100 p-4">
+        <p class="text-xs text-slate-600"><b>为什么是 Speculative：</b>它是 #2 的 UI 后置项，本身不解决摩擦，只是把 #2 的 depth 暴露出来。等 #2 落地后再决定要不要做。</p>
+      </div>
+    </article>
+
+  </section>
+
+  <!-- ============ Top recommendation ============ -->
+  <section id="top-recommendation">
+    <div class="rounded-xl deepfill p-8 text-slate-100 space-y-4">
+      <p class="lbl text-slate-400">Top recommendation</p>
+      <h2 class="font-serif text-3xl">先做 #2，再做 #1</h2>
+      <p class="text-slate-300 text-sm leading-relaxed max-w-3xl">
+        #2 是唯一一处「已经产生错误行为」的地方：<span class="font-mono text-xs text-slate-200">AttachNoteToAgent</span> 把笔记写进 history，删不掉、看不见、还绕过了唯一的 seam。
+        把它换成 <span class="font-mono text-xs text-slate-200">Agent.Knowledge []string</span> 之后，#1 的 <span class="font-mono text-xs text-slate-200">View(agent)</span> 才有确定的输入 —— 先修数据形状，再收拢 interface。
+        这两项做完，#3 的 scope 解析和 #4 的排序都只是 <span class="font-mono text-xs text-slate-200">View</span> 内部的事，#6 自然免费。
+      </p>
+      <a href="#candidates" class="inline-block text-xs text-emerald-300 hover:text-emerald-200">← 回到候选列表</a>
+    </div>
+  </section>
+
+  <footer class="text-xs text-slate-400 pt-6 border-t border-slate-200 space-y-1">
+    <p>词汇：module · interface · implementation · depth · seam · adapter · leverage · locality</p>
+    <p class="font-mono">internal/knowledge/knowledge.go · internal/agent/manager.go · internal/cli/interface.go · main.go · src/components/KnowledgePanel.tsx</p>
+  </footer>
+
+</main>
+</body>
+</html>

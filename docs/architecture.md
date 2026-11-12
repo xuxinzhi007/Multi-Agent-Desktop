@@ -84,6 +84,7 @@ multi-agent-desktop/
 │   ├── lib/useSidecar.ts      # 单一状态源 + send() 协议
 │   └── mygo.ts                # `npm run generate` 生成，勿手改
 ├── docs/                      # design.md / architecture.md / research.md
+├── docs/reviews/              # 架构评审报告（提案，见 reviews/README.md 摘要）
 ├── specs/                     # 每个 wave 的 decision / check / evidence
 └── README.md
 ```
