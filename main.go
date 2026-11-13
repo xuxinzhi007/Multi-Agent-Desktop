@@ -345,7 +345,7 @@ func (s *Sidecar) ListChannels() []channel.Channel {
 
 // SendToChannel 发消息到频道，并触发相关成员 agent。
 // @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
-// 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
+// 成员回复通过 PromptRequest.ChannelID 路由回频道。
 func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
 	// 1. 广播消息到频道
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
@@ -367,11 +367,59 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 	}
 
 	// 4. 构建 transcript（共享上下文）
-	transcript := channel.BuildTranscript(ch.Messages, 2000) // 2000 字符预算
+	// 排除刚 AddMessage 进去的本条，否则同一句话在 prompt 里出现两次
+	prior := ch.Messages
+	if len(prior) > 0 && prior[len(prior)-1].ID == msg.ID {
+		prior = prior[:len(prior)-1]
+	}
+	transcript := channel.BuildTranscript(prior, 2000) // 2000 字符预算
 
-	// 5. 按策略决定谁回复
+	// 5. 决定谁回复
+	// 规则：被 @ 的必须回；没人被 @ 时（discuss）选 1 个最相关的成员，
+	// 避免「10 成员 = 10 倍成本」和「没人回」两个极端。
 	var deliveries []channel.Delivery
 	var errs []string
+
+	// 先看有没有人本文件被点名
+	mentions := channel.ParseMentions(text)
+	addressed := make(map[string]bool)
+	for _, agentId := range recipients {
+		if a, ok := s.mgr.Get(agentId); ok {
+			for _, m := range mentions {
+				if m == a.Name || m == agentId || m == "all" {
+					addressed[agentId] = true
+					break
+				}
+			}
+		}
+	}
+
+	// 没人被点名且在 discuss 模式：挑一个角色最相关的
+	var runnerUp string
+	if len(addressed) == 0 && policy != channel.PolicyDirect {
+		bestScore := -1
+		for _, agentId := range recipients {
+			a, ok := s.mgr.Get(agentId)
+			if !ok {
+				continue
+			}
+			score := 0
+			if channel.RoleRelevant(text, a.Role) {
+				score = 2
+			}
+			if strings.Contains(strings.ToLower(text), strings.ToLower(a.Name)) {
+				score += 3
+			}
+			if score > bestScore {
+				bestScore = score
+				runnerUp = agentId
+			}
+		}
+		// 全都不相关时，也让第一个成员兜底，避免消息石沉大海
+		if runnerUp == "" && len(recipients) > 0 {
+			runnerUp = recipients[0]
+		}
+	}
 
 	for _, agentId := range recipients {
 		a, ok := s.mgr.Get(agentId)
@@ -387,7 +435,14 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 		}
 
 		// 判断是否应该回复
-		shouldReply, reason := channel.ShouldReply(policy, *msg, agentId, a.Name)
+		shouldReply, reason := channel.ShouldReply(policy, *msg, agentId, a.Name, a.Role)
+		if !shouldReply && agentId == runnerUp {
+			shouldReply = true
+			reason = "discuss 模式 · 最优匹配"
+		}
+		if !shouldReply && len(addressed) > 0 && !addressed[agentId] {
+			reason = "未被点名"
+		}
 
 		if !shouldReply {
 			deliveries = append(deliveries, channel.Delivery{
@@ -403,8 +458,9 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 		prompt := fmt.Sprintf("%s\n[user] %s: %s", transcript.Render(), fromName, text)
 
 		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
-			AgentID: agentId,
-			Text:    prompt,
+			AgentID:   agentId,
+			Text:      prompt,
+			ChannelID: channelId, // 回复写回频道，不再靠字符串标记
 		})
 		if err != nil {
 			errs = append(errs, err.Error())
@@ -435,23 +491,6 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 		return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-// parseMentions 解析 @提及。
-func parseMentions(text string) []string {
-	var mentions []string
-	words := strings.Fields(text)
-	for _, word := range words {
-		if strings.HasPrefix(word, "@") {
-			mention := strings.TrimPrefix(word, "@")
-			// 去掉标点
-			mention = strings.TrimRight(mention, ",.!?:;，。！？：；")
-			if mention != "" {
-				mentions = append(mentions, mention)
-			}
-		}
-	}
-	return mentions
 }
 
 // isRelevantToRole 判断消息是否与角色相关。

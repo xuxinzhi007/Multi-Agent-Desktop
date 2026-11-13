@@ -6,7 +6,8 @@ type Props = {
   agents: Agent[]
   /** 各 agent 的流式增量，key 是 agent ID */
   streaming?: Record<string, string>
-  onSend: (text: string) => void
+  /** text 已含 @名字；mentions 是结构化的被点名成员名列表 */
+  onSend: (text: string, mentions: string[]) => void
   onDelete?: () => void
 }
 
@@ -18,6 +19,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
   const [input, setInput] = useState('')
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
+  // 被 @ 的成员：结构化选择，不是从文本里解析
+  const [mentioned, setMentioned] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
 
@@ -53,10 +56,24 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
 
   const submit = () => {
     const text = input.trim()
-    if (!text) return
-    onSend(text)
+    if (!text && mentioned.length === 0) return
+    // 把被 @ 的成员名附在文本末尾，后端 ParseMentions 能读到；
+    // 同时传结构化 mentions，避免名字里含空格时解析失败。
+    const textWithMentions =
+      mentioned.length > 0
+        ? `${mentioned.map((n) => `@${n}`).join(' ')} ${text}`.trim()
+        : text
+    onSend(textWithMentions, mentioned)
     setInput('')
+    setMentioned([])
     setShowMentions(false)
+  }
+
+  const toggleMention = (name: string) => {
+    setMentioned((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]))
+    // 插入 @ 到输入框便于阅读（不参与解析）
+    setShowMentions(false)
+    taRef.current?.focus()
   }
 
   const handleInputChange = (value: string) => {
@@ -71,13 +88,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
       }
     }
     setShowMentions(false)
-  }
-
-  const insertMention = (name: string) => {
-    const atIndex = input.lastIndexOf('@')
-    setInput(input.slice(0, atIndex) + '@' + name + ' ')
-    setShowMentions(false)
-    taRef.current?.focus()
   }
 
   const filtered = members.filter(
@@ -301,7 +311,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
               {filtered.map((a) => (
                 <button
                   key={a.id}
-                  onClick={() => insertMention(a.name)}
+                  onClick={() => toggleMention(a.name)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -332,20 +342,54 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
                     {a.name.slice(0, 1).toUpperCase()}
                   </span>
                   {a.name}
+                  {mentioned.includes(a.name) && (
+                    <span style={{ marginLeft: 'auto', color: 'var(--accent-bright)' }}>✓</span>
+                  )}
                 </button>
               ))}
             </div>
           )}
 
           <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px 7px' }}>
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-              广播给 {members.length} 个成员
+            <span
+              style={{
+                fontSize: 'var(--text-xs)',
+                color: 'var(--text-disabled)',
+                display: 'flex',
+                gap: 6,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+              }}
+            >
+              {mentioned.length === 0 ? (
+                <>未点名 → 自动选 1 个最相关的成员</>
+              ) : (
+                <>
+                  点名：
+                  {mentioned.map((n) => (
+                    <span
+                      key={n}
+                      onClick={() => toggleMention(n)}
+                      title="点击取消"
+                      style={{
+                        padding: '1px 6px',
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'var(--accent-dim)',
+                        color: 'var(--accent-bright)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      @{n} ×
+                    </span>
+                  ))}
+                </>
+              )}
             </span>
             <button
               className="c-btn c-btn--primary c-btn--sm"
               style={{ marginLeft: 'auto' }}
               onClick={submit}
-              disabled={!input.trim()}
+              disabled={!input.trim() && mentioned.length === 0}
             >
               发送
             </button>

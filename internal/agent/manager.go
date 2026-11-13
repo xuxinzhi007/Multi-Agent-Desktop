@@ -487,6 +487,9 @@ func (m *Manager) Delete(id string) bool {
 type PromptRequest struct {
 	AgentID string `json:"agentId"`
 	Text    string `json:"text"`
+	// ChannelID 非空表示这条 prompt 来自群聊，回复要写回该频道。
+	// 不再依赖从文本里猜 [channel:xxx] 标记。
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 // Prompt 给某个 agent 发一条消息。如果 agent 空闲立即执行，否则排队。
@@ -582,16 +585,16 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 
 	switch backend {
 	case "claude", "codex":
-		a.executeCLI(m, runCtx, backend, req.Text)
+		a.executeCLI(m, runCtx, backend, req.Text, req.ChannelID)
 	default:
-		a.executeMock(m, runCtx, req.Text)
+		a.executeMock(m, runCtx, req.Text, req.ChannelID)
 	}
 
 	cancel()
 }
 
 // executeMock 用内置 mock LLM 执行。
-func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
+func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID string) {
 	// 每轮开始时对配置取一次快照：中途改配置只影响下一轮。
 	cfg := a.EffectiveLLM(m)
 	client := llm.New(cfg)
@@ -650,9 +653,9 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 	})
 
 	// 检查是否是频道消息，如果是则路由回频道
-	if channelId := extractChannelId(text); channelId != "" {
+	if channelID != "" {
 		m.emit("agent.channel.reply", map[string]any{
-			"channelId": channelId,
+			"channelId": channelID,
 			"agentId":   a.ID,
 			"agentName": a.Name,
 			"text":      full,
@@ -663,7 +666,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 }
 
 // executeCLI 用外部 CLI agent 执行。
-func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text string) {
+func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text, channelID string) {
 	runner, err := cli.NewCLIRunner(backend, a.EffectiveWorkDir(m), a.EffectiveLLM(m).Model)
 	if err != nil {
 		m.finish(a, StatusError, err.Error())
@@ -765,9 +768,9 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()}})
 
 	// 检查是否是频道消息，如果是则路由回频道
-	if channelId := extractChannelId(text); channelId != "" {
+	if channelID != "" {
 		m.emit("agent.channel.reply", map[string]any{
-			"channelId": channelId,
+			"channelId": channelID,
 			"agentId":   a.ID,
 			"agentName": a.Name,
 			"text":      fullText,
@@ -915,15 +918,3 @@ func (a *Agent) viewMap() map[string]any {
 	}
 }
 
-// extractChannelId 从消息文本提取频道 ID（[channel:xxx] 标记）。
-func extractChannelId(text string) string {
-	start := strings.Index(text, "[channel:")
-	if start == -1 {
-		return ""
-	}
-	end := strings.Index(text[start:], "]")
-	if end == -1 {
-		return ""
-	}
-	return text[start+9 : start+end]
-}

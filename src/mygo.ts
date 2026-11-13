@@ -134,6 +134,7 @@ export interface Note {
 export interface PromptRequest {
   agentId: string;
   text: string;
+  channelId?: string;
 }
 
 export interface Query {
@@ -320,7 +321,7 @@ export const Sidecar = {
   /**
    * SendToChannel 发消息到频道，并触发相关成员 agent。
    * @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
-   * 成员回复会自动路由回频道（通过 [channel:xxx] 标记识别）。
+   * 成员回复通过 PromptRequest.ChannelID 路由回频道。
    */
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);

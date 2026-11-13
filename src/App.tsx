@@ -83,12 +83,13 @@ export default function App() {
           channel={activeChannel}
           agents={s.agents}
           streaming={s.streaming}
-          onSend={(text) =>
+          onSend={(text, mentions) =>
             s.send('channel.send', {
               channelId: activeChannel.id,
               fromId: 'user',
               fromName: '你',
               text,
+              mentions,
             })
           }
         />

@@ -33,6 +33,25 @@ func newTestSidecar(t *testing.T) *Sidecar {
 	}
 }
 
+// newWiredTestSidecar 让 emitter 真正走 emitToWindow，
+// 用于验证「事件 → 频道」这条链路（newTestSidecar 的 emitter 是空函数，跑不到）。
+func newWiredTestSidecar(t *testing.T) *Sidecar {
+	t.Helper()
+	chMgr := channel.NewManager()
+	var mgr *agent.Manager
+	win := &mygo.Window{}
+	mgr = agent.NewManager(llm.Config{Provider: "mock"}, func(ev string, data any) {
+		emitToWindow(win, nil, mgr, chMgr, ev, data)
+	})
+	t.Cleanup(func() {
+		for _, a := range mgr.List() {
+			mgr.Stop(a.ID)
+			mgr.Delete(a.ID)
+		}
+	})
+	return &Sidecar{mgr: mgr, channels: chMgr, win: win}
+}
+
 // stopAll 停掉所有 agent，避免测试结束时仍有 goroutine 跑 mock 流。
 func stopAll(t *testing.T, s *Sidecar) {
 	t.Helper()
@@ -512,4 +531,97 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 	}
 	a2, _ := s.mgr.Get(a.ID)
 	t.Fatalf("agent %q never produced an assistant reply (Messages=%+v)", a.ID, messagesOf(a2))
+}
+
+// TestChannelReplyLandsInChannel —— 群聊回复必须写回频道。
+// 这条测试在修复 PromptRequest.ChannelID 之前是红的：
+// agent 跑了 150+ delta，但频道里始终只有用户那一条。
+func TestChannelReplyLandsInChannel(t *testing.T) {
+	s := newWiredTestSidecar(t)
+	defer stopAll(t, s)
+
+	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
+	ch := s.CreateChannel("测试群", []string{a.ID})
+
+	if err := s.SendToChannel(ch.ID, "user", "你", "hello"); err != nil {
+		t.Fatalf("SendToChannel: %v", err)
+	}
+
+	// 等 agent 跑完（mock 流会发很多 delta）
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := s.channels.Get(ch.ID)
+		if len(got.Messages) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	got, _ := s.channels.Get(ch.ID)
+	if len(got.Messages) != 2 {
+		t.Fatalf("频道消息数 = %d, want 2（用户 1 + agent 1）", len(got.Messages))
+	}
+	if got.Messages[0].FromID != "user" {
+		t.Errorf("第 1 条 fromID = %q, want user", got.Messages[0].FromID)
+	}
+	if got.Messages[1].FromID != a.ID {
+		t.Errorf("第 2 条 fromID = %q, want %q（agent 的回复应写回频道）", got.Messages[1].FromID, a.ID)
+	}
+	if got.Messages[1].Text == "" {
+		t.Error("第 2 条 text 为空")
+	}
+}
+
+// TestSendToChannelTranscriptExcludesCurrent —— transcript 不应重复包含本轮消息。
+func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
+	s := newWiredTestSidecar(t)
+	defer stopAll(t, s)
+
+	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
+	ch := s.CreateChannel("测试群", []string{a.ID})
+
+	if err := s.SendToChannel(ch.ID, "user", "你", "第一句"); err != nil {
+		t.Fatalf("SendToChannel: %v", err)
+	}
+	// 等第一条回复落库
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := s.channels.Get(ch.ID)
+		if len(got.Messages) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 发第二条，检查 agent 的 user message 里「第二句」只出现一次
+	if err := s.SendToChannel(ch.ID, "user", "你", "第二句"); err != nil {
+		t.Fatalf("SendToChannel #2: %v", err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := s.channels.Get(ch.ID)
+		if len(got.Messages) >= 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 从 agent 历史里找含「第二句」的 user 消息
+	raw, ok := s.mgr.Get(a.ID)
+	if !ok {
+		t.Fatal("agent 不存在")
+	}
+	snap := raw.Snapshot()
+	var found string
+	for _, m := range snap.Messages {
+		if m.Role == "user" && strings.Contains(m.Content, "第二句") {
+			found = m.Content
+		}
+	}
+	if found == "" {
+		t.Fatal("agent 历史里找不到含「第二句」的 user 消息")
+	}
+	if n := strings.Count(found, "第二句"); n != 1 {
+		t.Errorf("「第二句」在 prompt 里出现 %d 次, want 1（transcript 应排除本轮消息）", n)
+	}
 }

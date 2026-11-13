@@ -346,40 +346,76 @@ func (t Transcript) Render() string {
 
 // ShouldReply 判断 agent 是否应该回复这条消息。
 // 按 TurnPolicy 和 @提及决定。
-func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName string) (bool, string) {
+// ShouldReply 判断 agent 是否应该回复这条消息。
+// role 用于 discuss 模式下的相关性判断（空则不判断）。
+func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string) (bool, string) {
 	// 解析 @提及
-	mentions := parseMentions(msg.Text)
+	mentions := ParseMentions(msg.Text)
 
-	// 被 @ 必须回复
+	// 被 @ 必须回复（含 @all）
 	for _, m := range mentions {
 		if m == agentName || m == agentID || m == "all" {
 			return true, "被 @"
 		}
 	}
 
+	// 有 @ 但没 @ 到我 —— 让被点名的人说，不打扰其他成员
+	if len(mentions) > 0 {
+		return false, "有 @ 但未点到我"
+	}
+
 	// 按策略判断
 	switch policy {
 	case PolicyDirect:
-		// 单聊模式：只有被 @ 才回
 		return false, "direct 模式未被 @"
 
 	case PolicyDiscuss:
-		// 讨论模式：没被 @ 也可以回（由 agent 自己判断）
-		// 这里返回 true，让 agent 自己决定是否回复
-		return true, "discuss 模式"
+		// 讨论模式：没被 @ 时由 SendToChannel 统一选 1 个最相关的成员，
+		// 这里返回 false，避免 N 成员 = N 倍成本。
+		return false, "discuss 模式 · 未被点名"
 
 	case PolicyRoundRobin:
-		// 轮流模式：按顺序，这里简化处理
 		return true, "roundrobin 模式"
 
 	default:
-		// 默认：discuss
 		return true, "默认 discuss 模式"
 	}
 }
 
-// parseMentions 解析 @提及。
-func parseMentions(text string) []string {
+// RoleRelevant 判断消息是否与该角色相关（供 SendToChannel 排序用）。
+// 关键词表来自角色名（"后端" / "前端" / "测试" / "运维"）与内容的子串匹配。
+func RoleRelevant(text, role string) bool {
+	if role == "" {
+		return false
+	}
+	keywords := map[string][]string{
+		"后端": {"api", "api", "数据库", "sql", "服务", "接口", "server", "backend"},
+		"前端": {"ui", "页面", "组件", "样式", "css", "前端", "react", "frontend"},
+		"测试": {"测试", "bug", "错误", "用例", "qa", "test"},
+		"运维": {"部署", "监控", "日志", "服务器", "deploy", "ops"},
+	}
+	lower := strings.ToLower(text)
+	lowerRole := strings.ToLower(role)
+
+	// 角色名本身出现在文本里，也算相关
+	if strings.Contains(lower, lowerRole) {
+		return true
+	}
+	for key, kws := range keywords {
+		if !strings.Contains(role, key) {
+			continue
+		}
+		for _, kw := range kws {
+			if strings.Contains(lower, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ParseMentions 解析 @提及（前后端语义唯一来源）。
+func ParseMentions(text string) []string {
 	var mentions []string
 	words := strings.Fields(text)
 	for _, word := range words {
