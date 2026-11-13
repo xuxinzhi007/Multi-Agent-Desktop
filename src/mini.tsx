@@ -7,8 +7,9 @@ import { events, Sidecar, type MiniStatus, type MiniAgentStatus } from './mygo'
 type AgentStatus = MiniAgentStatus & {
   startedAt?: number
   errorMsg?: string
-  chars?: number   // 本轮已生成字符数
-  lastTool?: string // 最近一次工具调用名
+  chars?: number     // 本轮已生成字符数
+  lastTool?: string  // 最近一次工具调用名
+  blockedReason?: string // 「在等人」的原因
 }
 
 type ExtendedStatus = {
@@ -90,29 +91,34 @@ function MiniApp() {
   const errors = status.agents.filter((a) => a.status === 'error').length
   const done = status.agents.filter((a) => a.status === 'done').length
   const idle = status.agents.filter((a) => a.status === 'idle').length
+  const blocked = status.agents.filter((a) => a.status === 'blocked').length
 
   // 5 态完整映射（与 AgentView 的 StatusBadge 保持一致）
   const statusColor = (s: string) =>
-    s === 'running'
-      ? 'var(--warning)'
-      : s === 'queued'
-        ? 'var(--accent-bright)'
-        : s === 'error'
-          ? 'var(--danger)'
-          : s === 'done'
-            ? 'var(--success)'
-            : 'var(--text-disabled)'
+    s === 'blocked'
+      ? 'var(--danger)'
+      : s === 'running'
+        ? 'var(--warning)'
+        : s === 'queued'
+          ? 'var(--accent-bright)'
+          : s === 'error'
+            ? 'var(--danger)'
+            : s === 'done'
+              ? 'var(--success)'
+              : 'var(--text-disabled)'
 
   const statusLabel = (s: string) =>
-    s === 'running'
-      ? '运行中'
-      : s === 'queued'
-        ? '排队'
-        : s === 'error'
-          ? '出错'
-          : s === 'done'
-            ? '完成'
-            : '空闲'
+    s === 'blocked'
+      ? '等你'
+      : s === 'running'
+        ? '运行中'
+        : s === 'queued'
+          ? '排队'
+          : s === 'error'
+            ? '出错'
+            : s === 'done'
+              ? '完成'
+              : '空闲'
 
   // 格式化运行时间
   const formatElapsed = (startedAt?: number): string => {
@@ -190,27 +196,32 @@ function MiniApp() {
             >
               <span
                 style={{
-                  width: a.status === 'running' ? 12 : 10,
-                  height: a.status === 'running' ? 12 : 10,
+                  width: a.status === 'running' || a.status === 'blocked' ? 12 : 10,
+                  height: a.status === 'running' || a.status === 'blocked' ? 12 : 10,
                   borderRadius: '50%',
-                  background: a.status === 'error' ? 'var(--danger)' : a.color,
+                  background:
+                    a.status === 'error' || a.status === 'blocked' ? 'var(--danger)' : a.color,
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow:
-                    a.status === 'running'
-                      ? `0 0 12px ${a.color}, 0 0 4px ${a.color}`
-                      : a.status === 'error'
-                        ? '0 0 10px var(--danger)'
-                        : a.status === 'queued'
-                          ? `0 0 6px ${a.color}`
-                          : 'none',
+                    a.status === 'blocked'
+                      ? '0 0 14px var(--danger), 0 0 5px var(--danger)'
+                      : a.status === 'running'
+                        ? `0 0 12px ${a.color}, 0 0 4px ${a.color}`
+                        : a.status === 'error'
+                          ? '0 0 10px var(--danger)'
+                          : a.status === 'queued'
+                            ? `0 0 6px ${a.color}`
+                            : 'none',
                   animation:
-                    a.status === 'running'
-                      ? 'pulse 1s infinite'
-                      : a.status === 'error'
-                        ? 'errorPulse 0.8s infinite'
-                        : a.status === 'queued'
-                          ? 'pulse 1.5s infinite'
-                          : 'none',
+                    a.status === 'blocked'
+                      ? 'errorPulse 0.8s infinite'
+                      : a.status === 'running'
+                        ? 'pulse 1s infinite'
+                        : a.status === 'error'
+                          ? 'errorPulse 0.8s infinite'
+                          : a.status === 'queued'
+                            ? 'pulse 1.5s infinite'
+                            : 'none',
                   cursor: 'pointer',
                   display: 'block',
                   transition: 'all 0.2s',
@@ -263,6 +274,11 @@ function MiniApp() {
                     {statusLabel(a.status)}
                     {a.startedAt && a.status === 'running' && ` · ${formatElapsed(a.startedAt)}`}
                   </div>
+                  {a.blockedReason && a.status === 'blocked' && (
+                    <div style={{ color: 'var(--danger)', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal' }}>
+                      {a.blockedReason}
+                    </div>
+                  )}
                   {a.errorMsg && a.status === 'error' && (
                     <div style={{ color: 'var(--danger)', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal' }}>
                       {a.errorMsg}
@@ -282,13 +298,29 @@ function MiniApp() {
           )}
         </div>
 
-        {/* 统计 */}
-        <span style={{ fontSize: 11, color: '#a4adbd', display: 'flex', gap: 6, flexShrink: 0 }}>
+        {/* 统计：blocked 排最前，因为它需要用户动作 */}
+        <span style={{ fontSize: 11, display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+          {blocked > 0 && (
+            <span
+              style={{
+                color: 'var(--danger)',
+                fontWeight: 700,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+              }}
+            >
+              <span className="blink">●</span>
+              {blocked} 个在等你
+            </span>
+          )}
           {running > 0 && <span style={{ color: 'var(--warning)' }}>{running} 运行</span>}
           {queued > 0 && <span style={{ color: 'var(--accent-bright)' }}>{queued} 排队</span>}
           {errors > 0 && <span style={{ color: 'var(--danger)' }}>{errors} 错</span>}
-          {done > 0 && running === 0 && <span style={{ color: 'var(--success)' }}>{done} 完成</span>}
-          {idle > 0 && running === 0 && done === 0 && errors === 0 && (
+          {done > 0 && running === 0 && !blocked && (
+            <span style={{ color: 'var(--success)' }}>{done} 完成</span>
+          )}
+          {idle > 0 && running === 0 && done === 0 && errors === 0 && !blocked && (
             <span style={{ color: 'var(--text-disabled)' }}>{idle} 空闲</span>
           )}
         </span>
@@ -374,7 +406,8 @@ function MiniApp() {
                   width: 8,
                   height: 8,
                   borderRadius: '50%',
-                  background: a.status === 'error' ? 'var(--danger)' : a.color,
+                  background:
+                    a.status === 'error' || a.status === 'blocked' ? 'var(--danger)' : a.color,
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow: a.status === 'running' ? `0 0 8px ${a.color}` : 'none',
                   animation: a.status === 'running' ? 'pulse 1s infinite' : a.status === 'error' ? 'errorPulse 0.8s infinite' : 'none',
@@ -410,6 +443,20 @@ function MiniApp() {
                   >
                     {a.lastTool && <span>🔧 {a.lastTool}</span>}
                     {(a.chars ?? 0) > 0 && <span>{a.chars} 字</span>}
+                  </div>
+                )}
+                {a.blockedReason && a.status === 'blocked' && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--danger)',
+                      marginTop: 2,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    ⚠ {a.blockedReason} · 点击去处理
                   </div>
                 )}
                 {a.errorMsg && a.status === 'error' && (

@@ -155,7 +155,9 @@ export function useSidecar() {
         }
       }),
     )
-    sub(events.toolStart, (e) =>
+    sub(events.toolStart, (e) => {
+      // 工具调用进入待审批 —— 把 agent 标为「在等人」，悬浮条会红色提示
+      Sidecar.blockAgent(e.agentId, `等待审批 ${e.tool}`).catch(() => {})
       setState((s) => {
         const agent = s.agents.find((a) => a.id === e.agentId)
         const activity: Activity = {
@@ -171,8 +173,8 @@ export function useSidecar() {
           tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'waiting', at: Date.now() }],
           activities: [...s.activities, activity].slice(-50),
         }
-      }),
-    )
+      })
+    })
     sub(events.shellStart, (e: ShellEvent) =>
       setState((s) => ({
         ...s,
@@ -309,17 +311,26 @@ export function useSidecar() {
 
   // 批准/拒绝工具调用
   const approveTool = useCallback((id: string) => {
-    setState((s) => ({
-      ...s,
-      tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'ok' } : t)),
-    }))
+    setState((s) => {
+      const t = s.tools.find((x) => x.id === id)
+      // 工具 ID 形如 "<agentId>-<n>"，取前缀还原 agentId
+      if (t) {
+        const agentId = id.replace(/-\d+$/, '')
+        Sidecar.unblockAgent(agentId).catch(() => {})
+      }
+      return { ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'ok' } : t)) }
+    })
   }, [])
 
   const rejectTool = useCallback((id: string) => {
-    setState((s) => ({
-      ...s,
-      tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'error' } : t)),
-    }))
+    setState((s) => {
+      const t = s.tools.find((x) => x.id === id)
+      if (t) {
+        const agentId = id.replace(/-\d+$/, '')
+        Sidecar.unblockAgent(agentId).catch(() => {})
+      }
+      return { ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'error' } : t)) }
+    })
   }, [])
 
   return { ...state, send, approveTool, rejectTool }

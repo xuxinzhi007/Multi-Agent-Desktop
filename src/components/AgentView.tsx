@@ -937,6 +937,7 @@ function ModeBtn({
 function StatusBadge({ status, queueLen }: { status: string; queueLen?: number }) {
   const map: Record<string, { cls: string; t: string }> = {
     idle: { cls: '', t: '空闲' },
+    blocked: { cls: 'c-badge--danger', t: '等你处理' },
     running: { cls: 'c-badge--warning', t: '运行中' },
     queued: { cls: 'c-badge--accent', t: queueLen ? `排队 ${queueLen}` : '排队' },
     done: { cls: 'c-badge--success', t: '完成' },

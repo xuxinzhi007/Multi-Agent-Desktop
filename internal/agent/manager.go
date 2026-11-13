@@ -21,6 +21,9 @@ const (
 	StatusQueued  Status = "queued"
 	StatusDone    Status = "done"
 	StatusError   Status = "error"
+	// StatusBlocked 表示 agent 停下来了，在等用户操作（工具审批、需要输入等）。
+	// 与 running 的区别：running 是它自己在动，blocked 是它在看你。
+	StatusBlocked Status = "blocked"
 )
 
 // Agent 是一个独立的 agent 会话，持有自己的历史、模型和取消函数。
@@ -37,6 +40,8 @@ type Agent struct {
 	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
 	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`  // 会话级模型配置，nil 则回落 Manager.llmCfg
 	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
+	// BlockedReason 是「在等人」的原因，仅 Status == blocked 时有值
+	BlockedReason string `json:"blockedReason,omitempty"`
 
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
@@ -229,8 +234,9 @@ func (m *Manager) Load() error {
 			Backend:   saved.Backend,
 			WorkDir:   saved.WorkDir,
 			LLMCfg:    saved.LLMCfg,
-			Knowledge: append([]string(nil), saved.Knowledge...),
-			queue:     make(chan PromptRequest, 32),
+			Knowledge:     append([]string(nil), saved.Knowledge...),
+			BlockedReason: saved.BlockedReason,
+			queue:         make(chan PromptRequest, 32),
 			done:      make(chan struct{}),
 		}
 		m.agents[a.ID] = a
@@ -333,6 +339,44 @@ func (m *Manager) GetKnowledge(agentId string) []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]string(nil), a.Knowledge...)
+}
+
+// SetBlocked 把 agent 标记为「在等人」（工具审批、需要输入等）。
+// reason 会随事件推给前端，悬浮条据此显示「2 个在等你」。
+func (m *Manager) SetBlocked(id, reason string) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	a.mu.Lock()
+	// 只有运行中或排队中的 agent 才会被阻塞；idle/done/error 不该被覆盖
+	if a.Status != StatusRunning && a.Status != StatusQueued && a.Status != StatusBlocked {
+		a.mu.Unlock()
+		return nil
+	}
+	a.Status = StatusBlocked
+	a.BlockedReason = reason
+	a.mu.Unlock()
+	m.emit("agent.status", map[string]any{"id": id, "status": StatusBlocked})
+	return nil
+}
+
+// Unblock 解除阻塞，恢复为运行中。
+func (m *Manager) Unblock(id string) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	a.mu.Lock()
+	if a.Status != StatusBlocked {
+		a.mu.Unlock()
+		return nil
+	}
+	a.Status = StatusRunning
+	a.BlockedReason = ""
+	a.mu.Unlock()
+	m.emit("agent.status", map[string]any{"id": id, "status": StatusRunning})
+	return nil
 }
 
 var palette = []string{"#5b9dff", "#3ecf8e", "#e8a33d", "#c47aff", "#ff7a8a", "#4dd0e1"}
@@ -817,7 +861,8 @@ func (a *Agent) Snapshot() *Agent {
 		Backend:   a.Backend,
 		WorkDir:   a.WorkDir,
 		LLMCfg:    a.LLMCfg,
-		Knowledge: append([]string(nil), a.Knowledge...),
+		Knowledge:     append([]string(nil), a.Knowledge...),
+		BlockedReason: a.BlockedReason,
 	}
 }
 
@@ -837,7 +882,8 @@ func (a *Agent) viewMap() map[string]any {
 		"backend":   a.Backend,
 		"workDir":   a.WorkDir,
 		"llmCfg":    a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
-		"knowledge": append([]string(nil), a.Knowledge...),
+		"knowledge":     append([]string(nil), a.Knowledge...),
+		"blockedReason": a.BlockedReason,
 	}
 }
 

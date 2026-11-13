@@ -278,7 +278,7 @@ export default function Sidebar(p: Props) {
                     {a.name}
                   </span>
                   <span
-                    className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' ? 'blink' : ''}`}
+                    className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}
                     style={{ width: 5, height: 5 }}
                   />
                 </div>
@@ -291,10 +291,12 @@ export default function Sidebar(p: Props) {
                     textOverflow: 'ellipsis',
                   }}
                 >
-                  {a.status === 'running'
-                    ? '正在处理…'
-                    : a.status === 'queued'
-                      ? `排队中 (${a.queueLen})`
+                  {a.status === 'blocked'
+                    ? `⚠ ${a.blockedReason || '等你处理'}`
+                    : a.status === 'running'
+                      ? '正在处理…'
+                      : a.status === 'queued'
+                        ? `排队中 (${a.queueLen})`
                       : a.messages.length > 1
                         ? a.messages[a.messages.length - 1].content.slice(0, 30) + (a.messages[a.messages.length - 1].content.length > 30 ? '…' : '')
                         : a.role}

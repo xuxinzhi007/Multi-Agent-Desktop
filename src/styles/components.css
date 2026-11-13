@@ -129,6 +129,11 @@
 .c-dot--error {
   background: var(--danger);
 }
+/* blocked：停下来等人，与 error 同色但带脉冲光环 */
+.c-dot--blocked {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-dim, rgba(229, 83, 75, 0.25));
+}
 .c-dot--connected {
   background: var(--success);
   box-shadow: 0 0 6px var(--success);

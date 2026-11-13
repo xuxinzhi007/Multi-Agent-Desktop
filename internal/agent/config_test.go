@@ -533,3 +533,74 @@ func (s *stubKnowledge) View(agentID, role string, knowledgeIDs []string, recent
 	}
 	return "## 知识库\n- " + strings.Join(s.lines, "\n- "), nil
 }
+
+// StatusBlocked —— agent 停下来等人时的状态语义。
+func TestBlockedStatus(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+
+	tests := []struct {
+		name      string
+		setup     Status
+		wantAfter Status
+		wantErr   bool
+	}{
+		{name: "running 可以被阻塞", setup: StatusRunning, wantAfter: StatusBlocked},
+		{name: "queued 可以被阻塞", setup: StatusQueued, wantAfter: StatusBlocked},
+		{name: "idle 不被阻塞", setup: StatusIdle, wantAfter: StatusIdle},
+		{name: "done 不被阻塞", setup: StatusDone, wantAfter: StatusDone},
+		{name: "error 不被阻塞", setup: StatusError, wantAfter: StatusError},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := m.Create("", "A", "r")
+			a.mu.Lock()
+			a.Status = tc.setup
+			a.mu.Unlock()
+
+			if err := m.SetBlocked(a.ID, "等待审批 rm -rf"); err != nil {
+				t.Fatalf("SetBlocked: %v", err)
+			}
+			got := a.Snapshot()
+			if got.Status != tc.wantAfter {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantAfter)
+			}
+			if tc.wantAfter == StatusBlocked && got.BlockedReason == "" {
+				t.Error("BlockedReason 为空，want 有值")
+			}
+			if tc.wantAfter != StatusBlocked && got.BlockedReason != "" {
+				t.Errorf("BlockedReason = %q, want 空", got.BlockedReason)
+			}
+		})
+	}
+
+	t.Run("Unblock 恢复 running", func(t *testing.T) {
+		a := m.Create("", "B", "r")
+		a.mu.Lock()
+		a.Status = StatusRunning
+		a.mu.Unlock()
+
+		if err := m.SetBlocked(a.ID, "等待审批"); err != nil {
+			t.Fatalf("SetBlocked: %v", err)
+		}
+		if err := m.Unblock(a.ID); err != nil {
+			t.Fatalf("Unblock: %v", err)
+		}
+		got := a.Snapshot()
+		if got.Status != StatusRunning {
+			t.Errorf("status = %q, want running", got.Status)
+		}
+		if got.BlockedReason != "" {
+			t.Errorf("BlockedReason = %q, want 空", got.BlockedReason)
+		}
+	})
+
+	t.Run("不存在的 agent 报错", func(t *testing.T) {
+		if err := m.SetBlocked("NOPE", "x"); err == nil {
+			t.Error("SetBlocked(NOPE) = nil, want error")
+		}
+		if err := m.Unblock("NOPE"); err == nil {
+			t.Error("Unblock(NOPE) = nil, want error")
+		}
+	})
+}

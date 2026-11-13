@@ -193,6 +193,8 @@ type AgentView struct {
 	WorkDir   string        `json:"workDir"`
 	LLM       *LLMConfig    `json:"llm,omitempty"`
 	Knowledge []string      `json:"knowledge,omitempty"`
+	// BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值
+	BlockedReason string `json:"blockedReason,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -210,7 +212,8 @@ func toAgentView(a *agent.Agent) AgentView {
 		Backend:   s.Backend,
 		WorkDir:   s.WorkDir,
 		LLM:       s.LLMCfg,
-		Knowledge: s.Knowledge,
+		Knowledge:     s.Knowledge,
+		BlockedReason: s.BlockedReason,
 	}
 }
 
@@ -228,6 +231,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 	if ids, ok := m["knowledge"].([]string); ok {
 		v.Knowledge = ids
 	}
+	v.BlockedReason, _ = m["blockedReason"].(string)
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = lc
@@ -293,6 +297,16 @@ func (s *Sidecar) DeleteAgent(id string) bool {
 // StopAgent 停止一个 agent 的推理并清空队列。
 func (s *Sidecar) StopAgent(id string) bool {
 	return s.mgr.Stop(id)
+}
+
+// BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。
+func (s *Sidecar) BlockAgent(id, reason string) error {
+	return s.mgr.SetBlocked(id, reason)
+}
+
+// UnblockAgent 解除「在等人」状态。
+func (s *Sidecar) UnblockAgent(id string) error {
+	return s.mgr.Unblock(id)
 }
 
 // RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。

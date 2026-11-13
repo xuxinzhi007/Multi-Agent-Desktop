@@ -26,6 +26,8 @@ export interface AgentView {
   workDir: string;
   llm?: Config;
   knowledge?: string[];
+  /** BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值 */
+  blockedReason?: string;
 }
 
 export interface Channel {
@@ -196,6 +198,10 @@ export const Sidecar = {
   attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
     return call("Sidecar.AttachNoteToAgent", noteId, agentId);
   },
+  /** BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。 */
+  blockAgent(id: string, reason: string): Promise<void> {
+    return call("Sidecar.BlockAgent", id, reason);
+  },
   /** CreateAgent 新建一个 agent。 */
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("Sidecar.CreateAgent", req);
@@ -340,6 +346,10 @@ export const Sidecar = {
   /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
   toggleMiniWindow(show: boolean): Promise<boolean> {
     return call("Sidecar.ToggleMiniWindow", show);
+  },
+  /** UnblockAgent 解除「在等人」状态。 */
+  unblockAgent(id: string): Promise<void> {
+    return call("Sidecar.UnblockAgent", id);
   },
   /** UpsertNote 新增或覆盖一条知识笔记。 */
   upsertNote(n: Note): Promise<Note> {
