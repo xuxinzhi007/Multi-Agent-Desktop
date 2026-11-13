@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import TextareaAutosize from 'react-textarea-autosize'
+import MentionPicker from './MentionPicker'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 
 type Props = {
@@ -90,12 +91,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
     }
     setShowMentions(false)
   }
-
-  const filtered = members.filter(
-    (a) =>
-      a.name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
-      a.id.toLowerCase().includes(mentionQuery.toLowerCase()),
-  )
 
   return (
     <div className="c-col" style={{ flex: 1 }}>
@@ -287,65 +282,14 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
             }}
           />
 
-          {showMentions && filtered.length > 0 && (
-            <div
-              className="fade-up"
-              style={{
-                position: 'absolute',
-                bottom: '100%',
-                left: 13,
-                right: 13,
-                marginBottom: 4,
-                background: 'var(--bg-elevated)',
-                border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-md)',
-                boxShadow: 'var(--shadow-lg)',
-                maxHeight: 180,
-                overflowY: 'auto',
-                zIndex: 50,
-              }}
-            >
-              {filtered.map((a) => (
-                <button
-                  key={a.id}
-                  onClick={() => toggleMention(a.name)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    padding: '8px 12px',
-                    textAlign: 'left',
-                    fontSize: 'var(--text-sm)',
-                    color: 'var(--text-primary)',
-                    background: 'transparent',
-                    borderBottom: '1px solid var(--border-subtle)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 16,
-                      height: 16,
-                      borderRadius: 'var(--radius-sm)',
-                      background: a.color,
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontSize: 9,
-                      fontWeight: 700,
-                      color: 'var(--bg-base)',
-                    }}
-                  >
-                    {a.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  {a.name}
-                  {mentioned.includes(a.name) && (
-                    <span style={{ marginLeft: 'auto', color: 'var(--accent-bright)' }}>✓</span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+          <MentionPicker
+            open={showMentions}
+            query={mentionQuery}
+            agents={members}
+            multi
+            selected={mentioned}
+            onPick={toggleMention}
+          />
 
           <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px 7px' }}>
             <span

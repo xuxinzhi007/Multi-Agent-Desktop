@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
+import { ContextMenu } from 'radix-ui'
+import MentionPicker from './MentionPicker'
 import remarkGfm from 'remark-gfm'
 import { Sidecar, type AgentView as Agent, type Config, type Message } from '../mygo'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
@@ -179,11 +181,12 @@ export default function AgentView(p: Props) {
     taRef.current?.focus()
   }
 
-  const filteredAgents = p.agents?.filter(
-    (a) =>
-      a.name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
-      a.id.toLowerCase().includes(mentionQuery.toLowerCase()),
-  ) || []
+  const agentsForPicker = (p.agents ?? []).map((a) => ({
+    id: a.id,
+    name: a.name,
+    color: a.color,
+    role: a.role,
+  }))
 
   const running = p.agent.status === 'running'
   const visible = p.agent.messages.filter((m) => m.role !== 'system')
@@ -365,66 +368,13 @@ export default function AgentView(p: Props) {
           />
 
           {/* @提及自动补全 */}
-          {showMentions && filteredAgents.length > 0 && mode === 'chat' && (
-            <div
-              className="fade-up"
-              style={{
-                position: 'absolute',
-                bottom: '100%',
-                left: 13,
-                right: 13,
-                marginBottom: 4,
-                background: 'var(--bg-elevated)',
-                border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-md)',
-                boxShadow: 'var(--shadow-lg)',
-                maxHeight: 200,
-                overflowY: 'auto',
-                zIndex: 50,
-              }}
-            >
-              {filteredAgents.map((a) => (
-                <button
-                  key={a.id}
-                  onClick={() => insertMention(a.name)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    padding: '8px 12px',
-                    textAlign: 'left',
-                    borderBottom: '1px solid var(--border-subtle)',
-                    fontSize: 'var(--text-sm)',
-                    color: 'var(--text-primary)',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <span
-                    style={{
-                      width: 16,
-                      height: 16,
-                      borderRadius: 'var(--radius-sm)',
-                      background: a.color,
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontSize: 9,
-                      fontWeight: 700,
-                      color: 'var(--bg-base)',
-                    }}
-                  >
-                    {a.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  <span>{a.name}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                    {a.role.slice(0, 20)}
-                  </span>
-                </button>
-              ))}
-            </div>
+          {mode === 'chat' && (
+            <MentionPicker
+              open={showMentions}
+              query={mentionQuery}
+              agents={agentsForPicker}
+              onPick={insertMention}
+            />
           )}
 
           <div
@@ -482,119 +432,90 @@ export default function AgentView(p: Props) {
         </div>
       </div>
 
-      {/* 右键菜单 */}
+      {/* 右键菜单：radix-ui ContextMenu 自动处理边缘翻转、键盘导航、Esc */}
       {contextMenu && (
-        <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
-            onClick={closeContextMenu}
-            onContextMenu={(e) => { e.preventDefault(); closeContextMenu() }}
-          />
-          <div
-            className="fade-up"
-            style={{
-              position: 'fixed',
-              left: contextMenu.x,
-              top: contextMenu.y,
-              zIndex: 1000,
-              background: 'var(--bg-elevated)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-md)',
-              boxShadow: 'var(--shadow-lg)',
-              minWidth: 180,
-              overflow: 'hidden',
-            }}
-          >
-            <button
-              onClick={() => copyMessage(contextMenu.msg)}
+        <ContextMenu.Root
+          open
+          onOpenChange={(v) => {
+            if (!v) closeContextMenu()
+          }}
+        >
+          <ContextMenu.Trigger asChild>
+            <span
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                width: '100%',
-                padding: '10px 14px',
-                textAlign: 'left',
-                fontSize: 'var(--text-sm)',
-                color: 'var(--text-primary)',
-                background: 'transparent',
-                borderBottom: '1px solid var(--border-subtle)',
-                cursor: 'pointer',
+                position: 'fixed',
+                left: contextMenu.x,
+                top: contextMenu.y,
+                width: 1,
+                height: 1,
+                pointerEvents: 'none',
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            />
+          </ContextMenu.Trigger>
+          <ContextMenu.Portal>
+            <ContextMenu.Content
+              className="fade-up"
+              style={{
+                position: 'fixed',
+                left: contextMenu.x,
+                top: contextMenu.y,
+                minWidth: 180,
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: 'var(--shadow-lg)',
+                padding: 4,
+                zIndex: 1000,
+              }}
             >
-              📋 复制
-            </button>
-            {contextMenu.msg.role === 'assistant' && (
-              <button
-                onClick={() => regenerateMessage(contextMenu.msg)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  width: '100%',
-                  padding: '10px 14px',
-                  textAlign: 'left',
-                  fontSize: 'var(--text-sm)',
-                  color: 'var(--text-primary)',
-                  background: 'transparent',
-                  borderBottom: '1px solid var(--border-subtle)',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-              >
-                🔄 重新生成
-              </button>
-            )}
-            {p.agents && p.agents.length > 1 && (
-              <div style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                <div style={{ padding: '8px 14px 4px', fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                  引用给…
-                </div>
-                {p.agents
-                  .filter((a) => a.id !== p.agent?.id)
-                  .map((a) => (
-                    <button
-                      key={a.id}
-                      onClick={() => quoteToAgent(contextMenu.msg, a.id)}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        width: '100%',
-                        padding: '8px 14px',
-                        textAlign: 'left',
-                        fontSize: 'var(--text-sm)',
-                        color: 'var(--text-primary)',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                      }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <span
-                        style={{
-                          width: 14,
-                          height: 14,
-                          borderRadius: 'var(--radius-sm)',
-                          background: a.color,
-                          display: 'grid',
-                          placeItems: 'center',
-                          fontSize: 8,
-                          fontWeight: 700,
-                          color: 'var(--bg-base)',
-                        }}
-                      >
-                        {a.name.slice(0, 1).toUpperCase()}
-                      </span>
-                      {a.name}
-                    </button>
-                  ))}
-              </div>
-            )}
-          </div>
-        </>
+              <MenuItem onSelect={() => copyMessage(contextMenu.msg)}>📋 复制</MenuItem>
+              {contextMenu.msg.role === 'assistant' && (
+                <MenuItem onSelect={() => regenerateMessage(contextMenu.msg)}>
+                  🔄 重新生成
+                </MenuItem>
+              )}
+              {p.agents && p.agents.length > 1 && (
+                <>
+                  <ContextMenu.Separator
+                    style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }}
+                  />
+                  <ContextMenu.Label
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 'var(--text-xs)',
+                      color: 'var(--text-disabled)',
+                    }}
+                  >
+                    引用给…
+                  </ContextMenu.Label>
+                  {p.agents
+                    .filter((a) => a.id !== p.agent?.id)
+                    .map((a) => (
+                      <MenuItem key={a.id} onSelect={() => quoteToAgent(contextMenu.msg, a.id)}>
+                        <span
+                          style={{
+                            width: 14,
+                            height: 14,
+                            borderRadius: 'var(--radius-sm)',
+                            background: a.color,
+                            display: 'inline-grid',
+                            placeItems: 'center',
+                            fontSize: 8,
+                            fontWeight: 700,
+                            color: 'var(--bg-base)',
+                            marginRight: 6,
+                          }}
+                        >
+                          {a.name.slice(0, 1).toUpperCase()}
+                        </span>
+                        {a.name}
+                      </MenuItem>
+                    ))}
+                </>
+              )}
+            </ContextMenu.Content>
+          </ContextMenu.Portal>
+        </ContextMenu.Root>
       )}
     </div>
   )
@@ -1103,4 +1024,29 @@ function Bubble({ m, color, live, tokens, onContextMenu }: { m: Message; color: 
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return `${n}`
+}
+/** 右键菜单项：统一 hover / 焦点样式。 */
+function MenuItem({ onSelect, children }: { onSelect: () => void; children: React.ReactNode }) {
+  return (
+    <ContextMenu.Item
+      onSelect={onSelect}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '8px 10px',
+        fontSize: 'var(--text-sm)',
+        color: 'var(--text-primary)',
+        borderRadius: 'var(--radius-sm)',
+        cursor: 'pointer',
+        outline: 'none',
+        userSelect: 'none',
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+      onFocus={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
+      onBlur={(e) => (e.currentTarget.style.background = 'transparent')}
+    >
+      {children}
+    </ContextMenu.Item>
+  )
 }

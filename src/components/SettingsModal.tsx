@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 import { useTheme, type Theme } from '../lib/useTheme'
+import Modal from './Modal'
 import { Sidecar } from '../mygo'
 import type { LLMConfig } from '../lib/useSidecar'
 
@@ -53,48 +54,8 @@ export default function SettingsModal(p: Props) {
   }
 
   return (
-    <div
-      onClick={p.onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.5)',
-        display: 'grid',
-        placeItems: 'center',
-        zIndex: 100,
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="fade-up"
-        style={{
-          width: 470,
-          maxHeight: '86vh',
-          overflowY: 'auto',
-          background: 'color-mix(in srgb, var(--bg-elevated) 85%, transparent)',
-          border: '1px solid var(--border-default)',
-          borderRadius: 'var(--radius-xl)',
-          padding: 'var(--space-5)',
-          boxShadow: 'var(--shadow-lg)',
-          backdropFilter: 'blur(20px)',
-          WebkitBackdropFilter: 'blur(20px)',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            marginBottom: 'var(--space-5)',
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: 'var(--text-lg)', fontWeight: 600 }}>设置</h2>
-          <button className="c-icon-btn" style={{ marginLeft: 'auto' }} onClick={p.onClose}>
-            ×
-          </button>
-        </div>
-
+    <Modal open={p.open} onClose={p.onClose} title="设置" width={470}>
+      <div style={{ padding: 'var(--space-5)' }}>
         <Field label="外观">
           <div style={{ display: 'flex', gap: 4 }}>
             {(['dark', 'light', 'system'] as Theme[]).map((t) => (
@@ -285,7 +246,7 @@ export default function SettingsModal(p: Props) {
           </div>
         )}
       </div>
-    </div>
+    </Modal>
   )
 }
 
