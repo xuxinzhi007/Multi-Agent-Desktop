@@ -1,8 +1,8 @@
 {
   "workflow": "architecture-review",
   "feature": "kb-arch",
-  "stage": 2,
-  "status": "working",
+  "stage": 5,
+  "status": "done",
   "question": "",
   "reply": "",
   "raw_request": "看下知识库这块的架构设计"

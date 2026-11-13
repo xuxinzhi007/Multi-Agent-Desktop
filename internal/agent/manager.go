@@ -817,6 +817,7 @@ func (a *Agent) Snapshot() *Agent {
 		Backend:   a.Backend,
 		WorkDir:   a.WorkDir,
 		LLMCfg:    a.LLMCfg,
+		Knowledge: append([]string(nil), a.Knowledge...),
 	}
 }
 

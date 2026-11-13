@@ -356,7 +356,47 @@ function ChannelBubble({ msg, agent }: { msg: ChannelMessage; agent?: Agent }) {
         >
           {msg.text}
         </div>
+        <DeliveryRow msg={msg} />
       </div>
+    </div>
+  )
+}
+
+const STATUS_META: Record<string, { icon: string; color: string; label: string }> = {
+  delivered: { icon: '✓', color: 'var(--success)', label: '已送达' },
+  skipped: { icon: '○', color: 'var(--text-disabled)', label: '已跳过' },
+  failed: { icon: '✕', color: 'var(--danger)', label: '失败' },
+}
+
+/** 渲染投递结果：谁收到了、谁跳过了、谁失败了。 */
+function DeliveryRow({ msg }: { msg: ChannelMessage }) {
+  const deliveries = msg.deliveries ?? []
+  if (deliveries.length === 0) return null
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 8,
+        marginTop: 5,
+        fontSize: 'var(--text-xs)',
+      }}
+    >
+      {deliveries.map((d) => {
+        const meta = STATUS_META[d.status] ?? STATUS_META.skipped
+        return (
+          <span
+            key={d.agentId}
+            title={d.reason || meta.label}
+            style={{ color: meta.color, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+          >
+            <span>{meta.icon}</span>
+            <span>{d.agentId.slice(0, 8)}</span>
+            <span style={{ color: 'var(--text-disabled)' }}>{meta.label}</span>
+          </span>
+        )
+      })}
     </div>
   )
 }

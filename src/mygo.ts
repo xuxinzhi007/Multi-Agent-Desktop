@@ -25,6 +25,7 @@ export interface AgentView {
   backend: string;
   workDir: string;
   llm?: Config;
+  knowledge?: string[];
 }
 
 export interface Channel {

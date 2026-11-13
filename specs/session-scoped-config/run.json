@@ -1,0 +1,9 @@
+{
+  "workflow": "feature",
+  "feature": "session-scoped-config",
+  "stage": 7,
+  "status": "done",
+  "question": "",
+  "reply": "",
+  "raw_request": "工作目录和模型列表应该在会话中设置，不是全局设置；下掉设置里的悬浮窗口"
+}

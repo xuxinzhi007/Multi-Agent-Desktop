@@ -199,8 +199,35 @@ rename 重写，7 个测试守住并发与损坏行。**问题在它对外的 in
 
 ---
 
-## 7. 待拍板
+## 7. 已拍板（回填）
 
-1. **步骤 2 的 seam**：A（`agent` import `knowledge`，更 deep）还是 B（纯函数，更松）？
-2. **删除笔记时**：清理 `Agent.Knowledge` 里的失效 ID，还是渲染时跳过？
-3. **步骤 5 是否现在做**：它改变 CLI agent 实际输入，建议排在 1~4 稳定之后。
+1. **步骤 2 的 seam：选 A。**
+   `agent.KnowledgeProvider` 收窄为 `View(agentID, role, knowledgeIDs, recentText, budget) (block, ids)`，
+   `agent` 包反向依赖 `knowledge` 的语义（不 import 具体 store）。
+   证据：`internal/agent/manager.go` 的 `KnowledgeProvider` 接口 + `main.go` 的 `knowledgeProvider.View`。
+
+2. **删除笔记时：渲染时跳过失效 ID。**
+   不主动清理 `Agent.Knowledge`，`ViewFromNotes` 里按 `knownIDs` 查找，找不到的 ID 自然不出现。
+   理由：清理需要跨 module 写（`channel` 已有先例，但 `knowledge` 不该反向知道 agent 存在）；
+   渲染时跳过让 `Agent.Knowledge` 保持「用户意图的快照」，删掉笔记不会静默改用户选择。
+
+3. **步骤 5 已做。**
+   `cli.Request{System, History, Prompt}` + `assemblePrompt` 已落地；
+   `ClaudeRunner` 走 `--append-system-prompt`，`CodexRunner` 拼 `-p` 正文。
+
+### 落地状态
+
+| 步骤 | 提交 | 状态 |
+|---|---|---|
+| 1 · `Agent.Knowledge` | `6368183` | ✅ |
+| 2 · `knowledge.View` | `0f15c82` | ✅ |
+| 3 · 三档 scope | `66db0fa` | ✅ |
+| 4 · 相关性排序 + 预算 | `5c8013e` | ✅ |
+| 5 · CLI/Channel 复用 assemble | `28a54d3` | ✅ |
+
+### 顺带修掉的两个缺陷
+
+- `Agent.Snapshot()` 的拷贝白名单漏了 `Knowledge` —— 导致 `toAgentView` 返回的视图里
+  引用集合永为空。已补（`internal/agent/manager.go`）。
+- 根包 `TestAttachNoteToAgent` 仍断言旧的「append system message」语义。
+  已重写为断言引用集合 + 幂等 + Save/Load 往返 + detach。

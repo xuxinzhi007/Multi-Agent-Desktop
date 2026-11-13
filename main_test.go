@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +158,8 @@ func TestSidecarSessionConfig(t *testing.T) {
 	}
 }
 
-// TC-022 —— AttachNoteToAgent 追加 system message（含 [知识] + 正文）。
+// TC-022 —— AttachNoteToAgent 改引用集合（不再追加 system message）。
+// attach 幂等；detach 可撤销；引用集合能过 Save/Load 往返。
 func TestAttachNoteToAgent(t *testing.T) {
 	s := newTestSidecar(t)
 	defer stopAll(t, s)
@@ -168,23 +171,57 @@ func TestAttachNoteToAgent(t *testing.T) {
 		t.Fatalf("UpsertNote: %v", err)
 	}
 
-	before := len(a.Messages) // a 是 CreateAgent 返回的值拷贝，不再变化
+	before := len(a.Messages)
+
+	// attach 一次：Knowledge 含该 ID，Messages 不变
 	v, err := s.AttachNoteToAgent(note.ID, a.ID)
 	if err != nil {
 		t.Fatalf("AttachNoteToAgent(%q, %q): %v", note.ID, a.ID, err)
 	}
-	if len(v.Messages) != before+1 {
-		t.Fatalf("AttachNoteToAgent(%q, %q): len(Messages) = %d, want %d", note.ID, a.ID, len(v.Messages), before+1)
+	if len(v.Messages) != before {
+		t.Errorf("attach 后 len(Messages) = %d, want %d（不应追加 system message）", len(v.Messages), before)
 	}
-	last := v.Messages[len(v.Messages)-1]
-	if last.Role != "system" {
-		t.Errorf("AttachNoteToAgent(%q, %q): last role = %q, want %q", note.ID, a.ID, last.Role, "system")
+	if !containsID(v.Knowledge, note.ID) {
+		t.Errorf("attach 后 Knowledge = %v, want 含 %q", v.Knowledge, note.ID)
 	}
-	if !strings.Contains(last.Content, "[知识]") {
-		t.Errorf("AttachNoteToAgent(%q, %q): last content = %q, want containing %q", note.ID, a.ID, last.Content, "[知识]")
+
+	// attach 同一条两次：幂等，只出现一次
+	if _, err := s.AttachNoteToAgent(note.ID, a.ID); err != nil {
+		t.Fatalf("second attach: %v", err)
 	}
-	if !strings.Contains(last.Content, "用 Go 风格") {
-		t.Errorf("AttachNoteToAgent(%q, %q): last content = %q, want containing note body", note.ID, a.ID, last.Content)
+	ids := s.GetAgentKnowledge(a.ID)
+	if n := countID(ids, note.ID); n != 1 {
+		t.Errorf("重复 attach 后 %q 出现 %d 次, want 1", note.ID, n)
+	}
+
+	// Save/Load 往返：引用集合不丢
+	// 手动建目录并在清理前等待异步落盘，避免与 t.TempDir 的 RemoveAll 竞争
+	tmpDir, err := os.MkdirTemp("", "mad-attach-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.mgr.Save() // 同步落盘，确保没有在途写
+		time.Sleep(50 * time.Millisecond)
+		_ = os.RemoveAll(tmpDir)
+	})
+	store := filepath.Join(tmpDir, "agents.json")
+	if err := s.mgr.SetStore(store); err != nil {
+		t.Fatalf("SetStore: %v", err)
+	}
+	s.mgr.Save()
+	if got := s.GetAgentKnowledge(a.ID); !containsID(got, note.ID) {
+		t.Errorf("Save 后 Knowledge = %v, want 含 %q", got, note.ID)
+	}
+
+	// detach 撤销（先同步落盘，避免 TempDir 清理时异步 Save 仍在写）
+	_ = s.mgr.Save()
+	v2, err := s.DetachNoteFromAgent(note.ID, a.ID)
+	if err != nil {
+		t.Fatalf("DetachNoteFromAgent: %v", err)
+	}
+	if containsID(v2.Knowledge, note.ID) {
+		t.Errorf("detach 后 Knowledge = %v, want 不含 %q", v2.Knowledge, note.ID)
 	}
 
 	// 异常路径
@@ -194,6 +231,22 @@ func TestAttachNoteToAgent(t *testing.T) {
 	if _, err := s.AttachNoteToAgent(note.ID, "NOPE"); err == nil {
 		t.Error("AttachNoteToAgent(note, \"NOPE\") = nil error, want error")
 	}
+
+	// 收尾：同步落盘后把 store 清空，避免异步 Save 与 TempDir 清理竞争
+	_ = s.mgr.Save()
+	_ = s.mgr.SetStore("")
+}
+
+func containsID(ids []string, want string) bool { return countID(ids, want) > 0 }
+
+func countID(ids []string, want string) int {
+	n := 0
+	for _, id := range ids {
+		if id == want {
+			n++
+		}
+	}
+	return n
 }
 
 // TC-024 —— 0 成员频道仍然记录消息，且 SendToChannel 不报错。

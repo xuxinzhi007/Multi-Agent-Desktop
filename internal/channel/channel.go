@@ -253,6 +253,30 @@ func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (*Message
 	return &msg, nil
 }
 
+// UpdateMessage 按 ID 覆盖已有消息（用于回填投递记录），并落盘。
+func (m *Manager) UpdateMessage(msg Message) error {
+	m.mu.Lock()
+	ch, ok := m.channels[msg.ChannelID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("channel %s not found", msg.ChannelID)
+	}
+	found := false
+	for i := range ch.Messages {
+		if ch.Messages[i].ID == msg.ID {
+			ch.Messages[i] = msg
+			found = true
+			break
+		}
+	}
+	m.mu.Unlock()
+	if !found {
+		return fmt.Errorf("message %s not found", msg.ID)
+	}
+	m.goSave()
+	return nil
+}
+
 // Broadcast 发消息到频道，返回创建的消息与所有成员的 agent ID（用于触发执行）。
 // 消息总会被记录，即使用户是唯一发送者；接收者排除发送者自身。
 func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message, []string, error) {

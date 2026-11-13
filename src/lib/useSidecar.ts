@@ -209,8 +209,9 @@ export function useSidecar() {
           ch.id === msg.channelId
             ? {
                 ...ch,
+                // 同一 ID 重发时覆盖旧记录（用于回填 deliveries）
                 messages: (ch.messages ?? []).some((m) => m.id === msg.id)
-                  ? ch.messages
+                  ? (ch.messages ?? []).map((m) => (m.id === msg.id ? msg : m))
                   : [...(ch.messages ?? []), msg],
               }
             : ch,

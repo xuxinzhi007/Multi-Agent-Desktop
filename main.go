@@ -192,6 +192,7 @@ type AgentView struct {
 	Backend   string        `json:"backend"`
 	WorkDir   string        `json:"workDir"`
 	LLM       *LLMConfig    `json:"llm,omitempty"`
+	Knowledge []string      `json:"knowledge,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -209,6 +210,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		Backend:   s.Backend,
 		WorkDir:   s.WorkDir,
 		LLM:       s.LLMCfg,
+		Knowledge: s.Knowledge,
 	}
 }
 
@@ -223,6 +225,9 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.Status, _ = m["status"].(string)
 	v.Backend, _ = m["backend"].(string)
 	v.WorkDir, _ = m["workDir"].(string)
+	if ids, ok := m["knowledge"].([]string); ok {
+		v.Knowledge = ids
+	}
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = lc
@@ -345,10 +350,12 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 	for _, agentId := range recipients {
 		a, ok := s.mgr.Get(agentId)
 		if !ok {
+			reason := fmt.Sprintf("agent %s not found", agentId)
+			errs = append(errs, reason)
 			deliveries = append(deliveries, channel.Delivery{
 				AgentID: agentId,
 				Status:  "failed",
-				Reason:  "agent not found",
+				Reason:  reason,
 			})
 			continue
 		}
@@ -389,9 +396,14 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 		}
 	}
 
-	// 6. 更新消息的投递记录
+	// 6. 更新消息的投递记录，并重发一次事件让前端拿到
 	msg.Deliveries = deliveries
-	// TODO: 持久化 deliveries
+	if err := s.channels.UpdateMessage(*msg); err != nil {
+		log.Printf("update message deliveries: %v", err)
+	} else {
+		// 重发同一 ID 的事件；前端按 ID 去重并覆盖旧记录
+		ChannelMessage.Emit(s.win, *msg)
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))
