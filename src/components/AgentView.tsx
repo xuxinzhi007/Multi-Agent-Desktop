@@ -432,7 +432,8 @@ export default function AgentView(p: Props) {
         </div>
       </div>
 
-      {/* 右键菜单：radix-ui ContextMenu 自动处理边缘翻转、键盘导航、Esc */}
+      {/* 右键菜单：radix ContextMenu 自己管理定位（贴着触发元素，自动边缘翻转）。
+          不要用受控 open + 手写 left/top —— 会和 radix 的定位系统冲突。 */}
       {contextMenu && (
         <ContextMenu.Root
           open
@@ -440,25 +441,20 @@ export default function AgentView(p: Props) {
             if (!v) closeContextMenu()
           }}
         >
-          <ContextMenu.Trigger asChild>
-            <span
-              style={{
-                position: 'fixed',
-                left: contextMenu.x,
-                top: contextMenu.y,
-                width: 1,
-                height: 1,
-                pointerEvents: 'none',
-              }}
-            />
-          </ContextMenu.Trigger>
+          <ContextMenu.Trigger
+            style={{
+              position: 'fixed',
+              left: contextMenu.x,
+              top: contextMenu.y,
+              width: 1,
+              height: 1,
+              pointerEvents: 'none',
+            }}
+          />
           <ContextMenu.Portal>
             <ContextMenu.Content
               className="fade-up"
               style={{
-                position: 'fixed',
-                left: contextMenu.x,
-                top: contextMenu.y,
                 minWidth: 180,
                 background: 'var(--bg-elevated)',
                 border: '1px solid var(--border-default)',

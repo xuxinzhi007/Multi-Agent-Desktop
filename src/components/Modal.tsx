@@ -39,6 +39,11 @@ export default function Modal({
             backdropFilter: 'blur(8px)',
             WebkitBackdropFilter: 'blur(8px)',
             zIndex: 100,
+            // 用 flex 居中，避免依赖 transform —— fade-up 动画会覆盖 inline 的 transform，
+            // 导致内容被推到屏幕外（新建 agent / 设置 打不开的真正原因）
+            display: 'grid',
+            placeItems: 'center',
+            padding: 24,
           }}
         />
         <Dialog.Content
@@ -47,7 +52,10 @@ export default function Modal({
             position: 'fixed',
             top: '50%',
             left: '50%',
-            transform: 'translate(-50%, -50%)',
+            // 不用 inset:0 —— 它会把 height:fit-content 压成 0，内容区 flex:1 直接塌缩
+            marginLeft: -(width / 2),
+            marginTop: 0,
+            translate: '0 -50%', // 用 translate 而非 transform，避免被 fade-up 动画覆盖
             width,
             maxWidth: '92vw',
             maxHeight: '86vh',
