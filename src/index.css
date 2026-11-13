@@ -245,6 +245,22 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* 悬浮岛入口：透明窗口，尺寸由内容决定（配合 Go 侧 FitContent）。
+   index.css 是主窗和悬浮岛共用的，这里必须覆盖掉上面的深色背景和 height:100%，
+   否则整个窗口会被填成 --bg-base 的色块，且内容不参与撑高。 */
+html[data-surface='island'],
+html[data-surface='island'] body,
+html[data-surface='island'] #root {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+html[data-surface='island'] body {
+  background: transparent;
+}
+
 button {
   font-family: inherit;
   font-size: inherit;

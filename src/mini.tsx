@@ -15,6 +15,10 @@ window.addEventListener('storage', (e) => {
   if (e.key === THEME_KEY) applyTheme()
 })
 
+// 标记这是悬浮岛入口：index.css 里据此把背景改成透明、height 改为 auto，
+// 否则会被主窗的深色背景和 height:100% 污染（表现为整窗一块黑）。
+document.documentElement.dataset.surface = 'island'
+
 /** 分组顺序：需要你的排最前。 */
 const GROUP_ORDER = ['blocked', 'running', 'queued', 'done', 'error', 'idle'] as const
 const GROUP_LABEL: Record<string, string> = {
