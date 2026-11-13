@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Toaster, toast as sonnerToast } from 'sonner'
 
 export type Toast = {
   id: string
@@ -7,12 +7,15 @@ export type Toast = {
   duration?: number
 }
 
-let toastId = 0
-const listeners: ((toast: Toast) => void)[] = []
-
+/**
+ * Toast API 保持原样（toast / toastSuccess / toastError / toastInfo），
+ * 底层换成 sonner —— 它自带堆叠、去重、并发上限、无障碍。
+ */
 export function toast(message: string, type: Toast['type'] = 'info', duration = 3000) {
-  const t: Toast = { id: `toast-${++toastId}`, message, type, duration }
-  listeners.forEach((fn) => fn(t))
+  const opts = { duration }
+  if (type === 'success') return sonnerToast.success(message, opts)
+  if (type === 'error') return sonnerToast.error(message, opts)
+  return sonnerToast(message, opts)
 }
 
 export function toastSuccess(message: string, duration?: number) {
@@ -27,80 +30,23 @@ export function toastInfo(message: string, duration?: number) {
   toast(message, 'info', duration)
 }
 
+/** 挂载一次即可，由 App 渲染。 */
 export default function ToastContainer() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-
-  useEffect(() => {
-    const listener = (t: Toast) => {
-      setToasts((prev) => [...prev, t])
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((x) => x.id !== t.id))
-      }, t.duration ?? 3000)
-    }
-    listeners.push(listener)
-    return () => {
-      const idx = listeners.indexOf(listener)
-      if (idx > -1) listeners.splice(idx, 1)
-    }
-  }, [])
-
-  const colors = {
-    success: { bg: 'var(--success)', icon: '✓' },
-    error: { bg: 'var(--error)', icon: '✕' },
-    info: { bg: 'var(--accent-bright)', icon: 'ℹ' },
-  }
-
   return (
-    <div
-      style={{
-        position: 'fixed',
-        top: 16,
-        right: 16,
-        zIndex: 9999,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 8,
-        pointerEvents: 'none',
+    <Toaster
+      position="top-right"
+      visibleToasts={2} // 与 Warp 的「最多 2 个」一致
+      closeButton
+      toastOptions={{
+        style: {
+          background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)',
+          color: 'var(--text-primary)',
+          fontSize: 'var(--text-sm)',
+          borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-lg)',
+        },
       }}
-    >
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          className="fade-up"
-          style={{
-            background: 'var(--bg-elevated)',
-            border: '1px solid var(--border-default)',
-            borderRadius: 'var(--radius-md)',
-            padding: '10px 14px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            boxShadow: 'var(--shadow-lg)',
-            minWidth: 200,
-            maxWidth: 320,
-          }}
-        >
-          <span
-            style={{
-              width: 18,
-              height: 18,
-              borderRadius: '50%',
-              background: colors[t.type].bg,
-              color: 'var(--bg-base)',
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 11,
-              fontWeight: 700,
-              flexShrink: 0,
-            }}
-          >
-            {colors[t.type].icon}
-          </span>
-          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
-            {t.message}
-          </span>
-        </div>
-      ))}
-    </div>
+    />
   )
 }

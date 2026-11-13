@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import TextareaAutosize from 'react-textarea-autosize'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 
 type Props = {
@@ -259,7 +260,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
             borderRadius: 'var(--radius-lg)',
           }}
         >
-          <textarea
+          <TextareaAutosize
             ref={taRef}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
@@ -270,7 +271,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
               }
             }}
             placeholder={`发消息到 #${channel.name}…  输入 @ 提及成员`}
-            rows={1}
+            minRows={1}
+            maxRows={6}
             style={{
               width: '100%',
               resize: 'none',
@@ -282,11 +284,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
               minHeight: 24,
               maxHeight: 120,
               overflowY: 'auto',
-            }}
-            onInput={(e) => {
-              const t = e.target as HTMLTextAreaElement
-              t.style.height = 'auto'
-              t.style.height = Math.min(t.scrollHeight, 120) + 'px'
             }}
           />
 

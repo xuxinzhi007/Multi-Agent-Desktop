@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import TextareaAutosize from 'react-textarea-autosize'
 import remarkGfm from 'remark-gfm'
 import { Sidecar, type AgentView as Agent, type Config, type Message } from '../mygo'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
@@ -334,7 +335,7 @@ export default function AgentView(p: Props) {
           onFocusCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-focus)')}
           onBlurCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-default)')}
         >
-          <textarea
+          <TextareaAutosize
             ref={taRef}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
@@ -349,7 +350,8 @@ export default function AgentView(p: Props) {
                 ? '输入 shell 命令，回车执行'
                 : `给 ${p.agent.name} 发消息…`
             }
-            rows={1}
+            minRows={1}
+            maxRows={6}
             className={mode === 'shell' ? 'mono' : ''}
             style={{
               width: '100%',
@@ -359,14 +361,6 @@ export default function AgentView(p: Props) {
               padding: '11px 13px 4px',
               lineHeight: 'var(--leading-normal)',
               fontSize: 'var(--text-md)',
-              minHeight: 24,
-              maxHeight: 120,
-              overflowY: 'auto',
-            }}
-            onInput={(e) => {
-              const target = e.target as HTMLTextAreaElement
-              target.style.height = 'auto'
-              target.style.height = Math.min(target.scrollHeight, 120) + 'px'
             }}
           />
 
