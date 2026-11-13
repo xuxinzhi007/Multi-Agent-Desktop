@@ -213,17 +213,17 @@ func toAgentView(a *agent.Agent) AgentView {
 	// Snapshot 在 agent 锁内拷贝，避免与 worker 的 append 竞争。
 	s := a.Snapshot()
 	return AgentView{
-		ID:        s.ID,
-		Name:      s.Name,
-		Role:      s.Role,
-		Color:     s.Color,
-		Status:    string(s.Status),
-		CreatedAt: s.CreatedAt,
-		Messages:  s.Messages,
-		QueueLen:  s.QueueLen,
-		Backend:   s.Backend,
-		WorkDir:   s.WorkDir,
-		LLM:       s.LLMCfg,
+		ID:            s.ID,
+		Name:          s.Name,
+		Role:          s.Role,
+		Color:         s.Color,
+		Status:        string(s.Status),
+		CreatedAt:     s.CreatedAt,
+		Messages:      s.Messages,
+		QueueLen:      s.QueueLen,
+		Backend:       s.Backend,
+		WorkDir:       s.WorkDir,
+		LLM:           s.LLMCfg,
 		Knowledge:     s.Knowledge,
 		BlockedReason: s.BlockedReason,
 	}
@@ -1068,13 +1068,15 @@ func main() {
 		// Panel 让它跨 Space / 全屏应用常驻（监控器不能切桌面就消失）。
 		// StateKey 记住位置，重启后回到原处。
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
-			Title:           "Agent 舰队",
-			Width:           380, // FitContent 下仅为初始值
-			Height:          52,
-			MinWidth:        240,
-			MinHeight:       52,
-			MaxWidth:        460,
-			MaxHeight:       420,
+			Title: "Agent 舰队",
+			// 宽度锁死：FitContent 只让高度跟着内容走，
+			// MinWidth == MaxWidth 时宽度被夹死，窗口不再自己缩放。
+			Width:           320,
+			Height:          132,
+			MinWidth:        320,
+			MaxWidth:        320,
+			MinHeight:       60,
+			MaxHeight:       480,
 			FitContent:      true,
 			Panel:           true, // 跨 Space / 全屏应用常驻，不进任务栏和 Dock
 			Frameless:       true,
