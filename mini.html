@@ -5,32 +5,66 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Status</title>
     <style>
-      /* 迷你窗样式：透明背景，圆角悬浮条 */
-      html, body, #root {
+      /* 悬浮窗：透明背景，尺寸由内容决定（配合 Go 侧 FitContent） */
+      html,
+      body,
+      #root {
         margin: 0;
         padding: 0;
-        height: 100%;
         background: transparent;
-        overflow: hidden;
+        /* 不要 height: 100% —— 会让内容不参与撑高，FitContent 测不到真实高度 */
+        /* 不要 overflow: hidden —— 会让 tooltip 被裁 */
       }
       body {
         font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
       }
-      /* 默认可拖动区域 */
-      #root {
-        --app-region: drag;
-      }
-      /* 可交互元素不拖动 */
-      button, [role="button"] {
+      /* drag 的唯一来源是 DragHandle 组件；这里只做兜底 */
+      button,
+      [role='button'] {
         --app-region: no-drag;
       }
-      /* 状态点动画 */
-      @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
+      /* 状态点动画：柔和呼吸，不是闪 */
+      @keyframes breathe {
+        0%,
+        100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.72;
+          transform: scale(0.92);
+        }
+      }
+      .breathe {
+        animation: breathe 2.6s ease-in-out infinite;
+      }
+      /* 需要点击时的提示脉冲：一次性 3 次后静止 */
+      @keyframes attention {
+        0% {
+          box-shadow: 0 0 0 0 var(--danger);
+        }
+        70% {
+          box-shadow: 0 0 0 6px transparent;
+        }
+        100% {
+          box-shadow: 0 0 0 0 transparent;
+        }
+      }
+      .attention {
+        animation: attention 1.2s ease-out 3;
       }
       .blink {
-        animation: pulse 1.2s ease-in-out infinite;
+        animation: breathe 2.6s ease-in-out infinite;
+      }
+      /* 减少动态效果：关掉所有动画，但保留静态差异 */
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
       }
     </style>
   </head>

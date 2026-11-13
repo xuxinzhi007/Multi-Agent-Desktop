@@ -341,6 +341,20 @@ textarea::placeholder {
   }
 }
 
+/* 悬浮岛：叠在桌面上而非 app 背景上，需要半透明一套 token */
+:root[data-theme='dark'],
+:root {
+  --island-bg: rgba(15, 17, 26, 0.92);
+  --island-border: rgba(255, 255, 255, 0.1);
+  --island-border-subtle: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme='light'] {
+  --island-bg: rgba(250, 251, 253, 0.94);
+  --island-border: rgba(0, 0, 0, 0.08);
+  --island-border-subtle: rgba(0, 0, 0, 0.05);
+}
+
 @keyframes shimmer {
   0% {
     background-position: -400px 0;

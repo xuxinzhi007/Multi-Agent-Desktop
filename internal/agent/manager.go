@@ -43,6 +43,12 @@ type Agent struct {
 	// BlockedReason 是「在等人」的原因，仅 Status == blocked 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
 
+	// 以下是运行时指标，不落盘（Save 时归零）
+	StartedAt int64  `json:"-"` // 本轮开始的 Unix 秒
+	LastTool  string `json:"-"` // 最近一次工具调用名
+	Chars     int    `json:"-"` // 本轮已生成字符数
+	LastError string `json:"-"` // 最近一次错误内容（供悬浮岛显示真实原因）
+
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
 	queue  chan PromptRequest `json:"-"` // 待处理消息队列
@@ -557,6 +563,10 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
+	// 本轮指标：开始时间与计数器，供悬浮岛显示，不依赖前端猜
+	a.StartedAt = time.Now().Unix()
+	a.Chars = 0
+	a.LastTool = ""
 	runCtx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.mu.Unlock()
@@ -610,6 +620,9 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text string) {
 		}
 		if chunk.Delta != "" {
 			full += chunk.Delta
+			a.mu.Lock()
+			a.Chars += len(chunk.Delta)
+			a.mu.Unlock()
 			m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta})
 		}
 		if chunk.TokensIn > 0 {
@@ -702,6 +715,9 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 		case "assistant":
 			if ev.Text != "" {
 				fullText += ev.Text
+				a.mu.Lock()
+				a.Chars += len(ev.Text)
+				a.mu.Unlock()
 				m.emit("agent.delta", map[string]any{"id": a.ID, "delta": ev.Text})
 			}
 
@@ -711,6 +727,9 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text str
 				toolInfo += " " + ev.ToolInput
 			}
 			toolCalls = append(toolCalls, toolInfo)
+			a.mu.Lock()
+			a.LastTool = ev.Tool
+			a.mu.Unlock()
 			m.emit("tool.start", map[string]any{
 				"id":      fmt.Sprintf("%s-%d", a.ID, len(toolCalls)),
 				"agentId": a.ID,
@@ -804,6 +823,11 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 	a.mu.Lock()
 	a.Status = st
 	a.cancel = nil
+	if st == StatusError {
+		a.LastError = msg
+	} else {
+		a.LastError = ""
+	}
 	a.mu.Unlock()
 
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": st})
@@ -863,6 +887,10 @@ func (a *Agent) Snapshot() *Agent {
 		LLMCfg:    a.LLMCfg,
 		Knowledge:     append([]string(nil), a.Knowledge...),
 		BlockedReason: a.BlockedReason,
+		StartedAt:     a.StartedAt,
+		LastTool:      a.LastTool,
+		Chars:         a.Chars,
+		LastError:     a.LastError,
 	}
 }
 

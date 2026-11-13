@@ -3,6 +3,17 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import { events, Sidecar, type MiniStatus, type MiniAgentStatus } from './mygo'
 
+// 主题跟随主窗：localStorage 同源共享，storage 事件做实时同步。
+const THEME_KEY = 'mad-theme'
+function applyTheme() {
+  const t = localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
+  document.documentElement.dataset.theme = t
+}
+applyTheme()
+window.addEventListener('storage', (e) => {
+  if (e.key === THEME_KEY) applyTheme()
+})
+
 // 扩展 MiniAgentStatus 类型
 type AgentStatus = MiniAgentStatus & {
   startedAt?: number
@@ -21,45 +32,28 @@ function MiniApp() {
   const [expanded, setExpanded] = useState(false)
   const [hovered, setHovered] = useState<string | null>(null)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const [menu, setMenu] = useState<{ agentId: string; x: number; y: number } | null>(null)
+  const [pendingStop, setPendingStop] = useState<string | null>(null)
   const expandedRef = useRef<HTMLDivElement>(null)
 
-  // 记录任务开始时间、流式增量与最近一次工具调用
-  const startTimes = useRef<Record<string, number>>({})
-  const charCounts = useRef<Record<string, number>>({})
-  const lastTools = useRef<Record<string, string>>({})
-
+  // 所有指标（startedAt / chars / lastTool / errMsg / blockedReason）都来自后端，
+  // 前端不再从增量事件里猜 —— 窗口晚开也不丢时长，错误也不会退化成「执行出错」。
   useEffect(() => {
     const unsub = events.miniStatus.on((s) => {
-      const now = Date.now()
-      const agents: AgentStatus[] = s.agents.map((a) => {
-        const prev = status.agents.find((x) => x.id === a.id)
-        // 记录开始时间
-        if (a.status === 'running' && !startTimes.current[a.id]) {
-          startTimes.current[a.id] = now
-        }
-        // 任务结束清除时间
-        if (a.status !== 'running' && startTimes.current[a.id]) {
-          delete startTimes.current[a.id]
-        }
-        return {
-          ...a,
-          startedAt: startTimes.current[a.id],
-          errorMsg: a.status === 'error' ? prev?.errorMsg || '执行出错' : undefined,
-          chars: charCounts.current[a.id] || 0,
-          lastTool: lastTools.current[a.id] || '',
-        }
+      setStatus({
+        agents: s.agents.map((a) => ({
+          id: a.id,
+          name: a.name,
+          color: a.color,
+          status: a.status,
+          task: a.task,
+          startedAt: a.startedAt,
+          chars: a.chars,
+          lastTool: a.lastTool,
+          blockedReason: a.blockedReason,
+          errorMsg: a.errMsg,
+        })),
       })
-      setStatus({ agents })
-    })
-
-    // 订阅流式输出：只统计字数，不保留截断文本（截断必然落在句子中间）
-    const unsubDelta = events.agentDelta.on(({ id, delta }) => {
-      charCounts.current[id] = (charCounts.current[id] || 0) + delta.length
-    })
-
-    // 订阅工具调用：显示「正在做什么」的结构化字段
-    const unsubTool = events.toolStart.on((e) => {
-      lastTools.current[e.agentId] = e.tool
     })
 
     Sidecar.listAgents().then((agents) => {
@@ -73,18 +67,8 @@ function MiniApp() {
         })),
       })
     })
-    return () => {
-      unsub()
-      unsubDelta()
-      unsubTool()
-    }
+    return unsub
   }, [])
-
-  // 展开时调整窗口高度
-  useEffect(() => {
-    const height = expanded ? 52 + Math.min(status.agents.length * 44 + 24, 320) : 52
-    Sidecar.resizeMiniWindow(height)
-  }, [expanded, status.agents.length])
 
   const running = status.agents.filter((a) => a.status === 'running').length
   const queued = status.agents.filter((a) => a.status === 'queued').length
@@ -120,6 +104,20 @@ function MiniApp() {
               ? '完成'
               : '空闲'
 
+  // 按「谁需要你」排序：blocked > error > running > queued > done > idle
+  const RANK: Record<string, number> = {
+    blocked: 0,
+    error: 1,
+    running: 2,
+    queued: 3,
+    done: 4,
+    idle: 5,
+  }
+  const ordered = [...status.agents].sort(
+    (a, b) => (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9),
+  )
+  const MAX_DOTS = 8
+
   // 格式化运行时间
   const formatElapsed = (startedAt?: number): string => {
     if (!startedAt) return ''
@@ -130,30 +128,63 @@ function MiniApp() {
     return `${Math.floor(mins / 60)}h${mins % 60}m`
   }
 
-  // 双击状态点：聚焦主窗口并切换到该 agent
-  const handleAgentClick = (agentId: string) => {
-    setSelectedAgent(agentId)
+  // 单击 = 选中（就地高亮，不隐藏窗口）
+  const handleSelect = (agentId: string) => {
+    setSelectedAgent((cur) => (cur === agentId ? null : agentId))
+  }
+
+  // 双击 / 明确动作 = 跳转主窗
+  const handleOpen = (agentId: string) => {
     Sidecar.focusAgent(agentId)
   }
 
-  // 右键菜单
+  // 右键 = 弹菜单，不直接执行
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault()
-    // 简化：右键停止 agent
-    Sidecar.stopAgent(agentId)
+    e.stopPropagation()
+    setMenu({ agentId, x: e.clientX, y: e.clientY })
   }
+
+  // 停止必须二次确认
+  const confirmStop = (agentId: string) => {
+    Sidecar.stopAgent(agentId)
+    setPendingStop(null)
+    setMenu(null)
+  }
+
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', close)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', close)
+    }
+  }, [menu])
 
   return (
     <div
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100%',
+        // 不要 height: 100% —— FitContent 需要内容自然撑高
         padding: '4px',
-        // @ts-ignore CSS 变量
-        '--app-region': 'drag',
-      } as React.CSSProperties}
+        position: 'relative',
+      }}
     >
+      {/* 拖动手柄：唯一持有 drag 的元素，不绑定任何 onClick */}
+      <div
+        aria-hidden
+        style={{
+          position: 'absolute',
+          inset: 4,
+          zIndex: 0,
+          // @ts-ignore CSS 变量
+          '--app-region': 'drag',
+        } as React.CSSProperties}
+      />
+
       {/* 灵动岛主体 */}
       <div
         style={{
@@ -161,18 +192,22 @@ function MiniApp() {
           alignItems: 'center',
           gap: 10,
           padding: '10px 16px',
-          background: 'rgba(15, 17, 26, 0.92)',
+          background: 'var(--island-bg)',
           borderRadius: expanded ? '20px 20px 0 0' : 24,
           boxShadow: '0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.08)',
           backdropFilter: 'blur(20px) saturate(180%)',
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          border: '1px solid rgba(255,255,255,0.1)',
+          border: '1px solid var(--island-border)',
           borderBottom: expanded ? 'none' : undefined,
           height: 52,
           boxSizing: 'border-box',
           transition: 'border-radius 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
           position: 'relative',
-        }}
+          zIndex: 1,
+          // 内容层显式 no-drag：否则会继承手柄的 drag，事件被吞
+          // @ts-ignore CSS 变量
+          '--app-region': 'no-drag',
+        } as React.CSSProperties}
       >
         {/* 品牌 */}
         <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent-bright)', letterSpacing: '-0.02em' }}>
@@ -184,14 +219,29 @@ function MiniApp() {
           {status.agents.length === 0 && (
             <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>无 agent</span>
           )}
-          {status.agents.slice(0, 8).map((a) => (
-            <div
+          {ordered.slice(0, MAX_DOTS).map((a) => (
+            <button
               key={a.id}
-              style={{ position: 'relative', flexShrink: 0 }}
+              type="button"
+              aria-label={`${a.name} ${statusLabel(a.status)}`}
+              title={`${a.name} · ${statusLabel(a.status)}`}
+              style={{
+                position: 'relative',
+                flexShrink: 0,
+                display: 'grid',
+                placeItems: 'center',
+                width: 20,
+                height: 20,
+                padding: 0,
+                border: 'none',
+                borderRadius: '50%',
+                background: 'transparent',
+                cursor: 'pointer',
+              }}
               onMouseEnter={() => setHovered(a.id)}
               onMouseLeave={() => setHovered(null)}
-              onClick={() => handleAgentClick(a.id)}
-              onDoubleClick={() => handleAgentClick(a.id)}
+              onClick={() => handleSelect(a.id)}
+              onDoubleClick={() => handleOpen(a.id)}
               onContextMenu={(e) => handleContextMenu(e, a.id)}
             >
               <span
@@ -201,7 +251,12 @@ function MiniApp() {
                   borderRadius: '50%',
                   background:
                     a.status === 'error' || a.status === 'blocked' ? 'var(--danger)' : a.color,
-                  opacity: a.status === 'idle' ? 0.35 : 1,
+                  opacity: a.status === 'idle' ? 0.35 : a.status === 'queued' ? 0.7 : 1,
+                  border: a.status === 'queued' ? '1.5px dashed var(--accent-bright)' : 'none',
+                  boxSizing: 'border-box',
+                  // 选中环：不依赖颜色，避免与状态色打架
+                  outline: selectedAgent === a.id ? '2px solid var(--text-secondary)' : 'none',
+                  outlineOffset: 2,
                   boxShadow:
                     a.status === 'blocked'
                       ? '0 0 14px var(--danger), 0 0 5px var(--danger)'
@@ -214,17 +269,13 @@ function MiniApp() {
                             : 'none',
                   animation:
                     a.status === 'blocked'
-                      ? 'errorPulse 0.8s infinite'
+                      ? 'attention 1.2s ease-out 3' // 一次性 3 次，之后静止靠角标
                       : a.status === 'running'
-                        ? 'pulse 1s infinite'
-                        : a.status === 'error'
-                          ? 'errorPulse 0.8s infinite'
-                          : a.status === 'queued'
-                            ? 'pulse 1.5s infinite'
-                            : 'none',
+                        ? 'breathe 2.6s ease-in-out infinite' // 柔和呼吸，不是闪
+                        : 'none',
                   cursor: 'pointer',
                   display: 'block',
-                  transition: 'all 0.2s',
+                  transition: 'opacity 0.2s, outline-color 0.2s',
                 }}
               />
               {/* 错误角标 */}
@@ -254,19 +305,20 @@ function MiniApp() {
                 <div
                   style={{
                     position: 'absolute',
-                    bottom: 'calc(100% + 8px)',
                     left: '50%',
                     transform: 'translateX(-50%)',
                     background: 'rgba(20, 23, 32, 0.95)',
-                    border: '1px solid rgba(255,255,255,0.1)',
+                    border: '1px solid var(--island-border)',
                     borderRadius: 8,
                     padding: '8px 12px',
                     fontSize: 11,
-                    color: '#e8ebf1',
+                    color: 'var(--text-primary)',
                     whiteSpace: 'nowrap',
                     zIndex: 100,
                     boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
                     pointerEvents: 'none',
+                    // 向上无空间（窗口仅 52px），改为向下方岛内展开，避开 overflow:hidden
+                    top: 'calc(100% + 2px)',
                   }}
                 >
                   <div style={{ fontWeight: 600, marginBottom: 2 }}>{a.name}</div>
@@ -285,16 +337,31 @@ function MiniApp() {
                     </div>
                   )}
                   {a.task && (
-                    <div style={{ color: '#a4adbd', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal', wordBreak: 'break-all' }}>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal', wordBreak: 'break-all' }}>
                       {a.task}
                     </div>
                   )}
                 </div>
               )}
-            </div>
+            </button>
           ))}
-          {status.agents.length > 8 && (
-            <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>+{status.agents.length - 8}</span>
+          {status.agents.length > MAX_DOTS && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              title={`还有 ${status.agents.length - MAX_DOTS} 个，点击展开`}
+              style={{
+                fontSize: 10,
+                color: 'var(--text-secondary)',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '2px 4px',
+                borderRadius: 4,
+              }}
+            >
+              +{status.agents.length - MAX_DOTS}
+            </button>
           )}
         </div>
 
@@ -333,8 +400,8 @@ function MiniApp() {
             height: 24,
             borderRadius: '50%',
             border: 'none',
-            background: 'rgba(255,255,255,0.1)',
-            color: '#a4adbd',
+            background: 'var(--island-border)',
+            color: 'var(--text-secondary)',
             fontSize: 11,
             cursor: 'pointer',
             display: 'grid',
@@ -355,8 +422,8 @@ function MiniApp() {
             height: 24,
             borderRadius: '50%',
             border: 'none',
-            background: 'rgba(255,255,255,0.1)',
-            color: '#a4adbd',
+            background: 'var(--island-border)',
+            color: 'var(--text-secondary)',
             fontSize: 11,
             cursor: 'pointer',
             display: 'grid',
@@ -368,37 +435,50 @@ function MiniApp() {
         </button>
       </div>
 
-      {/* 展开详情面板（可滚动） */}
+      {/* 展开详情面板：grid-template-rows 0fr↔1fr 过渡，无魔数、无过冲 */}
       <div
-        ref={expandedRef}
         style={{
-          background: 'rgba(15, 17, 26, 0.92)',
-          borderRadius: '0 0 20px 20px',
-          border: '1px solid rgba(255,255,255,0.1)',
-          borderTop: '1px solid rgba(255,255,255,0.06)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          maxHeight: expanded ? 280 : 0,
-          overflowY: 'auto',
-          overflowX: 'hidden',
-          transition: 'max-height 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s',
-          opacity: expanded ? 1 : 0,
+          display: 'grid',
+          gridTemplateRows: expanded ? '1fr' : '0fr',
+          transition: 'grid-template-rows 0.28s cubic-bezier(0.32, 0.72, 0, 1)',
           // @ts-ignore
           '--app-region': 'no-drag',
         } as React.CSSProperties}
       >
+      <div
+        ref={expandedRef}
+        style={{
+          background: 'var(--island-bg, rgba(15, 17, 26, 0.92))',
+          borderRadius: '0 0 20px 20px',
+          border: '1px solid var(--island-border, rgba(255,255,255,0.1))',
+          borderTop: '1px solid var(--island-border, rgba(255,255,255,0.06))',
+          backdropFilter: 'blur(20px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          minHeight: 0,
+          opacity: expanded ? 1 : 0,
+          transition: 'opacity 0.2s ease-out',
+          position: 'relative',
+          zIndex: 1,
+        }}
+      >
         <div style={{ padding: '12px 16px' }}>
-          {status.agents.map((a) => (
+          {ordered.map((a) => (
             <div
               key={a.id}
-              onClick={() => handleAgentClick(a.id)}
+              onClick={() => handleSelect(a.id)}
+              onDoubleClick={() => handleOpen(a.id)}
+              onContextMenu={(e) => handleContextMenu(e, a.id)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
                 padding: '8px 0',
-                borderBottom: '1px solid rgba(255,255,255,0.05)',
+                borderBottom: '1px solid var(--island-border-subtle)',
                 cursor: 'pointer',
+                background: selectedAgent === a.id ? 'var(--island-border-subtle)' : 'transparent',
+                borderRadius: 6,
               }}
             >
               <span
@@ -410,13 +490,13 @@ function MiniApp() {
                     a.status === 'error' || a.status === 'blocked' ? 'var(--danger)' : a.color,
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow: a.status === 'running' ? `0 0 8px ${a.color}` : 'none',
-                  animation: a.status === 'running' ? 'pulse 1s infinite' : a.status === 'error' ? 'errorPulse 0.8s infinite' : 'none',
+                  animation: a.status === 'running' ? 'breathe 2.6s ease-in-out infinite' : 'none',
                   flexShrink: 0,
                 }}
               />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 12, color: '#e8ebf1', fontWeight: 500 }}>{a.name}</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{a.name}</span>
                   {a.startedAt && a.status === 'running' && (
                     <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
                       {formatElapsed(a.startedAt)}
@@ -472,6 +552,55 @@ function MiniApp() {
           ))}
         </div>
       </div>
+      </div>
+
+      {/* 右键菜单：停止需二次确认 */}
+      {menu && (
+        <div
+          style={{
+            position: 'fixed',
+            left: Math.min(menu.x, window.innerWidth - 160),
+            top: Math.min(menu.y, window.innerHeight - 80),
+            zIndex: 999,
+            minWidth: 130,
+            padding: 4,
+            background: 'rgba(28, 32, 42, 0.98)',
+            border: '1px solid var(--island-border)',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+            // @ts-ignore
+            '--app-region': 'no-drag',
+          } as React.CSSProperties}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              handleOpen(menu.agentId)
+              setMenu(null)
+            }}
+            style={menuItemStyle}
+          >
+            ⤢ 打开会话
+          </button>
+          {pendingStop === menu.agentId ? (
+            <button
+              type="button"
+              onClick={() => confirmStop(menu.agentId)}
+              style={{ ...menuItemStyle, color: 'var(--danger)', fontWeight: 600 }}
+            >
+              ⚠ 确认停止？
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setPendingStop(menu.agentId)}
+              style={menuItemStyle}
+            >
+              ■ 停止
+            </button>
+          )}
+        </div>
+      )}
 
       {/* CSS 动画 */}
       <style>{`
@@ -491,15 +620,30 @@ function MiniApp() {
           background: transparent;
         }
         ::-webkit-scrollbar-thumb {
-          background: rgba(255,255,255,0.1);
+          background: var(--island-border);
           border-radius: 2px;
         }
         ::-webkit-scrollbar-thumb:hover {
-          background: rgba(255,255,255,0.2);
+          background: var(--text-disabled);
         }
       `}</style>
     </div>
   )
+}
+
+function menuItemStyle(): React.CSSProperties {
+  return {
+    display: 'block',
+    width: '100%',
+    padding: '6px 10px',
+    textAlign: 'left',
+    fontSize: 11,
+    color: 'var(--text-primary)',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 5,
+    cursor: 'pointer',
+  }
 }
 
 createRoot(document.getElementById('root')!).render(

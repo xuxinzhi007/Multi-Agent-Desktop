@@ -129,11 +129,16 @@ type WorkDirEvent struct {
 
 // MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。
 type MiniAgentStatus struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Color  string `json:"color"`
-	Status string `json:"status"`
-	Task   string `json:"task,omitempty"` // 当前任务摘要
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Color         string `json:"color"`
+	Status        string `json:"status"`
+	Task          string `json:"task,omitempty"`          // 当前任务摘要
+	StartedAt     int64  `json:"startedAt,omitempty"`     // 本轮开始时间（Unix 秒）
+	LastTool      string `json:"lastTool,omitempty"`      // 最近一次工具调用
+	Chars         int    `json:"chars,omitempty"`         // 本轮已生成字符数
+	BlockedReason string `json:"blockedReason,omitempty"` // 在等人的原因
+	ErrMsg        string `json:"errMsg,omitempty"`        // 真实错误内容
 }
 
 // MiniStatus 是迷你窗的完整状态。
@@ -149,12 +154,19 @@ func buildMiniStatus(mgr *agent.Manager) MiniStatus {
 	list := mgr.List()
 	out := make([]MiniAgentStatus, 0, len(list))
 	for _, a := range list {
+		// Snapshot 在 agent 锁内拷贝，避免与 worker 竞争
+		sn := a.Snapshot()
 		out = append(out, MiniAgentStatus{
-			ID:     a.ID,
-			Name:   a.Name,
-			Color:  a.Color,
-			Status: string(a.Status),
-			Task:   extractTask(a),
+			ID:            sn.ID,
+			Name:          sn.Name,
+			Color:         sn.Color,
+			Status:        string(sn.Status),
+			Task:          extractTask(a),
+			StartedAt:     sn.StartedAt,
+			LastTool:      sn.LastTool,
+			Chars:         sn.Chars,
+			BlockedReason: sn.BlockedReason,
+			ErrMsg:        sn.LastError,
 		})
 	}
 	return MiniStatus{Agents: out}
@@ -736,14 +748,6 @@ func (s *Sidecar) ToggleMiniWindow(show bool) bool {
 	return show
 }
 
-// ResizeMiniWindow 调整迷你悬浮窗大小。
-func (s *Sidecar) ResizeMiniWindow(height int) {
-	if miniWindowRef != nil {
-		w, _ := miniWindowRef.ContentSize()
-		miniWindowRef.SetContentSize(w, height)
-	}
-}
-
 // FocusAgent 聚焦主窗口并切换到指定 agent。
 func (s *Sidecar) FocusAgent(agentId string) {
 	if s.win != nil {
@@ -1021,16 +1025,26 @@ func main() {
 		sidecar.win = win
 
 		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景、可拖动
+		// 悬浮岛：FitContent 让尺寸由内容决定，不再靠前端算魔数。
+		// Panel 让它跨 Space / 全屏应用常驻（监控器不能切桌面就消失）。
+		// StateKey 记住位置，重启后回到原处。
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
 			Title:           "Agent 舰队",
-			Width:           380,
+			Width:           380, // FitContent 下仅为初始值
 			Height:          52,
+			MinWidth:        240,
+			MinHeight:       52,
+			MaxWidth:        460,
+			MaxHeight:       420,
+			FitContent:      true,
+			Panel:           true, // 跨 Space / 全屏应用常驻，不进任务栏和 Dock
 			Frameless:       true,
 			AlwaysOnTop:     true,
 			SkipTaskbar:     true,
 			Transparent:     true,
 			BackgroundColor: "#00000000",
 			DisableMove:     false, // 允许拖动
+			StateKey:        "mini",
 			URL:             "/mini",
 		})
 		miniWindowRef = miniWin

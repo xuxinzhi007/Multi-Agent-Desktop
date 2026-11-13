@@ -102,6 +102,16 @@ export interface MiniAgentStatus {
   status: string;
   /** 当前任务摘要 */
   task?: string;
+  /** 本轮开始时间（Unix 秒） */
+  startedAt?: number;
+  /** 最近一次工具调用 */
+  lastTool?: string;
+  /** 本轮已生成字符数 */
+  chars?: number;
+  /** 在等人的原因 */
+  blockedReason?: string;
+  /** 真实错误内容 */
+  errMsg?: string;
 }
 
 /** MiniStatus 是迷你窗的完整状态。 */
@@ -294,10 +304,6 @@ export const Sidecar = {
   /** QueryNotes 按 scope / tags / 文本查询笔记。 */
   queryNotes(q: Query): Promise<Note[]> {
     return call("Sidecar.QueryNotes", q);
-  },
-  /** ResizeMiniWindow 调整迷你悬浮窗大小。 */
-  resizeMiniWindow(height: number): Promise<void> {
-    return call("Sidecar.ResizeMiniWindow", height);
   },
   /** RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。 */
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
