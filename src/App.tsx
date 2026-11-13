@@ -82,6 +82,7 @@ export default function App() {
         <ChannelView
           channel={activeChannel}
           agents={s.agents}
+          streaming={s.streaming}
           onSend={(text) =>
             s.send('channel.send', {
               channelId: activeChannel.id,

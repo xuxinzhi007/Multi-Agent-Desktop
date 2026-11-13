@@ -4,6 +4,8 @@ import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 type Props = {
   channel: Channel | null
   agents: Agent[]
+  /** 各 agent 的流式增量，key 是 agent ID */
+  streaming?: Record<string, string>
   onSend: (text: string) => void
   onDelete?: () => void
 }
@@ -12,17 +14,19 @@ type Props = {
  * ChannelView 是「群聊」视图：一个频道里的消息对所有成员广播。
  * 与 AgentView 的区别是消息带发言人身份，且成员都是 agent。
  */
-export default function ChannelView({ channel, agents, onSend, onDelete }: Props) {
+export default function ChannelView({ channel, agents, streaming, onSend, onDelete }: Props) {
   const [input, setInput] = useState('')
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
 
+  const streamLen = Object.values(streaming ?? {}).reduce((n, t) => n + (t?.length ?? 0), 0)
+
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [channel?.messages.length])
+  }, [channel?.messages.length, streamLen])
 
   useEffect(() => {
     taRef.current?.focus()
@@ -174,6 +178,66 @@ export default function ChannelView({ channel, agents, onSend, onDelete }: Props
         {(channel.messages ?? []).map((m) => (
           <ChannelBubble key={m.id} msg={m} agent={memberById(m.fromId)} />
         ))}
+
+        {/* 流式输出：正在生成回复的成员 */}
+        {Object.entries(streaming ?? {})
+          .filter(([id, text]) => text && (channel.members ?? []).includes(id))
+          .map(([id, text]) => {
+            const a = memberById(id)
+            return (
+              <div
+                key={`streaming-${id}`}
+                style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}
+              >
+                <span
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: 'var(--radius-sm)',
+                    background: a?.color ?? 'var(--text-disabled)',
+                    color: 'var(--bg-base)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    flexShrink: 0,
+                    marginTop: 1,
+                  }}
+                >
+                  {(a?.name ?? id).slice(0, 1).toUpperCase()}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      marginBottom: 3,
+                      fontSize: 'var(--text-xs)',
+                      fontWeight: 600,
+                      color: a?.color ?? 'var(--text-tertiary)',
+                    }}
+                  >
+                    {a?.name ?? id}
+                    <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
+                      ●
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 'var(--text-md)',
+                      lineHeight: 1.7,
+                      wordBreak: 'break-word',
+                      color: 'var(--text-secondary)',
+                      whiteSpace: 'pre-wrap',
+                    }}
+                  >
+                    {text}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
       </div>
 
       <div style={{ padding: 'var(--space-3) var(--space-6) var(--space-5)', flexShrink: 0 }}>

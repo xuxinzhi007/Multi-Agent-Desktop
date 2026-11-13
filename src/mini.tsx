@@ -1,12 +1,14 @@
 import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import './index.css'
 import { events, Sidecar, type MiniStatus, type MiniAgentStatus } from './mygo'
 
 // 扩展 MiniAgentStatus 类型
 type AgentStatus = MiniAgentStatus & {
   startedAt?: number
   errorMsg?: string
-  lastOutput?: string
+  chars?: number   // 本轮已生成字符数
+  lastTool?: string // 最近一次工具调用名
 }
 
 type ExtendedStatus = {
@@ -20,9 +22,10 @@ function MiniApp() {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const expandedRef = useRef<HTMLDivElement>(null)
 
-  // 记录任务开始时间和最新输出
+  // 记录任务开始时间、流式增量与最近一次工具调用
   const startTimes = useRef<Record<string, number>>({})
-  const lastOutputs = useRef<Record<string, string>>({})
+  const charCounts = useRef<Record<string, number>>({})
+  const lastTools = useRef<Record<string, string>>({})
 
   useEffect(() => {
     const unsub = events.miniStatus.on((s) => {
@@ -41,19 +44,21 @@ function MiniApp() {
           ...a,
           startedAt: startTimes.current[a.id],
           errorMsg: a.status === 'error' ? prev?.errorMsg || '执行出错' : undefined,
-          lastOutput: lastOutputs.current[a.id] || prev?.lastOutput,
+          chars: charCounts.current[a.id] || 0,
+          lastTool: lastTools.current[a.id] || '',
         }
       })
       setStatus({ agents })
     })
 
-    // 订阅流式输出
+    // 订阅流式输出：只统计字数，不保留截断文本（截断必然落在句子中间）
     const unsubDelta = events.agentDelta.on(({ id, delta }) => {
-      lastOutputs.current[id] = (lastOutputs.current[id] || '') + delta
-      // 只保留最后 100 字符
-      if (lastOutputs.current[id].length > 100) {
-        lastOutputs.current[id] = lastOutputs.current[id].slice(-100)
-      }
+      charCounts.current[id] = (charCounts.current[id] || 0) + delta.length
+    })
+
+    // 订阅工具调用：显示「正在做什么」的结构化字段
+    const unsubTool = events.toolStart.on((e) => {
+      lastTools.current[e.agentId] = e.tool
     })
 
     Sidecar.listAgents().then((agents) => {
@@ -70,6 +75,7 @@ function MiniApp() {
     return () => {
       unsub()
       unsubDelta()
+      unsubTool()
     }
   }, [])
 
@@ -82,13 +88,31 @@ function MiniApp() {
   const running = status.agents.filter((a) => a.status === 'running').length
   const queued = status.agents.filter((a) => a.status === 'queued').length
   const errors = status.agents.filter((a) => a.status === 'error').length
-  const done = status.agents.filter((a) => a.status === 'idle').length
+  const done = status.agents.filter((a) => a.status === 'done').length
+  const idle = status.agents.filter((a) => a.status === 'idle').length
 
+  // 5 态完整映射（与 AgentView 的 StatusBadge 保持一致）
   const statusColor = (s: string) =>
-    s === 'running' ? '#e8a33d' : s === 'queued' ? '#4d8cf0' : s === 'error' ? '#e5534b' : '#6e7789'
+    s === 'running'
+      ? 'var(--warning)'
+      : s === 'queued'
+        ? 'var(--accent-bright)'
+        : s === 'error'
+          ? 'var(--danger)'
+          : s === 'done'
+            ? 'var(--success)'
+            : 'var(--text-disabled)'
 
   const statusLabel = (s: string) =>
-    s === 'running' ? '运行中' : s === 'queued' ? '排队' : s === 'error' ? '出错' : '完成'
+    s === 'running'
+      ? '运行中'
+      : s === 'queued'
+        ? '排队'
+        : s === 'error'
+          ? '出错'
+          : s === 'done'
+            ? '完成'
+            : '空闲'
 
   // 格式化运行时间
   const formatElapsed = (startedAt?: number): string => {
@@ -145,14 +169,14 @@ function MiniApp() {
         }}
       >
         {/* 品牌 */}
-        <span style={{ fontSize: 13, fontWeight: 700, color: '#4d8cf0', letterSpacing: '-0.02em' }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent-bright)', letterSpacing: '-0.02em' }}>
           舰队
         </span>
 
         {/* Agent 状态点 */}
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1, overflow: 'hidden' }}>
           {status.agents.length === 0 && (
-            <span style={{ fontSize: 11, color: '#6e7789' }}>无 agent</span>
+            <span style={{ fontSize: 11, color: 'var(--text-disabled)' }}>无 agent</span>
           )}
           {status.agents.slice(0, 8).map((a) => (
             <div
@@ -169,13 +193,13 @@ function MiniApp() {
                   width: a.status === 'running' ? 12 : 10,
                   height: a.status === 'running' ? 12 : 10,
                   borderRadius: '50%',
-                  background: a.status === 'error' ? '#e5534b' : a.color,
+                  background: a.status === 'error' ? 'var(--danger)' : a.color,
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow:
                     a.status === 'running'
                       ? `0 0 12px ${a.color}, 0 0 4px ${a.color}`
                       : a.status === 'error'
-                        ? '0 0 10px #e5534b'
+                        ? '0 0 10px var(--danger)'
                         : a.status === 'queued'
                           ? `0 0 6px ${a.color}`
                           : 'none',
@@ -202,7 +226,7 @@ function MiniApp() {
                     width: 12,
                     height: 12,
                     borderRadius: '50%',
-                    background: '#e5534b',
+                    background: 'var(--danger)',
                     color: '#fff',
                     fontSize: 8,
                     fontWeight: 700,
@@ -240,7 +264,7 @@ function MiniApp() {
                     {a.startedAt && a.status === 'running' && ` · ${formatElapsed(a.startedAt)}`}
                   </div>
                   {a.errorMsg && a.status === 'error' && (
-                    <div style={{ color: '#e5534b', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal' }}>
+                    <div style={{ color: 'var(--danger)', fontSize: 10, marginTop: 4, maxWidth: 200, whiteSpace: 'normal' }}>
                       {a.errorMsg}
                     </div>
                   )}
@@ -254,16 +278,19 @@ function MiniApp() {
             </div>
           ))}
           {status.agents.length > 8 && (
-            <span style={{ fontSize: 10, color: '#6e7789' }}>+{status.agents.length - 8}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>+{status.agents.length - 8}</span>
           )}
         </div>
 
         {/* 统计 */}
         <span style={{ fontSize: 11, color: '#a4adbd', display: 'flex', gap: 6, flexShrink: 0 }}>
-          {running > 0 && <span style={{ color: '#e8a33d' }}>{running} 运行</span>}
-          {queued > 0 && <span style={{ color: '#4d8cf0' }}>{queued} 排队</span>}
-          {errors > 0 && <span style={{ color: '#e5534b' }}>{errors} 错</span>}
-          {done > 0 && running === 0 && <span style={{ color: '#3ecf8e' }}>{done} 完成</span>}
+          {running > 0 && <span style={{ color: 'var(--warning)' }}>{running} 运行</span>}
+          {queued > 0 && <span style={{ color: 'var(--accent-bright)' }}>{queued} 排队</span>}
+          {errors > 0 && <span style={{ color: 'var(--danger)' }}>{errors} 错</span>}
+          {done > 0 && running === 0 && <span style={{ color: 'var(--success)' }}>{done} 完成</span>}
+          {idle > 0 && running === 0 && done === 0 && errors === 0 && (
+            <span style={{ color: 'var(--text-disabled)' }}>{idle} 空闲</span>
+          )}
         </span>
 
         {/* 展开/收起 */}
@@ -347,7 +374,7 @@ function MiniApp() {
                   width: 8,
                   height: 8,
                   borderRadius: '50%',
-                  background: a.status === 'error' ? '#e5534b' : a.color,
+                  background: a.status === 'error' ? 'var(--danger)' : a.color,
                   opacity: a.status === 'idle' ? 0.35 : 1,
                   boxShadow: a.status === 'running' ? `0 0 8px ${a.color}` : 'none',
                   animation: a.status === 'running' ? 'pulse 1s infinite' : a.status === 'error' ? 'errorPulse 0.8s infinite' : 'none',
@@ -358,23 +385,35 @@ function MiniApp() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 12, color: '#e8ebf1', fontWeight: 500 }}>{a.name}</span>
                   {a.startedAt && a.status === 'running' && (
-                    <span style={{ fontSize: 10, color: '#6e7789' }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
                       {formatElapsed(a.startedAt)}
                     </span>
                   )}
                 </div>
                 {a.task && (
-                  <div style={{ fontSize: 10, color: '#6e7789', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-disabled)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {a.task}
                   </div>
                 )}
-                {a.lastOutput && a.status === 'running' && (
-                  <div style={{ fontSize: 10, color: '#a4adbd', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: 'italic' }}>
-                    {a.lastOutput}
+                {a.status === 'running' && (a.lastTool || (a.chars ?? 0) > 0) && (
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--text-disabled)',
+                      marginTop: 2,
+                      display: 'flex',
+                      gap: 8,
+                      overflow: 'hidden',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {a.lastTool && <span>🔧 {a.lastTool}</span>}
+                    {(a.chars ?? 0) > 0 && <span>{a.chars} 字</span>}
                   </div>
                 )}
                 {a.errorMsg && a.status === 'error' && (
-                  <div style={{ fontSize: 10, color: '#e5534b', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: 10, color: 'var(--danger)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {a.errorMsg}
                   </div>
                 )}
@@ -394,8 +433,8 @@ function MiniApp() {
           50% { opacity: 0.4; }
         }
         @keyframes errorPulse {
-          0%, 100% { opacity: 1; box-shadow: 0 0 10px #e5534b; }
-          50% { opacity: 0.6; box-shadow: 0 0 20px #e5534b; }
+          0%, 100% { opacity: 1; box-shadow: 0 0 10px var(--danger); }
+          50% { opacity: 0.6; box-shadow: 0 0 20px var(--danger); }
         }
         /* 细滚动条 */
         ::-webkit-scrollbar {
