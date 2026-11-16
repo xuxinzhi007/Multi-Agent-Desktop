@@ -1,412 +1,488 @@
-import { StrictMode, useEffect, useMemo, useState } from 'react'
+import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import './index.css'
-import { events, API, type MiniStatus } from './mygo'
-import AgentRow, { type AgentRowData } from './components/AgentRow'
+import './styles/island.css'
+import { events, API, type MiniAgentStatus, type MiniStatus } from './mygo'
 
-// 主题跟随主窗：localStorage 同源共享，storage 事件做实时同步。
-const THEME_KEY = 'mad-theme'
-function applyTheme() {
-  const t = localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
-  document.documentElement.dataset.theme = t
+/**
+ * 多 Agent 灵动岛。
+ *
+ * 两种形态承载两种意图：
+ *   折叠态 —— 瞥一眼。头像堆叠 + 运行/等待/异常计数 + 总进度环。
+ *   展开态 —— 操作与详情。逐 agent 卡片、任务、进度、日志时间线、全局控制。
+ *
+ * 视觉约束见 docs/design.md 与 skill 规格：
+ *   深色玻璃、低饱和高亮、状态多通道表达（颜色+圆点+徽章+进度条）。
+ */
+
+type ViewStatus = 'running' | 'thinking' | 'waiting' | 'done' | 'error' | 'stopped'
+
+const STATUS_META: Record<ViewStatus, { label: string; color: string; dot: string }> = {
+  running: { label: '运行中', color: 'var(--st-running)', dot: 'dot--breath' },
+  thinking: { label: '思考中', color: 'var(--st-thinking)', dot: 'dot--breath' },
+  waiting: { label: '等待中', color: 'var(--st-waiting)', dot: '' },
+  done: { label: '已完成', color: 'var(--st-done)', dot: '' },
+  error: { label: '异常', color: 'var(--st-error)', dot: 'dot--fast' },
+  stopped: { label: '已停止', color: 'var(--st-stopped)', dot: '' },
 }
-applyTheme()
-window.addEventListener('storage', (e) => {
-  if (e.key === THEME_KEY) applyTheme()
-})
 
-// 标记这是悬浮岛入口：index.css 里据此把背景改成透明、height 改为 auto，
-// 否则会被主窗的深色背景和 height:100% 污染（表现为整窗一块黑）。
-document.documentElement.dataset.surface = 'island'
+/** 把后端状态映射到界面状态。后端没有 thinking，用 running+无产出近似。 */
+function viewStatus(a: MiniAgentStatus): ViewStatus {
+  switch (a.status) {
+    case 'running':
+      return (a.chars ?? 0) === 0 ? 'thinking' : 'running'
+    case 'queued':
+      return 'waiting'
+    case 'blocked':
+      return 'waiting'
+    case 'done':
+      return 'done'
+    case 'error':
+      return 'error'
+    case 'idle':
+      return a.chars ? 'stopped' : 'stopped'
+    default:
+      return 'stopped'
+  }
+}
 
-/** 分组顺序：需要你的排最前。 */
-const GROUP_ORDER = ['blocked', 'running', 'queued', 'done', 'error', 'idle'] as const
+function isActive(s: ViewStatus) {
+  return s === 'running' || s === 'thinking' || s === 'waiting'
+}
 
-const COLLAPSED_ROWS = 3
-const EXPANDED_ROWS = 8
+/** 总进度：活跃 agent 的平均进度，全完成则 100。 */
+function overallProgress(list: MiniAgentStatus[]): number {
+  if (list.length === 0) return 0
+  const sum = list.reduce((n, a) => n + (a.progress ?? 0), 0)
+  return Math.round(sum / list.length)
+}
+
+/**
+ * 总进度条/环的颜色。
+ *
+ * 注意：不要因为有异常就把整条进度染红 —— 那会让人以为「进度本身出问题了」，
+ * 而红色进度条读起来像「失败率」。颜色只表达「整体在什么阶段」，
+ * 异常的紧迫性交给标题与徽章。只有「全部已停止」才落到灰色。
+ */
+function ringColor(list: MiniAgentStatus[]): string {
+  const vs = list.map(viewStatus)
+  if (vs.some((s) => s === 'running' || s === 'thinking')) return 'var(--st-running)'
+  if (vs.some((s) => s === 'waiting')) return 'var(--st-waiting)'
+  if (vs.some((s) => s === 'done')) return 'var(--st-done)'
+  return 'var(--st-stopped)'
+}
 
 function MiniApp() {
-  const [status, setStatus] = useState<MiniStatus>({ agents: [] })
+  const [status, setStatus] = useState<MiniStatus>({ agents: [], paused: false })
   const [expanded, setExpanded] = useState(false)
-  const [selected, setSelected] = useState<string | null>(null)
-  const [menu, setMenu] = useState<{ x: number; y: number; agentId: string } | null>(null)
-  const [, tick] = useState(0)
+  const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
+  const [toasts, setToasts] = useState<{ id: number; text: string }[]>([])
+  const rootRef = useRef<HTMLDivElement>(null)
+  const toastSeq = useRef(0)
 
-  // 每秒刷新一次年龄显示
+  // 展开/收起时同步调整原生窗口尺寸，让岛真的「长大」而不是被裁
   useEffect(() => {
-    const id = setInterval(() => tick((n) => n + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+    API.islandResize(expanded).catch(() => {})
+  }, [expanded])
 
   useEffect(() => {
     const unsub = events.miniStatus.on((s) => setStatus(s))
     API.listAgents()
       .then((agents) =>
-        setStatus({
+        setStatus((prev) => ({
           agents: agents.map((a) => ({
             id: a.id,
             name: a.name,
+            role: a.role,
             color: a.color,
             status: a.status,
-            task: '',
+            progress: a.status === 'idle' ? 0 : 0,
+            chars: a.chars ?? 0,
+            startedAt: a.startedAt ?? 0,
+            lastTool: a.lastTool ?? '',
+            logs: [],
           })),
-        }),
+          paused: prev.paused,
+        })),
       )
       .catch(() => {})
     return unsub
   }, [])
 
-  const agents: AgentRowData[] = useMemo(
-    () =>
-      status.agents.map((a) => ({
-        id: a.id,
-        name: a.name,
-        role: '',
-        color: a.color,
-        status: a.status,
-        blockedReason: a.blockedReason,
-        startedAt: a.startedAt,
-        chars: a.chars,
-        lastTool: a.lastTool,
-      })),
-    [status.agents],
-  )
-
-  const blocked = agents.filter((a) => a.status === 'blocked')
-  const running = agents.filter((a) => a.status === 'running')
-  const queued = agents.filter((a) => a.status === 'queued')
-
-  // 分组后按「谁需要你」排序，取前 N 行
-  const ordered = useMemo(() => {
-    const rank = (s: string) => {
-      const i = GROUP_ORDER.indexOf(s as (typeof GROUP_ORDER)[number])
-      return i === -1 ? 99 : i
+  // 点击岛外收起
+  useEffect(() => {
+    if (!expanded) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setExpanded(false)
     }
-    return [...agents].sort((a, b) => rank(a.status) - rank(b.status))
+    window.addEventListener('mousedown', onDown)
+    return () => window.removeEventListener('mousedown', onDown)
+  }, [expanded])
+
+  // Esc 收起
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setExpanded(false)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [expanded])
+
+  const toast = (text: string) => {
+    const id = ++toastSeq.current
+    setToasts((t) => [...t, { id, text }])
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 1800)
+  }
+
+  const agents = status.agents ?? []
+  const counts = useMemo(() => {
+    const vs = agents.map(viewStatus)
+    return {
+      running: vs.filter((s) => s === 'running' || s === 'thinking').length,
+      waiting: vs.filter((s) => s === 'waiting').length,
+      error: vs.filter((s) => s === 'error').length,
+      done: vs.filter((s) => s === 'done').length,
+    }
   }, [agents])
 
-  const limit = expanded ? EXPANDED_ROWS + blocked.length : COLLAPSED_ROWS
-  const visible = ordered.slice(0, limit)
-  const hidden = ordered.length - visible.length
+  const progress = overallProgress(agents)
 
-  const handleSelect = (id: string) => {
-    setSelected((prev) => (prev === id ? null : id))
-  }
-  const handleOpen = (id: string) => {
-    API.focusAgent(id)
-  }
-  const handleContextMenu = (e: React.MouseEvent, id: string) => {
-    e.preventDefault()
-    setMenu({ x: e.clientX, y: e.clientY, agentId: id })
+  // 只展示活跃 + 异常的，已完成/已停止的不占展开面板空间
+  const visible = useMemo(
+    () => agents.filter((a) => isActive(viewStatus(a)) || viewStatus(a) === 'error'),
+    [agents],
+  )
+
+  const pauseAll = async () => {
+    if (status.paused) {
+      await API.resumeAll()
+      toast('已恢复')
+    } else {
+      const n = await API.pauseAll()
+      toast(n > 0 ? `已暂停 ${n} 个 Agent` : '没有正在运行的任务')
+    }
   }
 
-  // peek 卡：展开时在列表上方显示最紧迫的那一条的完整状态
-  const peek = expanded ? (blocked[0] ?? running[0] ?? null) : null
+  const stopAll = async () => {
+    const n = await API.stopAllAgents()
+    toast(n > 0 ? `已停止 ${n} 个 Agent` : '没有可停止的任务')
+  }
 
   return (
     <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        // 不要 height: 100% —— FitContent 需要内容自然撑高
-        padding: '4px',
-        paddingTop: 28, // 顶部 24px 留给拖动手柄
-        position: 'relative',
-      }}
+      ref={rootRef}
+      className={`island ${expanded ? 'island--expanded' : 'island--collapsed'}`}
     >
-      {/* 拖动手柄：只有顶部 24px 细条可拖。
-          整窗可拖会让第二次按下触发 macOS 的 AppleActionOnDoubleClick（zoom/minimize）。 */}
-      <div
-        aria-hidden
-        style={{
-          position: 'absolute',
-          top: 4,
-          left: 4,
-          right: 4,
-          height: 24,
-          zIndex: 0,
-          cursor: 'grab',
-          // @ts-ignore CSS 变量
-          '--app-region': 'drag',
-        } as React.CSSProperties}
-      />
+      <div className="island__seam" />
 
-      {/* 主体 */}
-      <div
-        style={{
-          position: 'relative',
-          zIndex: 1,
-          background: 'var(--island-bg)',
-          borderRadius: 16,
-          boxShadow: '0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px var(--island-border)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          border: '1px solid var(--island-border)',
-          padding: '6px 0 0',
-          overflow: 'hidden',
-          // @ts-ignore CSS 变量
-          '--app-region': 'no-drag',
-        } as React.CSSProperties}
+      {/* ---- 折叠态 ---- */}
+      <button
+        type="button"
+        className="island__pill"
+        onClick={() => setExpanded(true)}
+        aria-label="展开 Agent 协作面板"
       >
-        {/* 顶部计数行：仅在有人等你时显示细节 */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '0 10px 6px',
-            fontSize: 11,
-            color: 'var(--text-secondary)',
-          }}
-        >
-          {blocked.length > 0 ? (
-            <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
-              {blocked.length} 个在等你
-            </span>
-          ) : (
-            <span style={{ color: 'var(--text-disabled)' }}>舰队</span>
-          )}
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, color: 'var(--text-disabled)' }}>
-            {running.length > 0 && <span>{running.length} 运行</span>}
-            {queued.length > 0 && <span>{queued.length} 排队</span>}
+        <AvatarStack agents={agents} />
+        <div className="island__meta">
+          <span className="island__title">
+            {counts.error > 0
+              ? '有 Agent 需要处理'
+              : counts.running > 0
+                ? 'Agent 协作中'
+                : counts.waiting > 0
+                  ? 'Agent 等待中'
+                  : agents.length > 0
+                    ? '全部就绪'
+                    : '还没有 Agent'}
           </span>
+          <span className="island__sub">
+            <span className="is-run">{counts.running} 运行</span>
+            {counts.waiting > 0 && <span className="is-wait">{counts.waiting} 等待</span>}
+            {counts.error > 0 && <span className="is-err">{counts.error} 异常</span>}
+          </span>
+        </div>
+        <ProgressRing value={progress} color={ringColor(agents)} size={30} showLabel />
+      </button>
+
+      {/* ---- 展开态 ---- */}
+      <div className="island__panel">
+        <div className="panel__head">
+          <span className="panel__title">Agent 协作</span>
+          <span className="panel__count">{agents.length}</span>
+          {status.paused && (
+            <span className="panel__count" style={{ color: 'var(--st-waiting)' }}>
+              已暂停
+            </span>
+          )}
           <button
             type="button"
-            onClick={() => setExpanded((v) => !v)}
-            title={expanded ? '收起' : '展开'}
-            style={{
-              width: 20,
-              height: 20,
-              borderRadius: '50%',
-              border: 'none',
-              background: 'transparent',
-              color: 'var(--text-tertiary)',
-              fontSize: 10,
-              cursor: 'pointer',
-              display: 'grid',
-              placeItems: 'center',
-              transform: expanded ? 'rotate(180deg)' : 'none',
-              transition: 'transform 0.2s ease-out',
-            }}
+            className="panel__close"
+            onClick={() => setExpanded(false)}
+            aria-label="收起"
           >
-            ▲
-          </button>
-          <button
-            type="button"
-            onClick={() => API.toggleMiniWindow(false)}
-            title="打开主窗口"
-            style={{
-              width: 20,
-              height: 20,
-              borderRadius: '50%',
-              border: 'none',
-              background: 'transparent',
-              color: 'var(--text-tertiary)',
-              fontSize: 10,
-              cursor: 'pointer',
-              display: 'grid',
-              placeItems: 'center',
-            }}
-          >
-            ⤢
+            ✕
           </button>
         </div>
 
-        {/* peek 卡：展开时显示最紧迫那条的完整状态 */}
-        {peek && (
+        <div className="panel__bar">
           <div
-            style={{
-              margin: '0 8px 6px',
-              padding: '7px 9px',
-              borderRadius: 8,
-              background:
-                peek.status === 'blocked' ? 'var(--danger-dim, rgba(229,83,75,0.12))' : 'var(--bg-surface)',
-              border: `1px solid ${peek.status === 'blocked' ? 'var(--danger)' : 'var(--island-border)'}`,
-            }}
-          >
-            <div style={{ fontSize: 11, fontWeight: 600, color: peek.color || 'var(--text-primary)' }}>
-              {peek.name}
-            </div>
-            <div
-              style={{
-                fontSize: 10,
-                color: peek.status === 'blocked' ? 'var(--danger)' : 'var(--text-secondary)',
-                marginTop: 2,
-                wordBreak: 'break-word',
-              }}
-            >
-              {peek.blockedReason || (peek.lastTool ? `正在调用 ${peek.lastTool}` : '正在处理…')}
-            </div>
-          </div>
-        )}
+            className="panel__bar-fill"
+            style={{ width: `${progress}%`, background: ringColor(agents) }}
+          />
+        </div>
 
-        {/* 列表 */}
-        <div style={{ maxHeight: expanded ? 340 : undefined, overflowY: expanded ? 'auto' : 'hidden' }}>
-          {visible.length === 0 && (
-            <div
-              style={{
-                padding: '10px 12px 14px',
-                fontSize: 11,
-                color: 'var(--text-disabled)',
-                textAlign: 'center',
-              }}
-            >
-              还没有 agent
-            </div>
-          )}
-          {visible.map((a) => (
-            <div
-              key={a.id}
-              onContextMenu={(e) => handleContextMenu(e, a.id)}
-              onDoubleClick={() => handleOpen(a.id)}
-            >
-              <AgentRow
+        {visible.length === 0 ? (
+          <div className="panel__empty">
+            {agents.length === 0 ? (
+              <>
+                还没有 Agent
+                <br />
+                在主窗口新建一个开始协作
+              </>
+            ) : (
+              <>
+                所有 Agent 都已就绪
+                <br />
+                发出任务后这里会显示进度
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="panel__list">
+            {visible.map((a, i) => (
+              <AgentCard
+                key={a.id}
                 agent={a}
-                variant="island"
-                active={selected === a.id}
-                onClick={() => handleSelect(a.id)}
+                index={i}
+                open={!!openLogs[a.id]}
+                onToggle={() =>
+                  setOpenLogs((m) => ({ ...m, [a.id]: !m[a.id] }))
+                }
               />
-            </div>
-          ))}
-          {hidden > 0 && (
-            <button
-              type="button"
-              onClick={() => setExpanded(true)}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '5px 12px',
-                fontSize: 10,
-                color: 'var(--text-secondary)',
-                background: 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                textAlign: 'left',
-              }}
-            >
-              … 还有 {hidden} 个
-            </button>
-          )}
-        </div>
-
-        {/* 底部：选中项的操作提示 */}
-        {selected && (
-          <div
-            style={{
-              display: 'flex',
-              gap: 6,
-              padding: '6px 10px',
-              borderTop: '1px solid var(--island-border-subtle)',
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => handleOpen(selected)}
-              style={{
-                flex: 1,
-                padding: '4px 8px',
-                fontSize: 10,
-                borderRadius: 6,
-                border: '1px solid var(--island-border)',
-                background: 'transparent',
-                color: 'var(--text-secondary)',
-                cursor: 'pointer',
-              }}
-            >
-              打开会话
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!selected) return
-                API.stopAgent(selected).catch(() => {})
-                setSelected(null)
-              }}
-              style={{
-                flex: 1,
-                padding: '4px 8px',
-                fontSize: 10,
-                borderRadius: 6,
-                border: '1px solid var(--island-border)',
-                background: 'transparent',
-                color: 'var(--danger)',
-                cursor: 'pointer',
-              }}
-            >
-              停止
-            </button>
+            ))}
           </div>
         )}
+
+        <div className="panel__foot">
+          <button
+            type="button"
+            className="btn btn--warn"
+            onClick={pauseAll}
+            disabled={visible.length === 0}
+          >
+            {status.paused ? '全部恢复' : '全部暂停'}
+          </button>
+          <button
+            type="button"
+            className="btn btn--danger"
+            onClick={stopAll}
+            disabled={visible.length === 0}
+          >
+            全部停止
+          </button>
+        </div>
       </div>
 
-      {/* 右键菜单：停止需二次确认 */}
-      {menu && (
-        <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 900 }}
-            onClick={() => setMenu(null)}
-          />
-          <div
-            style={{
-              position: 'fixed',
-              left: Math.min(menu.x, window.innerWidth - 150),
-              top: Math.min(menu.y, window.innerHeight - 90),
-              zIndex: 901,
-              minWidth: 130,
-              background: 'var(--island-bg)',
-              border: '1px solid var(--island-border)',
-              borderRadius: 8,
-              boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-              overflow: 'hidden',
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                handleOpen(menu.agentId)
-                setMenu(null)
-              }}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '7px 12px',
-                fontSize: 11,
-                textAlign: 'left',
-                background: 'transparent',
-                border: 'none',
-                borderBottom: '1px solid var(--island-border-subtle)',
-                color: 'var(--text-primary)',
-                cursor: 'pointer',
-              }}
-            >
-              打开会话
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                API.stopAgent(menu.agentId).catch(() => {})
-                setMenu(null)
-              }}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '7px 12px',
-                fontSize: 11,
-                textAlign: 'left',
-                background: 'var(--danger-dim, rgba(229,83,75,0.12))',
-                border: 'none',
-                color: 'var(--danger)',
-                cursor: 'pointer',
-                fontWeight: 600,
-              }}
-            >
-              停止
-            </button>
+      <div className="toast-layer">
+        {toasts.map((t) => (
+          <div key={t.id} className="toast">
+            {t.text}
           </div>
-        </>
-      )}
+        ))}
+      </div>
     </div>
   )
+}
+
+function AvatarStack({ agents }: { agents: MiniAgentStatus[] }) {
+  const shown = agents.slice(0, 3)
+  if (shown.length === 0) {
+    return (
+      <div className="avatars">
+        <div className="avatar" style={{ background: 'var(--st-stopped)' }}>
+          ·
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="avatars">
+      {shown.map((a) => {
+        const vs = viewStatus(a)
+        return (
+          <div key={a.id} className="avatar" style={{ background: a.color }}>
+            {a.name.slice(0, 1).toUpperCase()}
+            <span
+              className={`avatar__badge ${STATUS_META[vs].dot}`}
+              style={{ background: STATUS_META[vs].color }}
+            />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ProgressRing({
+  value,
+  color,
+  size,
+  showLabel,
+}: {
+  value: number
+  color: string
+  size: number
+  showLabel?: boolean
+}) {
+  const stroke = 3
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  const offset = c - (Math.min(100, Math.max(0, value)) / 100) * c
+  return (
+    <div className="ring-wrap" style={{ width: size, height: size }}>
+      <svg className="ring" width={size} height={size} aria-hidden>
+        <circle
+          className="ring__track"
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          strokeWidth={stroke}
+        />
+        <circle
+          className="ring__fill"
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          strokeWidth={stroke}
+          stroke={color}
+          strokeDasharray={c}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      {showLabel && <span className="ring__label">{value}</span>}
+    </div>
+  )
+}
+
+function AgentCard({
+  agent,
+  index,
+  open,
+  onToggle,
+}: {
+  agent: MiniAgentStatus
+  index: number
+  open: boolean
+  onToggle: () => void
+}) {
+  const vs = viewStatus(agent)
+  const meta = STATUS_META[vs]
+  const waiting = vs === 'waiting'
+  const logs = agent.logs ?? []
+
+  return (
+    <div
+      className={`card ${open ? 'card--expanded' : ''}`}
+      style={{ ['--i' as string]: index }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: 'block',
+          width: '100%',
+          border: 'none',
+          background: 'transparent',
+          color: 'inherit',
+          padding: 0,
+          textAlign: 'left',
+        }}
+        aria-expanded={open}
+      >
+        <div className="card__top">
+          <div className="card__avatar" style={{ background: agent.color }}>
+            {agent.name.slice(0, 1).toUpperCase()}
+            <span
+              className={`avatar__badge ${meta.dot}`}
+              style={{
+                background: meta.color,
+                width: 9,
+                height: 9,
+                right: -3,
+                bottom: -3,
+              }}
+            />
+          </div>
+          <div className="card__body">
+            <div className="card__name">
+              <span
+                style={{
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {agent.name}
+              </span>
+              <span className="badge" style={{ color: meta.color }}>
+                <span className={`badge__dot ${meta.dot}`} />
+                {meta.label}
+              </span>
+            </div>
+            <div className="card__role">{agent.role || '通用助手'}</div>
+            {agent.task && (
+              <div className={`card__task ${waiting ? 'card__task--waiting' : ''}`}>
+                {agent.task}
+              </div>
+            )}
+            {waiting && agent.dep && (
+              <div className="card__dep">等待上游产出 · {agent.dep}</div>
+            )}
+            {waiting && !agent.dep && agent.blockedReason && (
+              <div className="card__dep">{agent.blockedReason}</div>
+            )}
+          </div>
+          <ProgressRing value={agent.progress ?? 0} color={meta.color} size={26} showLabel />
+        </div>
+
+        <div className="card__progress">
+          <div className="card__track">
+            <div
+              className="card__fill"
+              style={{ width: `${agent.progress ?? 0}%`, background: meta.color }}
+            />
+          </div>
+          <span className="card__pct">{agent.progress ?? 0}%</span>
+        </div>
+      </button>
+
+      <div className={`card__logs ${open ? 'card__logs--open' : ''}`}>
+        <div className="card__logs-inner">
+          {logs.length === 0 && (
+            <div className="log-row" style={{ color: '#4b5468' }}>
+              暂无日志
+            </div>
+          )}
+          {logs.map((l, i) => (
+            <div
+              key={i}
+              className={`log-row ${l.kind === 'error' ? 'log-row--error' : 'log-row--tool'}`}
+            >
+              <span className="log-row__time">{fmtTime(l.at)}</span>
+              <span style={{ minWidth: 0 }}>{l.text}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function fmtTime(at: number): string {
+  if (!at) return '--:--'
+  const d = new Date(at * 1000)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 createRoot(document.getElementById('root')!).render(

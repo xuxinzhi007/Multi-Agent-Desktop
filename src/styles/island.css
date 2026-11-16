@@ -1,0 +1,673 @@
+/* ============================================================
+   灵动岛 —— 多 Agent 协作面板
+   折叠态是「状态瞥一眼」，展开态是「操作与详情」。
+   两态共用同一套视觉语言：深色玻璃 + 低饱和高亮 + 细网格底。
+   ============================================================ */
+
+:root {
+  /* 状态色：低饱和高亮，深底上不刺眼 */
+  --st-running: #34d399;
+  --st-thinking: #a78bfa;
+  --st-waiting: #fbbf24;
+  --st-done: #7c869e;
+  --st-error: #ff5a7a;
+  --st-stopped: #4b5468;
+
+  --island-w-collapsed: 252px;
+  --island-h-collapsed: 44px;
+  --island-w-expanded: 392px;
+  --island-h-expanded: 468px;
+  --island-r-collapsed: 22px;
+  --island-r-expanded: 26px;
+
+  /* 弹簧曲线：展开/收起统一用它，避免线性生硬 */
+  --spring: cubic-bezier(0.3, 0.9, 0.28, 1.06);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  /* 不要 height:100% —— FitContent 测不到内容高度 */
+  /* 不要 overflow:hidden —— tooltip 会被裁 */
+}
+
+body {
+  font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
+  display: flex;
+  justify-content: center;
+  /* 顶部留一点间距，窗口贴边时视觉更舒服 */
+  padding: 0;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* ---------- 岛体 ---------- */
+.island {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% -20%, rgba(120, 150, 255, 0.1), transparent 60%),
+    linear-gradient(180deg, rgba(22, 25, 34, 0.92), rgba(13, 15, 22, 0.96));
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: #e8ebf1;
+  /* 内侧高光：玻璃质感的关键，没有它就是一坨半透明灰 */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+    0 12px 40px -12px rgba(0, 0, 0, 0.72);
+  transition:
+    width 420ms var(--spring),
+    height 420ms var(--spring),
+    border-radius 420ms var(--spring);
+}
+
+/* 细网格底：给深色面一点材质，几乎看不见但去掉就变平 */
+.island::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 20%, transparent 80%);
+}
+
+.island--collapsed {
+  width: var(--island-w-collapsed);
+  height: var(--island-h-collapsed);
+  border-radius: var(--island-r-collapsed);
+}
+
+.island--expanded {
+  width: min(var(--island-w-expanded), calc(100vw - 24px));
+  height: min(var(--island-h-expanded), calc(100vh - 16px));
+  border-radius: var(--island-r-expanded);
+}
+
+/* 展开时的「信封开口」高光线 */
+.island__seam {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: 1px;
+  width: 0;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(160, 190, 255, 0.55),
+    rgba(255, 255, 255, 0.8),
+    rgba(160, 190, 255, 0.55),
+    transparent
+  );
+  opacity: 0;
+  transition:
+    width 460ms var(--spring),
+    opacity 260ms ease;
+}
+.island--expanded .island__seam {
+  width: 64%;
+  opacity: 1;
+}
+
+/* ---------- 折叠态 ---------- */
+.island__pill {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 9px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  transition: opacity 200ms ease;
+}
+.island--expanded .island__pill {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 头像堆叠：轻浮动画让「它们活着」被感知到 */
+.avatars {
+  display: flex;
+  flex-shrink: 0;
+}
+.avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0b0d12;
+  border: 2px solid rgba(13, 15, 22, 0.92);
+  margin-left: -8px;
+  position: relative;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  animation: float 3.4s ease-in-out infinite;
+}
+.avatar:first-child {
+  margin-left: 0;
+}
+.avatar:nth-child(2) {
+  animation-delay: 0.4s;
+}
+.avatar:nth-child(3) {
+  animation-delay: 0.8s;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+/* 头像上的状态角标 */
+.avatar__badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid rgba(13, 15, 22, 0.95);
+}
+
+.island__meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.island__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.island__sub {
+  font-size: 10px;
+  color: #8b93a6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  gap: 7px;
+}
+.island__sub b {
+  font-weight: 600;
+}
+.island__sub .is-run {
+  color: var(--st-running);
+}
+.island__sub .is-wait {
+  color: var(--st-waiting);
+}
+.island__sub .is-err {
+  color: var(--st-error);
+}
+
+/* ---------- 进度环 ---------- */
+.ring {
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+.ring__track {
+  stroke: rgba(255, 255, 255, 0.09);
+}
+.ring__fill {
+  transition:
+    stroke-dashoffset 600ms var(--spring),
+    stroke 300ms ease;
+  stroke-linecap: round;
+}
+.ring__label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #c9d2e3;
+}
+.ring-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+/* ---------- 展开态 ---------- */
+.island__panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 260ms ease 60ms,
+    transform 380ms var(--spring) 60ms;
+  pointer-events: none;
+}
+.island--expanded .island__panel {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 10px;
+  flex-shrink: 0;
+}
+.panel__title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.panel__count {
+  font-size: 10px;
+  color: #8b93a6;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+.panel__close {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: #98a2b6;
+  font-size: 12px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+.panel__close:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #e8ebf1;
+}
+
+/* 总进度条 */
+.panel__bar {
+  margin: 0 16px 10px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.panel__bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition:
+    width 620ms var(--spring),
+    background 300ms ease;
+}
+
+/* 卡片列表 */
+.panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 10px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overscroll-behavior: contain;
+}
+.panel__list::-webkit-scrollbar {
+  width: 6px;
+}
+.panel__list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+/* ---------- Agent 卡片 ---------- */
+.card {
+  border-radius: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.045),
+    rgba(255, 255, 255, 0.015)
+  );
+  padding: 8px 10px;
+  text-align: left;
+  color: inherit;
+  width: 100%;
+  border-width: 1px;
+  /* 依次入场：延迟由内联 --i 控制 */
+  opacity: 0;
+  transform: translateY(8px);
+  animation: card-in 380ms var(--spring) forwards;
+  animation-delay: calc(var(--i, 0) * 40ms + 120ms);
+  transition: border-color 180ms ease, background 180ms ease;
+}
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.13);
+}
+.card--expanded {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+@keyframes card-in {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.card__top {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.card__avatar {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0b0d12;
+  flex-shrink: 0;
+}
+
+.card__body {
+  min-width: 0;
+  flex: 1;
+}
+.card__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.card__role {
+  font-size: 10px;
+  color: #7c869e;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card__task {
+  font-size: 11px;
+  color: #aab3c5;
+  margin-top: 5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card__task--waiting {
+  color: var(--st-waiting);
+}
+.card__dep {
+  font-size: 9.5px;
+  color: var(--st-waiting);
+  opacity: 0.85;
+  margin-top: 2px;
+}
+
+/* 状态徽章 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+  opacity: 0.95;
+  flex-shrink: 0;
+}
+.badge__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 呼吸/闪烁：不同状态节奏不同，让「紧急程度」一眼可辨 */
+.dot--breath {
+  animation: breath 2s ease-in-out infinite;
+}
+.dot--fast {
+  animation: breath 0.7s ease-in-out infinite;
+}
+
+@keyframes breath {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
+  }
+}
+
+/* 卡片进度条 */
+.card__progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+}
+.card__track {
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.card__fill {
+  height: 100%;
+  border-radius: 999px;
+  transition:
+    width 520ms var(--spring),
+    background 260ms ease;
+}
+.card__pct {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: #7c869e;
+  min-width: 26px;
+  text-align: right;
+}
+
+/* 日志时间线：高度过渡，内部滚动 */
+.card__logs {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 320ms var(--spring);
+}
+.card__logs--open {
+  max-height: 148px;
+}
+.card__logs-inner {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  max-height: 138px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overscroll-behavior: contain;
+}
+.log-row {
+  display: flex;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: #8b93a6;
+  word-break: break-word;
+}
+.log-row__time {
+  color: #4b5468;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.log-row--error {
+  color: var(--st-error);
+}
+.log-row--tool {
+  color: #9fb0cc;
+}
+
+/* ---------- 底部控制 ---------- */
+.panel__foot {
+  display: flex;
+  gap: 6px;
+  padding: 9px 12px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+.btn {
+  flex: 1;
+  padding: 7px 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.04);
+  color: #c9d2e3;
+  font-size: 11px;
+  font-weight: 550;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+.btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e8ebf1;
+}
+.btn--warn {
+  color: var(--st-waiting);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+.btn--warn:hover {
+  background: rgba(251, 191, 36, 0.12);
+}
+.btn--danger {
+  color: var(--st-error);
+  border-color: rgba(255, 90, 122, 0.3);
+}
+.btn--danger:hover {
+  background: rgba(255, 90, 122, 0.12);
+}
+
+/* ---------- Toast ---------- */
+.toast-layer {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  pointer-events: none;
+  z-index: 100;
+}
+.toast {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(24, 28, 38, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #d6dcea;
+  font-size: 10.5px;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  animation: toast-in 220ms var(--ease-out);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ---------- 空态 ---------- */
+.panel__empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: #6b7488;
+  font-size: 11px;
+  line-height: 1.7;
+  padding: 0 24px;
+}
+
+/* ---------- 无障碍 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .island,
+  .island__panel,
+  .card,
+  .avatar,
+  .dot--breath,
+  .dot--fast,
+  .toast {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+  .card {
+    opacity: 1;
+    transform: none;
+  }
+  .island--expanded .island__panel {
+    transform: none;
+  }
+}

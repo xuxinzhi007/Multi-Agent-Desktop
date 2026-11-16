@@ -61,6 +61,12 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
       'API.SetWorkDir': () => undefined,
       'API.ListModels': () => ['mock'],
+      'API.IslandResize': () => true,
+      'API.PauseAll': () => 2,
+      'API.ResumeAll': () => 0,
+      'API.StopAllAgents': () => 2,
+      'API.ClearAgentLLM': (id: unknown) => ({ id, messages: [] }),
+      'API.ProvidersStatus': () => [],
     }
 
     ;(window as unknown as Record<string, unknown>).mygo = {

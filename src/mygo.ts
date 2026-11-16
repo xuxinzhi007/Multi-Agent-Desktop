@@ -102,6 +102,7 @@ export interface MessageEvent {
 export interface MiniAgentStatus {
   id: string;
   name: string;
+  role: string;
   color: string;
   status: string;
   /** 当前任务摘要 */
@@ -112,15 +113,34 @@ export interface MiniAgentStatus {
   lastTool?: string;
   /** 本轮已生成字符数 */
   chars?: number;
+  /** 0-100，由状态与产出推算 */
+  progress: number;
   /** 在等人的原因 */
   blockedReason?: string;
   /** 真实错误内容 */
   errMsg?: string;
+  /** Dep 是上游依赖的 agent 名字。等待中的 agent 借此说明「在等谁」。 */
+  dep?: string;
+  logs?: MiniLogEntry[];
+}
+
+/** MiniLogEntry 是灵动岛时间线里的一条日志。 */
+export interface MiniLogEntry {
+  /** Unix 秒 */
+  at: number;
+  /** tool / status / error */
+  kind: string;
+  /** 已格式化，等宽显示 */
+  text: string;
+  /** 可选细节（工具参数等） */
+  detail?: string;
 }
 
 /** MiniStatus 是迷你窗的完整状态。 */
 export interface MiniStatus {
   agents: MiniAgentStatus[];
+  /** Paused 表示全局已被用户暂停（不再自动推进任务） */
+  paused: boolean;
 }
 
 export interface Note {
@@ -299,6 +319,16 @@ export const API = {
   isAlwaysOnTop(): Promise<boolean> {
     return call("API.IsAlwaysOnTop");
   },
+  /**
+   * IslandResize 由灵动岛在展开/收起时调用，让原生窗口跟着内容变尺寸。
+   *
+   * 为什么不用 FitContent 自动撑：折叠 252px、展开 392px，宽度差异大，
+   * FitContent 只跟内容高度走。展开面板本身有固定的 504px 高度设计，
+   * 显式设定尺寸更可控，也不会因为内容短暂为空而闪一下。
+   */
+  islandResize(expanded: boolean): Promise<boolean> {
+    return call("API.IslandResize", expanded);
+  },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");
   },
@@ -331,6 +361,13 @@ export const API = {
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
   },
+  /**
+   * PauseAll 暂停所有正在跑/排队的 agent：停止当前执行并清空队列。
+   * 返回被暂停的数量，供前端 toast 使用。
+   */
+  pauseAll(): Promise<number> {
+    return call("API.PauseAll");
+  },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("API.PickDirectory");
@@ -346,6 +383,13 @@ export const API = {
   /** QueryNotes 按 scope / tags / 文本查询笔记。 */
   queryNotes(q: Query): Promise<Note[]> {
     return call("API.QueryNotes", q);
+  },
+  /**
+   * ResumeAll 恢复：清掉暂停标记。已停止的 agent 不会自动重跑
+   * （那需要重放任务，属于编排层的事），这里只解除全局暂停状态。
+   */
+  resumeAll(): Promise<number> {
+    return call("API.ResumeAll");
   },
   /** RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。 */
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
@@ -399,6 +443,10 @@ export const API = {
   /** StopAgent 停止一个 agent 的推理并清空队列。 */
   stopAgent(id: string): Promise<boolean> {
     return call("API.StopAgent", id);
+  },
+  /** StopAllAgents 停止所有未完成的 agent。 */
+  stopAllAgents(): Promise<number> {
+    return call("API.StopAllAgents");
   },
   /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
   toggleMiniWindow(show: boolean): Promise<boolean> {

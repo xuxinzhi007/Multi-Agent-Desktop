@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 
@@ -131,23 +133,38 @@ type WorkDirEvent struct {
 	Dir string `json:"dir"`
 }
 
+// MiniLogEntry 是灵动岛时间线里的一条日志。
+type MiniLogEntry struct {
+	At     int64  `json:"at"`               // Unix 秒
+	Kind   string `json:"kind"`             // tool / status / error
+	Text   string `json:"text"`             // 已格式化，等宽显示
+	Detail string `json:"detail,omitempty"` // 可选细节（工具参数等）
+}
+
 // MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。
 type MiniAgentStatus struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
+	Role          string `json:"role"`
 	Color         string `json:"color"`
 	Status        string `json:"status"`
 	Task          string `json:"task,omitempty"`          // 当前任务摘要
 	StartedAt     int64  `json:"startedAt,omitempty"`     // 本轮开始时间（Unix 秒）
 	LastTool      string `json:"lastTool,omitempty"`      // 最近一次工具调用
 	Chars         int    `json:"chars,omitempty"`         // 本轮已生成字符数
+	Progress      int    `json:"progress"`                // 0-100，由状态与产出推算
 	BlockedReason string `json:"blockedReason,omitempty"` // 在等人的原因
 	ErrMsg        string `json:"errMsg,omitempty"`        // 真实错误内容
+	// Dep 是上游依赖的 agent 名字。等待中的 agent 借此说明「在等谁」。
+	Dep  string         `json:"dep,omitempty"`
+	Logs []MiniLogEntry `json:"logs,omitempty"`
 }
 
 // MiniStatus 是迷你窗的完整状态。
 type MiniStatus struct {
 	Agents []MiniAgentStatus `json:"agents"`
+	// Paused 表示全局已被用户暂停（不再自动推进任务）
+	Paused bool `json:"paused"`
 }
 
 // MiniStatusEvent 事件，推给悬浮窗。
@@ -160,20 +177,104 @@ func buildMiniStatus(mgr *agent.Manager) MiniStatus {
 	for _, a := range list {
 		// Snapshot 在 agent 锁内拷贝，避免与 worker 竞争
 		sn := a.Snapshot()
+		st := string(sn.Status)
 		out = append(out, MiniAgentStatus{
 			ID:            sn.ID,
 			Name:          sn.Name,
+			Role:          sn.Role,
 			Color:         sn.Color,
-			Status:        string(sn.Status),
+			Status:        st,
 			Task:          extractTask(a),
 			StartedAt:     sn.StartedAt,
 			LastTool:      sn.LastTool,
 			Chars:         sn.Chars,
+			Progress:      miniProgress(st, sn.Chars, sn.QueueLen),
 			BlockedReason: sn.BlockedReason,
 			ErrMsg:        sn.LastError,
+			Logs:          miniLogs(sn),
 		})
 	}
-	return MiniStatus{Agents: out}
+	// 等待中的 agent 标出它在等谁：找它前面那个还在跑的同伴。
+	// 没有显式依赖图时，用「同轮更早开始的 agent」作为上游，可读性远好于空白。
+	for i := range out {
+		if out[i].Status != string(agent.StatusQueued) && out[i].Status != string(agent.StatusBlocked) {
+			continue
+		}
+		for j := range out {
+			if j == i {
+				continue
+			}
+			if out[j].Status == string(agent.StatusRunning) && out[j].StartedAt <= out[i].StartedAt {
+				out[i].Dep = out[j].Name
+				break
+			}
+		}
+	}
+	return MiniStatus{Agents: out, Paused: miniPaused.Load()}
+}
+
+// miniPaused 记录用户是否点了「全部暂停」。
+var miniPaused atomic.Bool
+
+// miniProgress 把状态与产出折算成 0-100，供进度环显示。
+// 没有真实的总量信息，所以只表达「大概走到哪了」，不承诺精确。
+func miniProgress(status string, chars, queueLen int) int {
+	switch status {
+	case string(agent.StatusDone):
+		return 100
+	case string(agent.StatusIdle):
+		return 0
+	case string(agent.StatusError), string(agent.StatusBlocked):
+		return 45
+	}
+	// 运行/排队：按已生成字数估算，800 字视为完成
+	p := chars * 100 / 800
+	if p > 95 {
+		p = 95
+	}
+	if p < 8 {
+		p = 8
+	}
+	return p
+}
+
+// miniLogs 从 agent 历史里抽最近几条作为时间线。
+// 只取 assistant/tool 相关，system 与过长内容不展示。
+func miniLogs(sn *agent.Agent) []MiniLogEntry {
+	const limit = 8
+	var out []MiniLogEntry
+	msgs := sn.Messages
+	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
+		m := msgs[i]
+		if m.Role == "system" {
+			continue
+		}
+		switch m.Role {
+		case "user":
+			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "status", Text: "› " + firstLine(m.Content)})
+		case "assistant":
+			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "tool", Text: firstLine(m.Content)})
+		}
+	}
+	if sn.LastTool != "" {
+		out = append([]MiniLogEntry{{At: time.Now().Unix(), Kind: "tool", Text: sn.LastTool + "(…)"}}, out...)
+	}
+	if sn.LastError != "" {
+		out = append([]MiniLogEntry{{At: time.Now().Unix(), Kind: "error", Text: sn.LastError}}, out...)
+	}
+	return out
+}
+
+// firstLine 取首行并截断，日志里不需要整段正文。
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 72 {
+		return s[:72] + "…"
+	}
+	return s
 }
 
 // extractTask 提取 agent 当前任务摘要。
@@ -321,6 +422,53 @@ func (s *API) DeleteAgent(id string) bool {
 // StopAgent 停止一个 agent 的推理并清空队列。
 func (s *API) StopAgent(id string) bool {
 	return s.mgr.Stop(id)
+}
+
+// PauseAll 暂停所有正在跑/排队的 agent：停止当前执行并清空队列。
+// 返回被暂停的数量，供前端 toast 使用。
+func (s *API) PauseAll() int {
+	miniPaused.Store(true)
+	n := 0
+	for _, a := range s.mgr.List() {
+		sn := a.Snapshot()
+		if sn.Status == agent.StatusRunning || sn.Status == agent.StatusQueued {
+			s.mgr.Stop(sn.ID)
+			n++
+		}
+	}
+	s.pushMini()
+	return n
+}
+
+// ResumeAll 恢复：清掉暂停标记。已停止的 agent 不会自动重跑
+// （那需要重放任务，属于编排层的事），这里只解除全局暂停状态。
+func (s *API) ResumeAll() int {
+	miniPaused.Store(false)
+	s.pushMini()
+	return 0
+}
+
+// StopAllAgents 停止所有未完成的 agent。
+func (s *API) StopAllAgents() int {
+	miniPaused.Store(false)
+	n := 0
+	for _, a := range s.mgr.List() {
+		sn := a.Snapshot()
+		if sn.Status == agent.StatusDone || sn.Status == agent.StatusIdle {
+			continue
+		}
+		s.mgr.Stop(sn.ID)
+		n++
+	}
+	s.pushMini()
+	return n
+}
+
+// pushMini 主动推一次迷你窗状态，让全局操作立刻反映到折叠态。
+func (s *API) pushMini() {
+	if miniWindowRef != nil && !miniWindowRef.IsDestroyed() {
+		MiniStatusEvent.Emit(miniWindowRef, buildMiniStatus(s.mgr))
+	}
 }
 
 // BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。
@@ -848,6 +996,24 @@ func (s *API) ToggleMiniWindow(show bool) bool {
 	return show
 }
 
+// IslandResize 由灵动岛在展开/收起时调用，让原生窗口跟着内容变尺寸。
+//
+// 为什么不用 FitContent 自动撑：折叠 252px、展开 392px，宽度差异大，
+// FitContent 只跟内容高度走。展开面板本身有固定的 504px 高度设计，
+// 显式设定尺寸更可控，也不会因为内容短暂为空而闪一下。
+func (s *API) IslandResize(expanded bool) bool {
+	w := miniWindowRef
+	if w == nil || w.IsDestroyed() {
+		return false
+	}
+	if expanded {
+		w.SetSize(392, 468)
+	} else {
+		w.SetSize(252, 44)
+	}
+	return true
+}
+
 // FocusAgent 聚焦主窗口并切换到指定 agent。
 func (s *API) FocusAgent(agentId string) {
 	if s.win != nil {
@@ -1206,13 +1372,15 @@ func main() {
 			Title: "Agent 舰队",
 			// 宽度锁死：FitContent 只让高度跟着内容走，
 			// MinWidth == MaxWidth 时宽度被夹死，窗口不再自己缩放。
-			Width:           320,
-			Height:          132,
-			MinWidth:        320,
-			MaxWidth:        320,
-			MinHeight:       60,
-			MaxHeight:       480,
-			FitContent:      true,
+			// 初始为折叠态尺寸；展开时前端调 IslandResize 让窗口跟着变大。
+			Width:     252,
+			Height:    44,
+			MinWidth:  252,
+			MaxWidth:  392,
+			MinHeight: 44,
+			MaxHeight: 468,
+			// 不要 FitContent：折叠/展开两态尺寸是设计值，自动撑会抖
+			FitContent:      false,
 			Panel:           true, // 跨 Space / 全屏应用常驻，不进任务栏和 Dock
 			Frameless:       true,
 			AlwaysOnTop:     true,
