@@ -89,6 +89,13 @@ func ListModels(ctx context.Context, cfg Config) ([]string, error) {
 }
 
 func (c *openAICompat) Stream(ctx context.Context, msgs []Message) (<-chan Chunk, error) {
+	// 需要鉴权的 provider 缺 Key 时立刻失败。
+	// 否则请求会被发出去（要么被拒要么挂起），用户只看到「排队中」不知原因。
+	// ollama 是本地服务，不需要 Key。
+	if c.cfg.APIKey == "" && c.name != "ollama" {
+		return nil, fmt.Errorf("%w（当前 provider: %s）", ErrMissingAPIKey, c.name)
+	}
+
 	body, err := json.Marshal(chatReq{Model: c.cfg.Model, Messages: msgs, Stream: true})
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal: %w", err)
@@ -103,7 +110,16 @@ func (c *openAICompat) Stream(ctx context.Context, msgs []Message) (<-chan Chunk
 		req.Header.Set("authorization", "Bearer "+c.cfg.APIKey)
 	}
 
-	httpClient := &http.Client{Timeout: 0}
+	// 由 ctx 统一控制超时：调用方给了 deadline 就用它，否则兜底 StreamTimeout。
+	// 不能用 Timeout:0 —— 上游挂起时 Do() 永不返回，worker 会被永久占住。
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, StreamTimeout)
+		defer cancel()
+	}
+	req = req.WithContext(ctx)
+
+	httpClient := &http.Client{}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: do: %w", err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,74 +62,109 @@ func stopAll(t *testing.T, s *API) {
 	}
 }
 
-// TC-013 —— ListModelsFor 在 mock / 空 BaseURL 时短路，不发 HTTP。
-func TestListModelsForShortCircuit(t *testing.T) {
+// ListModelsFor 必须用【已保存的凭据】，不接受前端草稿。
+// 曾经的实现只在前端 provider 为空时才回落全局，
+// 结果用户在设置里配好 Key，会话里的模型按钮仍然报「需要配置」。
+func TestListModelsForUsesSavedCredentials(t *testing.T) {
 	tests := []struct {
 		name      string
-		agentID   string
-		cfg       LLMConfig
 		globalCfg llm.Config
+		provider  string
 		want      []string
 		wantErr   error
+		wantInErr string
 	}{
 		{
-			name:      "TC-011 explicit mock provider",
-			agentID:   "a1",
-			cfg:       LLMConfig{Provider: "mock"},
-			globalCfg: llm.Config{Provider: "openai", BaseURL: "http://127.0.0.1:1"},
+			name:      "mock 不需要凭据",
+			globalCfg: llm.Config{Provider: "mock"},
 			want:      []string{"mock"},
 		},
 		{
-			name:      "TC-011 empty provider falls back to global mock",
-			agentID:   "a1",
-			cfg:       LLMConfig{},
-			globalCfg: llm.Config{Provider: "mock", Model: "global-m"},
+			name:      "空 provider 走全局 mock",
+			globalCfg: llm.Config{Provider: "mock"},
 			want:      []string{"mock"},
 		},
 		{
-			name:      "TC-013 openai without baseURL",
-			agentID:   "a1",
-			cfg:       LLMConfig{Provider: "openai", Model: "gpt-x"},
-			globalCfg: llm.Config{Provider: "mock"},
+			name:      "provider 已配好但缺 BaseURL",
+			globalCfg: llm.Config{Provider: "openai", APIKey: "sk-x"},
 			wantErr:   llm.ErrNotConfigured,
+			wantInErr: "Base URL",
 		},
 		{
-			name:      "TC-013 ollama without baseURL",
-			agentID:   "a1",
-			cfg:       LLMConfig{Provider: "ollama"},
-			globalCfg: llm.Config{Provider: "mock"},
+			name:      "provider 已配好但缺 APIKey",
+			globalCfg: llm.Config{Provider: "deepseek", BaseURL: "https://api.deepseek.com"},
 			wantErr:   llm.ErrNotConfigured,
+			wantInErr: "API Key",
+		},
+		{
+			name:      "ollama 不需要 Key",
+			globalCfg: llm.Config{Provider: "mock"},
+			provider:  "ollama",
+			wantErr:   llm.ErrNotConfigured, // 未配置 BaseURL 时仍要求填，但原因不是 Key
+			wantInErr: "Base URL",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := agent.NewManager(tc.globalCfg, func(string, any) {})
-			mgr.Create(tc.agentID, "A1", "r")
+			mgr.Create("a1", "A1", "r")
 			s := &API{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
 
-			models, err := s.ListModelsFor(tc.agentID, tc.cfg)
+			models, err := s.ListModelsFor(context.Background(), "a1", tc.provider)
 			if tc.wantErr != nil {
 				if err == nil {
-					t.Fatalf("ListModelsFor(%q, %+v) = (%v, nil), want error %v", tc.agentID, tc.cfg, models, tc.wantErr)
+					t.Fatalf("期望错误 %v，实际得到 %v", tc.wantErr, models)
 				}
-				if err != tc.wantErr {
-					t.Errorf("ListModelsFor(%q, %+v): error = %v, want sentinel %v", tc.agentID, tc.cfg, err, tc.wantErr)
+				if !errors.Is(err, tc.wantErr) {
+					t.Errorf("错误 = %v, want 包含 %v", err, tc.wantErr)
+				}
+				if tc.wantInErr != "" && !strings.Contains(err.Error(), tc.wantInErr) {
+					t.Errorf("错误信息 %q 应当包含 %q，让用户知道该填什么", err, tc.wantInErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ListModelsFor(%q, %+v): %v", tc.agentID, tc.cfg, err)
+				t.Fatalf("ListModelsFor: %v", err)
 			}
 			if len(models) != len(tc.want) {
-				t.Fatalf("ListModelsFor(%q, %+v) = %v, want %v", tc.agentID, tc.cfg, models, tc.want)
-			}
-			for i := range tc.want {
-				if models[i] != tc.want[i] {
-					t.Errorf("ListModelsFor(%q, %+v) = %v, want %v", tc.agentID, tc.cfg, models, tc.want)
-				}
+				t.Fatalf("models = %v, want %v", models, tc.want)
 			}
 		})
+	}
+}
+
+// ProvidersStatus 要如实反映「配好了没有」。
+func TestProvidersStatus(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{
+		Provider: "deepseek",
+		BaseURL:  "https://api.deepseek.com",
+		APIKey:   "sk-x",
+		Model:    "deepseek-chat",
+	}, func(string, any) {})
+	s := &API{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
+
+	byID := map[string]ProviderStatus{}
+	for _, st := range s.ProvidersStatus() {
+		byID[st.ID] = st
+	}
+
+	if !byID["mock"].Ready {
+		t.Error("mock 应当始终可用")
+	}
+	if !byID["ollama"].Ready {
+		t.Error("ollama 是本地服务，不需要 Key，应当可用")
+	}
+	ds := byID["deepseek"]
+	if !ds.Ready || !ds.HasKey || ds.Model != "deepseek-chat" {
+		t.Errorf("deepseek 已配齐，状态 = %+v", ds)
+	}
+	oa := byID["openai"]
+	if oa.Ready {
+		t.Errorf("openai 没配，不该是 ready: %+v", oa)
+	}
+	if !strings.Contains(oa.Reason, "Base URL") {
+		t.Errorf("openai 的未就绪原因 = %q, 应当提示缺 Base URL", oa.Reason)
 	}
 }
 

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Message 是对话历史里的一条。
@@ -36,6 +37,18 @@ type Config struct {
 }
 
 var ErrNotConfigured = errors.New("llm: provider not configured")
+
+// ErrMissingAPIKey 表示选了需要鉴权的 provider 却没有填 Key。
+// 单独一个错误值，前端可以据此给出「先填 Key」的明确提示，
+// 而不是让用户对着一个卡住的请求猜。
+var ErrMissingAPIKey = errors.New("llm: API Key 未填写")
+
+// StreamTimeout 是一次对话请求的硬上限。
+//
+// 必须存在：外部 provider 卡住（网络黑洞、错误配置、限流挂起）时，
+// http.Client 的默认行为是永不返回，worker goroutine 会永久阻塞，
+// 队列里所有消息就一直停在「排队中」——用户完全没法自救。
+const StreamTimeout = 120 * time.Second
 
 // New 按配置造 client。provider 为空时回落到 mock，保证永远可用。
 func New(cfg Config) Client {

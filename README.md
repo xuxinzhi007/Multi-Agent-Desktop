@@ -182,6 +182,11 @@ MAD_WORK_DIR=/path/to/project
 
 ## 设计系统
 
+> 完整的界面规范见 **[docs/skills/ui-design.md](docs/skills/ui-design.md)** ——
+> token 命名、亮色/暗色陷阱、动效、空状态、无障碍，以及本项目踩过的具体坑。
+> 改 `.tsx` / `.css` 前建议先读它。
+
+
 `src/index.css` 定义约 120 个 token，`src/styles/components.css` 提供 `c-*` 组件类。
 组件内**禁止硬编码色值**，一律走变量。
 

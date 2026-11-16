@@ -52,7 +52,8 @@ test('创建表单：角色预设应当可以一键选，而不是只能靠下�
   const dialog = page.getByRole('dialog')
 
   // 角色预设若以按钮/卡片形式呈现，用户一眼可选
-  const presetButtons = dialog.locator('button').filter({ hasText: /^(前端|后端|测试|架构|Reviewer)$/ })
+  // 角色卡片带图标与一句话描述，用 role 组定位
+  const presetButtons = dialog.getByRole('group', { name: '角色' }).getByRole('button')
   const n = await presetButtons.count()
   expect(n, '角色只能通过下拉选择，无法一键点选常用预设').toBeGreaterThan(0)
 })

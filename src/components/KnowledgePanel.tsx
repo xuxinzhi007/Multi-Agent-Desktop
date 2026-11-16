@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { AgentView as Agent, Note } from '../mygo'
+import Select from './Select'
 
 type Props = {
   notes: Note[]
@@ -366,33 +367,16 @@ function NoteCard({
         )}
 
         {onAttach && agents.length > users.length && (
-          <select
-            value=""
-            onChange={(e) => {
-              if (e.target.value) onAttach(note.id, e.target.value)
-              e.currentTarget.value = ''
-            }}
-            title="让某个 agent 引用这条笔记"
-            style={{
-              marginLeft: 'auto',
-              fontSize: 10,
-              padding: '1px 4px',
-              borderRadius: 'var(--radius-sm)',
-              border: '1px solid var(--border-subtle)',
-              background: 'transparent',
-              color: 'var(--text-tertiary)',
-              cursor: 'pointer',
-            }}
-          >
-            <option value="">+ 引用</option>
-            {agents
-              .filter((a) => !users.some((u) => u.id === a.id))
-              .map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-          </select>
+          <div style={{ marginLeft: 'auto', width: 96 }}>
+            <Select
+              value=""
+              placeholder="+ 引用"
+              options={agents
+                .filter((a) => !users.some((u) => u.id === a.id))
+                .map((a) => ({ value: a.id, label: a.name }))}
+              onChange={(id) => id && onAttach(note.id, id)}
+            />
+          </div>
         )}
       </div>
     </div>

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
@@ -498,8 +499,10 @@ func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
 }
 
 // ListModels 返回指定配置下可用的模型列表。
-func (s *API) ListModels(cfg LLMConfig) ([]string, error) {
-	return llm.ListModels(context.Background(), cfg)
+func (s *API) ListModels(ctx context.Context, cfg LLMConfig) ([]string, error) {
+	// 设置面板用的是「正在编辑的草稿」，所以这里接受传入配置。
+	// 但缺 Key / BaseURL 时同样快速失败，不要发无意义请求。
+	return s.listModelsWithSavedCreds(ctx, cfg)
 }
 
 // GetWorkDir 返回工作目录。
@@ -561,19 +564,78 @@ func (s *API) GetAgentConfig(agentId string) LLMConfig {
 	return s.mgr.LLMConfigFor(agentId)
 }
 
-// ListModelsFor 用会话级配置拉取可用模型列表。
-// mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
-func (s *API) ListModelsFor(agentId string, cfg LLMConfig) ([]string, error) {
-	if cfg.Provider == "" {
-		cfg = s.mgr.LLMConfigFor(agentId)
+// ListModelsFor 拉取某个会话可用的模型列表。
+//
+// 关键约束：凭据（BaseURL / APIKey）一律取自【已保存的配置】，
+// 不接受前端传进来的草稿。用户在设置里配好 Key 之后，
+// 会话里的模型按钮就该直接列出可用模型 —— 而不是再让人填一遍。
+//
+// provider 参数只用于「想先看看别的 provider 有哪些模型」这种预览场景；
+// 留空则用该会话实际生效的 provider。
+func (s *API) ListModelsFor(ctx context.Context, agentId, provider string) ([]string, error) {
+	cfg := s.mgr.LLMConfigFor(agentId)
+	if provider != "" {
+		cfg.Provider = provider
 	}
-	if cfg.Provider == "" || cfg.Provider == "mock" {
+	return s.listModelsWithSavedCreds(ctx, cfg)
+}
+
+// listModelsWithSavedCreds 用已保存的凭据调 /models。
+// 凭据缺失时就地短路并给出可操作的错误，不发无意义请求。
+func (s *API) listModelsWithSavedCreds(ctx context.Context, cfg llm.Config) ([]string, error) {
+	switch {
+	case cfg.Provider == "" || cfg.Provider == "mock":
 		return []string{"mock"}, nil
+	case cfg.BaseURL == "":
+		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 Base URL", llm.ErrNotConfigured, cfg.Provider)
+	case cfg.APIKey == "" && cfg.Provider != "ollama":
+		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 API Key", llm.ErrNotConfigured, cfg.Provider)
 	}
-	if cfg.BaseURL == "" {
-		return nil, llm.ErrNotConfigured
+	return llm.ListModels(ctx, cfg)
+}
+
+// ProviderStatus 描述一个 provider 在当前设置下是否可用。
+// 前端据此把「没配好的 provider」标出来，而不是等用户点了才报错。
+type ProviderStatus struct {
+	ID       string `json:"id"`
+	Ready    bool   `json:"ready"`
+	Reason   string `json:"reason,omitempty"`
+	Model    string `json:"model,omitempty"`
+	BaseURL  string `json:"baseUrl,omitempty"`
+	HasKey   bool   `json:"hasKey"`
+	IsGlobal bool   `json:"isGlobal"`
+}
+
+// ProvidersStatus 返回各 provider 的就绪状态。
+func (s *API) ProvidersStatus() []ProviderStatus {
+	base := s.mgr.LLMConfig()
+	out := []ProviderStatus{
+		{ID: "mock", Ready: true, Reason: "内置示例模型"},
+		{
+			ID:      "ollama",
+			Ready:   true,
+			BaseURL: cmp.Or(base.BaseURL, "http://127.0.0.1:11434"),
+			Reason:  "本地服务，不需要 Key",
+		},
 	}
-	return llm.ListModels(context.Background(), cfg)
+	cloud := []string{"openai", "deepseek", "claude"}
+	for _, id := range cloud {
+		st := ProviderStatus{ID: id}
+		if base.Provider == id {
+			st.Model = base.Model
+			st.BaseURL = base.BaseURL
+			st.HasKey = base.APIKey != ""
+		}
+		st.Ready = st.BaseURL != "" && st.HasKey
+		switch {
+		case st.BaseURL == "":
+			st.Reason = "未配置 Base URL"
+		case !st.HasKey:
+			st.Reason = "未配置 API Key"
+		}
+		out = append(out, st)
+	}
+	return out
 }
 
 // SystemInfo 描述运行环境。

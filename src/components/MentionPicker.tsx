@@ -45,18 +45,16 @@ export default function MentionPicker({
     <div
       className="fade-up"
       style={{
-        position: 'absolute',
-        bottom: '100%',
-        left: 13,
-        right: 13,
-        marginBottom: 4,
-        background: 'var(--bg-elevated)',
-        border: '1px solid var(--border-default)',
+        /* 不用 absolute 浮层：让它长在输入框内部，紧贴文本区下方。
+           悬浮在框外会遮住上一条消息，也让「我在输入框里 @ 人」这件事
+           变成两个互相独立的空间。 */
+        position: 'relative',
+        margin: '0 8px 4px',
+        background: 'var(--bg-inset)',
+        border: '1px solid var(--border-subtle)',
         borderRadius: 'var(--radius-md)',
-        boxShadow: 'var(--shadow-lg)',
         maxHeight: 200,
         overflowY: 'auto',
-        zIndex: 50,
       }}
     >
       <Command shouldFilter={false} loop>

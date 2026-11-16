@@ -167,6 +167,7 @@ export default function App() {
               s.send('agent.llm', { id: activeAgent.id, cfg: patch.llm })
             }
           }}
+          globalProvider={s.llm.provider}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
           onQuickCreate={async (name, role) => {

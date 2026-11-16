@@ -1,9 +1,34 @@
 export const ROLE_PRESETS = [
-  { name: '前端', role: 'React / TypeScript 专家，关注组件拆分、状态管理与渲染性能' },
-  { name: '后端', role: 'Go 专家，关注 API 设计、并发安全与查询效率' },
-  { name: '测试', role: 'QA 专家，关注边界条件、异常路径与可复现的验证步骤' },
-  { name: '架构', role: '系统架构师，关注模块边界、依赖方向与长期演进成本' },
-  { name: 'Reviewer', role: '代码审查者，指出风险、代码异味与不符合规范的地方' },
+  {
+    name: '前端',
+    emoji: '🧩',
+    blurb: '组件拆分 · 状态管理 · 渲染性能',
+    role: 'React / TypeScript 专家，关注组件拆分、状态管理与渲染性能',
+  },
+  {
+    name: '后端',
+    emoji: '⚙️',
+    blurb: 'API 设计 · 并发安全 · 查询效率',
+    role: 'Go 专家，关注 API 设计、并发安全与查询效率',
+  },
+  {
+    name: '测试',
+    emoji: '🧪',
+    blurb: '边界条件 · 异常路径 · 复现步骤',
+    role: 'QA 专家，关注边界条件、异常路径与可复现的验证步骤',
+  },
+  {
+    name: '架构',
+    emoji: '🏛️',
+    blurb: '模块边界 · 依赖方向 · 演进成本',
+    role: '系统架构师，关注模块边界、依赖方向与长期演进成本',
+  },
+  {
+    name: 'Reviewer',
+    emoji: '🔍',
+    blurb: '风险 · 代码异味 · 规范符合度',
+    role: '代码审查者，指出风险、代码异味与不符合规范的地方',
+  },
 ]
 
 export const PROVIDERS = [

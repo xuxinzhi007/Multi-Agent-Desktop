@@ -141,6 +141,20 @@ export interface PromptRequest {
   channelId?: string;
 }
 
+/**
+ * ProviderStatus 描述一个 provider 在当前设置下是否可用。
+ * 前端据此把「没配好的 provider」标出来，而不是等用户点了才报错。
+ */
+export interface ProviderStatus {
+  id: string;
+  ready: boolean;
+  reason?: string;
+  model?: string;
+  baseUrl?: string;
+  hasKey: boolean;
+  isGlobal: boolean;
+}
+
 export interface Query {
   Scope: string;
   Tags: string[];
@@ -287,11 +301,17 @@ export const API = {
     return call("API.ListModels", cfg);
   },
   /**
-   * ListModelsFor 用会话级配置拉取可用模型列表。
-   * mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
+   * ListModelsFor 拉取某个会话可用的模型列表。
+   *
+   * 关键约束：凭据（BaseURL / APIKey）一律取自【已保存的配置】，
+   * 不接受前端传进来的草稿。用户在设置里配好 Key 之后，
+   * 会话里的模型按钮就该直接列出可用模型 —— 而不是再让人填一遍。
+   *
+   * provider 参数只用于「想先看看别的 provider 有哪些模型」这种预览场景；
+   * 留空则用该会话实际生效的 provider。
    */
-  listModelsFor(agentId: string, cfg: Config): Promise<string[]> {
-    return call("API.ListModelsFor", agentId, cfg);
+  listModelsFor(agentId: string, provider: string): Promise<string[]> {
+    return call("API.ListModelsFor", agentId, provider);
   },
   /** ListNotesByTag 按标签列出笔记。 */
   listNotesByTag(tag: string): Promise<Note[]> {
@@ -308,6 +328,10 @@ export const API = {
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
     return call("API.PromptAgent", req);
+  },
+  /** ProvidersStatus 返回各 provider 的就绪状态。 */
+  providersStatus(): Promise<ProviderStatus[]> {
+    return call("API.ProvidersStatus");
   },
   /** QueryNotes 按 scope / tags / 文本查询笔记。 */
   queryNotes(q: Query): Promise<Note[]> {

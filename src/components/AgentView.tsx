@@ -6,9 +6,10 @@ import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
 import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
-import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
+import { PROVIDERS } from '../lib/presets'
 import type { ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
+import DropZone from './DropZone'
 
 type Props = {
   agent: Agent | null
@@ -33,6 +34,8 @@ type Props = {
   onQuickCreate?: (presetName: string, role: string) => void
   /** 空状态下打开「新建 Agent」弹窗 */
   onCreateRequest?: () => void
+  /** 全局配置的 provider，会话级未设置时用它 */
+  globalProvider?: string
 }
 
 // 空状态的一键角色。只保留 3 个 —— 选择过多反而增加决策成本。
@@ -381,10 +384,10 @@ export default function AgentView(p: Props) {
             border: '1px solid var(--border-default)',
             borderRadius: 'var(--radius-lg)',
             overflow: 'visible',
+            /* 聚焦时不做整框高亮：光标已经在输入框里，用户不需要额外确认。
+               刻意只留一个很轻的边框变化，避免「点一下就变蓝框」的噪音。 */
             transition: 'border-color var(--dur-fast) var(--ease)',
           }}
-          onFocusCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-focus)')}
-          onBlurCapture={(e) => (e.currentTarget.style.borderColor = 'var(--border-default)')}
         >
           <TextareaAutosize
             ref={taRef}
@@ -446,6 +449,7 @@ export default function AgentView(p: Props) {
               <SessionConfigChips
                 agent={p.agent}
                 fallbackWorkDir={p.workDir}
+                globalProvider={p.globalProvider}
                 onConfig={p.onConfig}
                 direction="up"
               />
@@ -498,9 +502,9 @@ export default function AgentView(p: Props) {
               sideOffset={2}
               collisionPadding={8}
               onOpenAutoFocus={(e) => e.preventDefault()}
-              className="fade-up"
+              className="c-ctx-menu"
               style={{
-                minWidth: 184,
+                minWidth: 196,
                 background: 'var(--bg-elevated)',
                 border: '1px solid var(--border-default)',
                 borderRadius: 'var(--radius-md)',
@@ -509,10 +513,16 @@ export default function AgentView(p: Props) {
                 zIndex: 1000,
               }}
             >
-              <MenuItem onSelect={() => copyMessage(contextMenu.msg)}>📋 复制</MenuItem>
+              <MenuItem onSelect={() => copyMessage(contextMenu.msg)} icon="📋" shortcut="⌘C">
+                复制
+              </MenuItem>
               {contextMenu.msg.role === 'assistant' && (
-                <MenuItem onSelect={() => regenerateMessage(contextMenu.msg)}>
-                  🔄 重新生成
+                <MenuItem
+                  onSelect={() => regenerateMessage(contextMenu.msg)}
+                  icon="🔄"
+                  shortcut="⌘R"
+                >
+                  重新生成
                 </MenuItem>
               )}
               {p.agents && p.agents.length > 1 && (
@@ -555,34 +565,28 @@ export default function AgentView(p: Props) {
 function SessionConfigChips({
   agent,
   fallbackWorkDir,
+  globalProvider,
   onConfig,
   direction = 'down',
 }: {
   agent: Agent
   fallbackWorkDir: string
+  /** 全局配置的 provider，用于在弹层里提示「跟随全局」的实际去向 */
+  globalProvider?: string
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
   /** 弹层方向。放在输入框底栏时用 'up'，否则会被输入区挡住。 */
   direction?: 'down' | 'up'
 }) {
   const [open, setOpen] = useState<'none' | 'dir' | 'model'>('none')
   const [dirDraft, setDirDraft] = useState('')
-  const [cfgDraft, setCfgDraft] = useState<Config>(
-    agent.llm ?? { provider: 'mock', baseUrl: '', apiKey: '', model: '' },
-  )
-  const [models, setModels] = useState<string[]>([])
-  const [loadingModels, setLoadingModels] = useState(false)
-  const [modelHint, setModelHint] = useState('')
 
   const effectiveDir = agent.workDir || fallbackWorkDir
   const effectiveProvider = agent.llm?.provider || 'mock'
   const effectiveModel = agent.llm?.model || ''
 
-  // 切换会话时重置草稿，避免把上个会话的配置带过去
+  // 切换会话时收起弹层
   useEffect(() => {
     setOpen('none')
-    setCfgDraft(agent.llm ?? { provider: 'mock', baseUrl: '', apiKey: '', model: '' })
-    setModels([])
-    setModelHint('')
   }, [agent.id, agent.llm])
 
   // Esc 关闭弹层：之前只有点击遮罩能关，键盘用户被卡住
@@ -594,21 +598,6 @@ function SessionConfigChips({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
-
-  const loadModels = async () => {
-    setLoadingModels(true)
-    setModelHint('')
-    try {
-      const list = await API.listModelsFor(agent.id, cfgDraft)
-      setModels(list)
-      if (list.length === 0) setModelHint('未获取到模型列表')
-    } catch (e) {
-      // 内联提示，不弹 toast：ListModels 失败是常见的未配置态
-      setModelHint(e instanceof Error ? e.message : '加载失败')
-    } finally {
-      setLoadingModels(false)
-    }
-  }
 
   return (
     <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -663,14 +652,25 @@ function SessionConfigChips({
             {open === 'dir' ? (
               <>
                 <div style={popoverLabel}>本会话工作目录</div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    value={dirDraft}
-                    onChange={(e) => setDirDraft(e.target.value)}
-                    placeholder="/path/to/project"
+
+                {/* 已有「浏览」和「拖入」两种方式，再让人手敲绝对路径是多余的。
+                    路径本身只展示，不出现在可编辑输入框里。 */}
+                <DropZone
+                  onPath={(p) => setDirDraft(p)}
+                  style={{ padding: '10px 12px', marginBottom: 6, textAlign: 'center' }}
+                >
+                  <div
                     className="mono"
-                    style={inputStyle}
-                  />
+                    style={{
+                      fontSize: 'var(--text-xs)',
+                      color: dirDraft ? 'var(--text-secondary)' : 'var(--text-disabled)',
+                      wordBreak: 'break-all',
+                      lineHeight: 1.6,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {dirDraft || '把项目文件夹拖到这里'}
+                  </div>
                   <button
                     className="c-btn c-btn--secondary c-btn--sm"
                     onClick={async () => {
@@ -680,12 +680,14 @@ function SessionConfigChips({
                   >
                     浏览…
                   </button>
-                </div>
+                </DropZone>
+
                 <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
                   <button
                     className="c-btn c-btn--primary c-btn--sm"
                     style={{ flex: 1 }}
+                    disabled={!dirDraft}
                     onClick={() => {
                       onConfig({ workDir: dirDraft })
                       setOpen('none')
@@ -706,119 +708,218 @@ function SessionConfigChips({
                 </div>
               </>
             ) : (
-              <>
-                <div style={popoverLabel}>本会话模型</div>
-                <div style={{ display: 'grid', gap: 3, marginBottom: 8 }}>
-                  {PROVIDERS.map((x) => {
-                    const on = cfgDraft.provider === x.id
-                    return (
-                      <button
-                        key={x.id}
-                        onClick={() => {
-                          setCfgDraft({
-                            provider: x.id,
-                            baseUrl: DEFAULT_BASE[x.id] ?? '',
-                            apiKey: x.id === cfgDraft.provider ? cfgDraft.apiKey : '',
-                            model: DEFAULT_MODEL[x.id] ?? '',
-                          })
-                          setModels([])
-                          setModelHint('')
-                        }}
-                        style={{
-                          textAlign: 'left',
-                          padding: '6px 9px',
-                          borderRadius: 'var(--radius-sm)',
-                          border: `1px solid ${on ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
-                          background: on ? 'var(--accent-dim)' : 'var(--bg-surface)',
-                          color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
-                          fontSize: 'var(--text-xs)',
-                        }}
-                      >
-                        {x.label}
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {cfgDraft.provider !== 'mock' && (
-                  <>
-                    <input
-                      value={cfgDraft.baseUrl}
-                      onChange={(e) => setCfgDraft({ ...cfgDraft, baseUrl: e.target.value })}
-                      placeholder={DEFAULT_BASE[cfgDraft.provider] ?? 'Base URL'}
-                      className="mono"
-                      style={{ ...inputStyle, marginBottom: 6 }}
-                    />
-                    <input
-                      type="password"
-                      value={cfgDraft.apiKey}
-                      onChange={(e) => setCfgDraft({ ...cfgDraft, apiKey: e.target.value })}
-                      placeholder="API Key（可留空）"
-                      className="mono"
-                      style={{ ...inputStyle, marginBottom: 6 }}
-                    />
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <input
-                        value={cfgDraft.model}
-                        onChange={(e) => setCfgDraft({ ...cfgDraft, model: e.target.value })}
-                        placeholder={DEFAULT_MODEL[cfgDraft.provider] ?? '模型名'}
-                        className="mono"
-                        style={inputStyle}
-                      />
-                      <button
-                        className="c-btn c-btn--secondary c-btn--sm"
-                        onClick={loadModels}
-                        disabled={loadingModels}
-                      >
-                        {loadingModels ? '…' : '列表'}
-                      </button>
-                    </div>
-                    {models.length > 0 && (
-                      <select
-                        value={cfgDraft.model}
-                        onChange={(e) => setCfgDraft({ ...cfgDraft, model: e.target.value })}
-                        style={{ ...inputStyle, marginTop: 6 }}
-                      >
-                        <option value="">选择模型…</option>
-                        {models.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {modelHint && <div style={hintStyle}>{modelHint}</div>}
-                  </>
-                )}
-
-                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                  <button
-                    className="c-btn c-btn--primary c-btn--sm"
-                    style={{ flex: 1 }}
-                    onClick={() => {
-                      onConfig({ llm: cfgDraft })
-                      setOpen('none')
-                    }}
-                  >
-                    应用
-                  </button>
-                  <button
-                    className="c-btn c-btn--ghost c-btn--sm"
-                    onClick={() => {
-                      onConfig({ llm: { provider: 'mock', baseUrl: '', apiKey: '', model: '' } })
-                      setOpen('none')
-                    }}
-                    title="回落到全局默认模型"
-                  >
-                    跟随全局
-                  </button>
-                </div>
-              </>
+              <ModelPicker
+                agentId={agent.id}
+                current={agent.llm}
+                globalProvider={globalProvider}
+                onApply={(cfg) => {
+                  onConfig({ llm: cfg })
+                  setOpen('none')
+                }}
+                onFollowGlobal={() => {
+                  onConfig({ llm: { provider: 'mock', baseUrl: '', apiKey: '', model: '' } })
+                  setOpen('none')
+                }}
+                onClose={() => setOpen('none')}
+              />
             )}
           </div>
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * ModelPicker —— 会话级模型选择。
+ *
+ * 设计原则：凭据只在「设置」里配一次，会话里只选模型。
+ * 之前的实现让用户在会话弹层里重新填 Base URL 和 API Key，
+ * 还把草稿传给后端拉列表 —— 结果设置里配好的 Key 完全用不上，
+ * 用户被要求「再配置一遍」。
+ *
+ * 现在的行为：
+ *   - 打开即用已保存的凭据自动拉取模型列表，不需要额外点击
+ *   - provider 没配好时明确告诉他缺什么（Base URL / API Key），
+ *     并给一个直接去设置的入口，而不是让他在这里填
+ *   - 只列当前 provider 的模型，选中即生效
+ */
+function ModelPicker({
+  agentId,
+  current,
+  globalProvider,
+  onApply,
+  onFollowGlobal,
+  onClose,
+}: {
+  agentId: string
+  current?: Config | null
+  globalProvider?: string
+  onApply: (cfg: Config) => void
+  onFollowGlobal: () => void
+  onClose: () => void
+}) {
+  // 会话级未设置时，实际生效的是全局 provider
+  const effectiveProvider = current?.provider || globalProvider || 'mock'
+  const [provider, setProvider] = useState(effectiveProvider)
+  const [models, setModels] = useState<string[]>([])
+  const [model, setModel] = useState(current?.model ?? '')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  // 切换 provider 就自动拉列表——用户不该为了「看到有哪些模型」多点击一次
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError('')
+    setModels([])
+    API.listModelsFor(agentId, provider)
+      .then((list) => {
+        if (!alive) return
+        setModels(list ?? [])
+        // 没选过模型时自动选第一个，省掉一次操作
+        setModel((m) => m || (list?.[0] ?? ''))
+      })
+      .catch((e) => {
+        if (!alive) return
+        setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => alive && setLoading(false))
+    return () => {
+      alive = false
+    }
+  }, [agentId, provider])
+
+  const apply = () => {
+    onApply({
+      provider,
+      baseUrl: current?.baseUrl ?? '',
+      apiKey: current?.apiKey ?? '',
+      model,
+    })
+  }
+
+  return (
+    <>
+      <div style={popoverLabel}>本会话模型</div>
+
+      {/* provider 选择：只用文字按钮，凭据在设置里管 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+        {PROVIDERS.map((x) => {
+          const on = provider === x.id
+          return (
+            <button
+              key={x.id}
+              type="button"
+              onClick={() => {
+                setProvider(x.id)
+                setModel('')
+              }}
+              style={{
+                padding: '3px 9px',
+                borderRadius: 'var(--radius-full)',
+                border: `1px solid ${on ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+                background: on ? 'var(--accent-dim)' : 'var(--bg-surface)',
+                color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
+                fontSize: 'var(--text-xs)',
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}
+            >
+              {x.label.replace('（内置）', '')}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* 模型列表：自动加载，直接点选 */}
+      {loading && <div style={hintStyle}>正在加载 {provider} 的模型列表…</div>}
+
+      {!loading && error && (
+        <div
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--warning)',
+            background: 'var(--warning-dim)',
+            border: '1px solid var(--warning-border)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '6px 8px',
+            lineHeight: 1.6,
+            marginBottom: 8,
+          }}
+        >
+          {error}
+          <div style={{ marginTop: 4, color: 'var(--text-tertiary)' }}>
+            凭据在右上角 ⚙ 设置里统一配置，配好后这里会自动列出模型。
+          </div>
+        </div>
+      )}
+
+      {!loading && !error && models.length > 0 && (
+        <div
+          style={{
+            maxHeight: 190,
+            overflowY: 'auto',
+            display: 'grid',
+            gap: 2,
+            marginBottom: 8,
+          }}
+        >
+          {models.map((m) => {
+            const on = m === model
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setModel(m)}
+                className="mono"
+                style={{
+                  textAlign: 'left',
+                  padding: '5px 9px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: `1px solid ${on ? 'var(--accent-border)' : 'transparent'}`,
+                  background: on ? 'var(--accent-dim)' : 'transparent',
+                  color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
+                  fontSize: 'var(--text-xs)',
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => {
+                  if (!on) e.currentTarget.style.background = 'var(--bg-surface-hover)'
+                }}
+                onMouseLeave={(e) => {
+                  if (!on) e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                {on ? '✓ ' : ''}
+                {m}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {!loading && !error && models.length === 0 && (
+        <div style={hintStyle}>这个 provider 没有返回可用模型</div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+        <button
+          className="c-btn c-btn--primary c-btn--sm"
+          style={{ flex: 1 }}
+          onClick={apply}
+          disabled={!model}
+        >
+          应用
+        </button>
+        <button className="c-btn c-btn--ghost c-btn--sm" onClick={onFollowGlobal} title="清掉会话级设置，跟随全局">
+          跟随全局{globalProvider ? `（${globalProvider}）` : ''}
+        </button>
+        <button className="c-btn c-btn--ghost c-btn--sm" onClick={onClose}>
+          取消
+        </button>
+      </div>
+    </>
   )
 }
 
@@ -844,17 +945,6 @@ const popoverLabel: React.CSSProperties = {
   color: 'var(--text-tertiary)',
   marginBottom: 6,
   fontWeight: 500,
-}
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '6px 9px',
-  borderRadius: 'var(--radius-sm)',
-  border: '1px solid var(--border-default)',
-  background: 'var(--bg-surface)',
-  color: 'var(--text-primary)',
-  fontSize: 'var(--text-xs)',
-  minWidth: 0,
 }
 
 const hintStyle: React.CSSProperties = {
@@ -1173,52 +1263,34 @@ function formatTokens(n: number): string {
   return `${n}`
 }
 /** 右键菜单项：统一 hover / 焦点样式。 */
-function MenuItem({ onSelect, children }: { onSelect: () => void; children: React.ReactNode }) {
+function MenuItem({
+  onSelect,
+  icon,
+  shortcut,
+  children,
+}: {
+  onSelect: () => void
+  icon?: React.ReactNode
+  shortcut?: string
+  children: React.ReactNode
+}) {
   return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={onSelect}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '8px 10px',
-        fontSize: 'var(--text-sm)',
-        color: 'var(--text-primary)',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-        outline: 'none',
-        userSelect: 'none',
-        border: 'none',
-        background: 'transparent',
-        width: '100%',
-        fontFamily: 'inherit',
-        textAlign: 'left',
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-      onFocus={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
-      onBlur={(e) => (e.currentTarget.style.background = 'transparent')}
-    >
-      {children}
+    <button type="button" role="menuitem" className="c-ctx-item" onClick={onSelect}>
+      {icon && (
+        <span aria-hidden className="c-ctx-item__icon">
+          {icon}
+        </span>
+      )}
+      <span style={{ flex: 1, minWidth: 0 }}>{children}</span>
+      {shortcut && <span className="c-ctx-item__key">{shortcut}</span>}
     </button>
   )
 }
 
 function MenuSeparator() {
-  return <div style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />
+  return <div className="c-ctx-sep" />
 }
 
 function MenuLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        padding: '4px 10px',
-        fontSize: 'var(--text-xs)',
-        color: 'var(--text-disabled)',
-      }}
-    >
-      {children}
-    </div>
-  )
+  return <div className="c-ctx-label">{children}</div>
 }

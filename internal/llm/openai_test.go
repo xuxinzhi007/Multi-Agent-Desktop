@@ -151,3 +151,54 @@ func TestErrNotConfiguredIsSentinel(t *testing.T) {
 		t.Errorf("ErrNotConfigured.Error() = %q, want llm: prefix", err.Error())
 	}
 }
+
+// 无响应的上游必须超时返回错误，而不是让调用方永久阻塞。
+// 曾经 httpClient 用 Timeout:0，配上空 API Key 的 provider，
+// worker 会卡死在 Do()，队列里所有消息永远显示「排队中」。
+func TestStreamTimesOutOnHangingUpstream(t *testing.T) {
+	// 服务器接受连接但永不响应
+	blocker := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blocker
+	}))
+	defer func() {
+		close(blocker)
+		srv.Close()
+	}()
+
+	c := New(Config{Provider: "openai", BaseURL: srv.URL, Model: "m", APIKey: "k"})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("挂起的上游应当返回错误，而不是成功")
+		}
+	case <-time.After(StreamTimeout + 3*time.Second):
+		t.Fatalf("Stream 在 %v 后仍未返回，调用方会永久阻塞", StreamTimeout+3*time.Second)
+	}
+}
+
+// 缺少 API Key 时应当快速失败，而不是把请求发出去等超时。
+func TestStreamRejectsMissingAPIKey(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := New(Config{Provider: "deepseek", BaseURL: srv.URL, Model: "m", APIKey: ""})
+	_, err := c.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err == nil {
+		t.Fatal("缺少 API Key 时应当返回错误")
+	}
+	if called {
+		t.Error("缺少 API Key 时不应该发出请求")
+	}
+}

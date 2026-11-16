@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
+import Select from './Select'
 import { API } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
 
@@ -161,25 +162,14 @@ export default function SettingsModal(p: Props) {
                 </button>
               </div>
               {models.length > 0 && (
-                <select
-                  value={cfg.model}
-                  onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
-                  style={{
-                    width: '100%',
-                    marginTop: 6,
-                    padding: '6px 8px',
-                    borderRadius: 'var(--radius-sm)',
-                    border: '1px solid var(--border-default)',
-                    background: 'var(--bg-surface)',
-                    color: 'var(--text-primary)',
-                    fontSize: 'var(--text-xs)',
-                  }}
-                >
-                  <option value="">选择模型…</option>
-                  {models.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
+                <div style={{ marginTop: 6 }}>
+                  <Select
+                    value={cfg.model}
+                    placeholder="选择模型…"
+                    options={models.map((m) => ({ value: m, label: m }))}
+                    onChange={(m) => setCfg({ ...cfg, model: m })}
+                  />
+                </div>
               )}
               {modelError && (
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--error)', marginTop: 4 }}>

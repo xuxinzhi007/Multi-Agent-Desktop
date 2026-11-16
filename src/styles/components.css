@@ -552,3 +552,211 @@
     transform: none;
   }
 }
+
+/* ==================== 新建 Agent ==================== */
+
+/* 角色卡片：带图标和一句话描述，比一排扁平文字更有「选队友」的感觉 */
+.c-role-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  min-width: 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+.c-role-card:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-surface-hover);
+  transform: translateX(1px);
+}
+.c-role-card--active {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.c-role-card__icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  flex-shrink: 0;
+}
+
+.c-backend-card {
+  padding: 8px 6px;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+.c-backend-card:hover {
+  border-color: var(--border-strong);
+}
+.c-backend-card--active {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+}
+
+/* 预览卡：给刚创建的 agent 一个「形象」 */
+.c-agent-preview {
+  position: relative;
+  width: 100%;
+  padding: 16px 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+}
+
+/* 头像背后的柔光，暗示「这个 agent 是活的」 */
+.c-agent-preview__halo {
+  position: absolute;
+  top: -18px;
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  filter: blur(26px);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.c-agent-preview__avatar {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--bg-base);
+  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+  animation: agent-pop 420ms var(--ease) both;
+}
+
+/* 轻微弹性入场，让「新成员出现」有被感知到 */
+@keyframes agent-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-agent-preview__avatar {
+    animation: none;
+  }
+  .c-role-card:hover {
+    transform: none;
+  }
+}
+
+/* ==================== 右键菜单 ==================== */
+
+/* 入场：从鼠标位置轻微放大展开，比单纯淡入更有「点开了」的手感 */
+.c-ctx-menu {
+  transform-origin: top left;
+  animation: ctx-in 130ms var(--ease) both;
+}
+
+@keyframes ctx-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.c-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur-fast) var(--ease);
+}
+.c-ctx-item:hover,
+.c-ctx-item:focus-visible {
+  background: var(--bg-surface-hover);
+  outline: none;
+}
+.c-ctx-item:active {
+  background: var(--bg-surface-active);
+}
+
+.c-ctx-item__icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.c-ctx-item__key {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-disabled);
+  flex-shrink: 0;
+}
+
+/* 分隔线和分组标题 */
+.c-ctx-sep {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 6px;
+}
+.c-ctx-label {
+  padding: 5px 9px 3px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-ctx-menu {
+    animation: none;
+  }
+}
