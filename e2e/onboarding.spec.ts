@@ -15,7 +15,7 @@ test.beforeEach(async ({ page }) => {
 
 test('首次启动：空状态必须提供可直接点击的下一步', async ({ page }) => {
   // 空状态文案存在
-  await expect(page.getByText('开始你的多 Agent 协作')).toBeVisible()
+  await expect(page.getByText('组建你的 agent 舰队')).toBeVisible()
 
   // 空状态区域内是否有可点击动作？这是首次使用的唯一出口
   const actionable = page

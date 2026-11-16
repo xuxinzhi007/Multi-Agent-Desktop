@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import AgentView from './components/AgentView'
 import ChannelView from './components/ChannelView'
+import FleetView from './components/FleetView'
 import Inspector, { type InspectorTab } from './components/Inspector'
 import KnowledgePanel from './components/KnowledgePanel'
-import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import ActivityFeed from './components/ActivityFeed'
 import ToastContainer from './components/Toast'
@@ -13,14 +13,16 @@ import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
 
 type ActiveRef = { kind: 'agent' | 'channel'; id: string } | null
+/** 主区域展示什么：舰队总览，还是单个 agent 的对话 */
+type MainView = 'fleet' | 'chat'
 
 export default function App() {
   const s = useBackend()
   useTheme() // 应用主题到 document.documentElement
   const [active, setActive] = useState<ActiveRef>(null)
+  const [view, setView] = useState<MainView>('fleet')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
-  const [shellOpen, setShellOpen] = useState(false)
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [tab, setTab] = useState<InspectorTab>('changes')
 
@@ -45,6 +47,7 @@ export default function App() {
     if (!id) return
     if (s.agents.some((a) => a.id === id)) {
       setActive({ kind: 'agent', id })
+      setView('chat')
     }
     s.clearFocus()
   }, [s.focusAgentId, s.agents, s.clearFocus])
@@ -82,7 +85,12 @@ export default function App() {
         connected={s.connected}
         version={s.version}
         provider={s.llm.provider}
-        onSelect={(kind, id) => setActive({ kind, id })}
+        onSelect={(kind, id) => {
+          setActive({ kind, id })
+          setView('chat')
+        }}
+        view={view}
+        onViewChange={setView}
         onCreate={createAgent}
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
@@ -91,7 +99,19 @@ export default function App() {
         onCreateOpenChange={setCreateOpen}
       />
 
-      {activeChannel ? (
+      {view === 'fleet' && !activeChannel ? (
+        <FleetView
+          agents={s.agents}
+          streaming={s.streaming}
+          onOpen={(id) => {
+            setActive({ kind: 'agent', id })
+            setView('chat')
+          }}
+          onStop={(id) => s.send('agent.stop', { id })}
+          onQuickCreate={(name, role) => createAgent(name, role, 'mock')}
+          onCreateRequest={() => setCreateOpen(true)}
+        />
+      ) : activeChannel ? (
         <ChannelView
           channel={activeChannel}
           agents={s.agents}
@@ -117,10 +137,10 @@ export default function App() {
           disableRoute  // 单聊模式：禁用 @ 路由
           onPrompt={(text) => activeAgent && s.send('agent.prompt', { agentId: activeAgent.id, text })}
           onStop={() => activeAgent && s.send('agent.stop', { id: activeAgent.id })}
-          onShell={(command) => {
-            setShellOpen(true)
+          onShell={(command) =>
             s.send('shell.run', { agentId: activeAgent?.id ?? '', command })
-          }}
+          }
+          shellLogs={activeAgent ? (s.shellByAgent[activeAgent.id] ?? []) : []}
           onRoute={(targetName, text) => {
             if (!activeAgent) return
             const target = s.agents.find((a) => a.name === targetName || a.id === targetName)
@@ -147,8 +167,6 @@ export default function App() {
         />
       )}
 
-      {shellOpen && <ShellPanel logs={s.shell} onClose={() => setShellOpen(false)} />}
-
       {inspectorOpen && (
         <Inspector
           tab={tab}
@@ -168,6 +186,7 @@ export default function App() {
                 onUpsert={(n) => s.send('note.upsert', n)}
                 onDelete={(id) => s.send('note.delete', { id })}
                 onAttach={(noteId, agentId) => s.send('note.attach', { noteId, agentId })}
+                onDetach={(noteId, agentId) => s.send('note.detach', { noteId, agentId })}
               />
             ),
           }}

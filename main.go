@@ -210,6 +210,11 @@ type AgentView struct {
 	Knowledge []string      `json:"knowledge,omitempty"`
 	// BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
+
+	// 以下为本轮运行时指标，监控台据此显示「跑了多久 / 产出多少 / 在用什么工具」。
+	StartedAt int64  `json:"startedAt,omitempty"`
+	LastTool  string `json:"lastTool,omitempty"`
+	Chars     int    `json:"chars,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -229,6 +234,9 @@ func toAgentView(a *agent.Agent) AgentView {
 		LLM:           s.LLMCfg,
 		Knowledge:     s.Knowledge,
 		BlockedReason: s.BlockedReason,
+		StartedAt:     s.StartedAt,
+		LastTool:      s.LastTool,
+		Chars:         s.Chars,
 	}
 }
 

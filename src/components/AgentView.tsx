@@ -7,6 +7,7 @@ import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
 import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
+import type { ShellLog } from '../lib/useBackend'
 
 type Props = {
   agent: Agent | null
@@ -17,6 +18,8 @@ type Props = {
   onPrompt: (text: string) => void
   onStop: () => void
   onShell: (command: string) => void
+  /** 本会话执行过的命令，直接渲染在对话流里 */
+  shellLogs?: ShellLog[]
   onToggleInspector: () => void
   inspectorOpen: boolean
   /** 单聊模式：禁用 @ 路由功能 */
@@ -342,6 +345,10 @@ export default function AgentView(p: Props) {
             正在思考…
           </div>
         )}
+
+        {(p.shellLogs ?? []).map((log) => (
+          <ShellEntry key={log.id} log={log} />
+        ))}
 
         {p.error && (
           <div
@@ -914,6 +921,68 @@ function StatusBadge({ status, queueLen }: { status: string; queueLen?: number }
   }
   const s = map[status] ?? map.idle
   return <span className={`c-badge ${s.cls}`}>{s.t}</span>
+}
+
+/**
+ * ShellEntry 是一条命令执行记录，直接内联在对话流里。
+ *
+ * 之前命令结果放在一个独立侧栏面板里，用户敲完命令后对话区没反应，
+ * 得去别处找输出。现在「我敲了什么 → 输出了什么」在同一个流里。
+ */
+function ShellEntry({ log }: { log: ShellLog }) {
+  const r = log.result
+  const ok = r ? r.exitCode === 0 : true
+  const output = r ? [r.stdout, r.stderr].filter(Boolean).join('\n').trimEnd() : ''
+
+  return (
+    <div style={{ marginBottom: 'var(--space-3)' }}>
+      <div
+        className="mono"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 'var(--text-xs)',
+          color: 'var(--text-tertiary)',
+          marginBottom: 3,
+        }}
+      >
+        <span style={{ color: 'var(--text-disabled)' }}>$</span>
+        <span style={{ color: 'var(--text-secondary)' }}>{log.command}</span>
+        {!r && (
+          <span className="blink" style={{ color: 'var(--warning)' }}>
+            执行中…
+          </span>
+        )}
+        {r && (
+          <span style={{ marginLeft: 'auto', color: ok ? 'var(--success)' : 'var(--danger)' }}>
+            exit {r.exitCode}
+          </span>
+        )}
+      </div>
+      {r && (
+        <pre
+          className="mono c-shell-out"
+          style={{
+            margin: 0,
+            padding: '8px 10px',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--border-subtle)',
+            background: 'var(--bg-inset)',
+            fontSize: 'var(--text-xs)',
+            lineHeight: 1.6,
+            color: ok ? 'var(--text-secondary)' : 'var(--danger)',
+            maxHeight: 320,
+            overflow: 'auto',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {output || '（无输出）'}
+        </pre>
+      )}
+    </div>
+  )
 }
 
 function EmptyChat({ color, name, onPick }: { color: string; name: string; onPick: (text: string) => void }) {

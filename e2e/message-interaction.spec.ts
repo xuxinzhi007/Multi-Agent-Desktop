@@ -1,4 +1,10 @@
-import { expect, mockRuntime, test } from './mock-runtime'
+import { expect, mockRuntime, test, type Page } from './mock-runtime'
+
+/** 默认主视图是舰队总览；这些用例验证的是对话视图里的交互。 */
+async function openChatView(page: Page) {
+  const tab = page.getByRole('button', { name: /对话/ })
+  if (await tab.count()) await tab.first().click()
+}
 
 /**
  * 消息与输入区的交互护栏。
@@ -38,6 +44,7 @@ test('消息里的 @提及要渲染成 chip，而不是纯文字', async ({ page
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
+  await openChatView(page)
 
   // 选中 a1，往它的历史里注入一条带 @ 的用户消息
   await page.evaluate(() => {
@@ -64,6 +71,7 @@ test('未注册的 @名字 不应被染色', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
+  await openChatView(page)
 
   await page.evaluate(() => {
     const mygo = (window as unknown as { mygo: { emit: (n: string, d: unknown) => void } }).mygo
@@ -80,6 +88,7 @@ test('工作目录与模型选择在输入框里，而不是页面头部', async
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
+  await openChatView(page)
 
   // 输入框区域应当能直接点到目录 chip 和模型 chip
   const dirChip = page.locator('button[title*="工作目录"]')
@@ -104,6 +113,7 @@ test('目录 chip 显示可辨认的路径，不是只有最后一级', async ({
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
+  await openChatView(page)
 
   const dirChip = page.locator('button[title*="工作目录"]')
   const text = (await dirChip.textContent()) ?? ''
@@ -116,6 +126,7 @@ test('两个 chip 都能点开配置面板', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
+  await openChatView(page)
 
   await page.locator('button[title*="工作目录"]').click()
   await expect(page.getByText('本会话工作目录')).toBeVisible()

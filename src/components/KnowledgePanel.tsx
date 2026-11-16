@@ -7,27 +7,70 @@ type Props = {
   onUpsert: (n: Note) => void
   onDelete: (id: string) => void
   onAttach?: (noteId: string, agentId: string) => void
+  onDetach?: (noteId: string, agentId: string) => void
 }
 
 /**
- * KnowledgePanel 是多 agent 共享的「知识库」：
- * 人类编写的约定 / 术语 / 偏好，创建 agent 时自动注入 system prompt。
+ * KnowledgePanel 是多 agent 共享的知识库：人类写的约定 / 术语 / 偏好。
+ *
+ * 「沉淀」的关键是能看见东西被谁用了 —— 所以每条笔记都显示
+ * 引用它的 agent，而不是给每条笔记挂一个「注入到会话」下拉框
+ * （那会变成一屏下拉，既吵又看不出状态）。
  */
-export default function KnowledgePanel({ notes, agents, onUpsert, onDelete, onAttach }: Props) {
+export default function KnowledgePanel({
+  notes,
+  agents,
+  onUpsert,
+  onDelete,
+  onAttach,
+  onDetach,
+}: Props) {
   const [query, setQuery] = useState('')
+  const [tag, setTag] = useState('')
+  const [composing, setComposing] = useState(false)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [tags, setTags] = useState('')
-  const [scope, setScope] = useState('')
-  const [composing, setComposing] = useState(false)
+
+  // 哪些 agent 引用了哪条笔记：从 Agent.Knowledge 反查
+  const usersByNote = useMemo(() => {
+    const m = new Map<string, Agent[]>()
+    for (const a of agents) {
+      for (const id of a.knowledge ?? []) {
+        const arr = m.get(id) ?? []
+        arr.push(a)
+        m.set(id, arr)
+      }
+    }
+    return m
+  }, [agents])
+
+  const allTags = useMemo(() => {
+    const s = new Set<string>()
+    for (const n of notes) for (const t of n.tags ?? []) s.add(t)
+    return [...s].sort()
+  }, [notes])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return notes
-    return notes.filter((n) =>
-      `${n.title}\n${n.body}\n${(n.tags ?? []).join(' ')}`.toLowerCase().includes(q),
-    )
-  }, [notes, query])
+    return notes.filter((n) => {
+      if (tag && !(n.tags ?? []).includes(tag)) return false
+      if (!q) return true
+      return `${n.title}\n${n.body}\n${(n.tags ?? []).join(' ')}`.toLowerCase().includes(q)
+    })
+  }, [notes, query, tag])
+
+  // 被引用的排在前面：它们是真正在起作用的
+  const sorted = useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      const ua = usersByNote.get(a.id)?.length ?? 0
+      const ub = usersByNote.get(b.id)?.length ?? 0
+      if (ua !== ub) return ub - ua
+      return (b.updatedAt ?? b.at ?? 0) - (a.updatedAt ?? a.at ?? 0)
+    })
+  }, [filtered, usersByNote])
 
   const submit = () => {
     if (!title.trim() && !body.trim()) return
@@ -36,7 +79,7 @@ export default function KnowledgePanel({ notes, agents, onUpsert, onDelete, onAt
       title: title.trim(),
       body: body.trim(),
       tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
-      scope,
+      scope: '',
       at: 0,
     })
     setTitle('')
@@ -45,170 +88,343 @@ export default function KnowledgePanel({ notes, agents, onUpsert, onDelete, onAt
     setComposing(false)
   }
 
+  const referenced = notes.filter((n) => (usersByNote.get(n.id) ?? []).length > 0).length
+
   return (
-    <div style={{ padding: 'var(--space-3)' }}>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--space-3)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* 概览：沉淀得怎么样，一眼能看到 */}
+      <div
+        style={{
+          padding: 'var(--space-3)',
+          borderBottom: '1px solid var(--border-subtle)',
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 'var(--space-2)',
+            marginBottom: 'var(--space-2)',
+          }}
+        >
+          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>{notes.length} 条笔记</span>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+            其中 {referenced} 条正被引用
+          </span>
+          <button
+            className="c-btn c-btn--primary c-btn--sm"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => setComposing((v) => !v)}
+          >
+            {composing ? '取消' : '+ 新增'}
+          </button>
+        </div>
+
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索笔记…"
-          style={{
-            flex: 1,
-            padding: '6px 9px',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border-default)',
-            background: 'var(--bg-surface)',
-            color: 'var(--text-primary)',
-            fontSize: 'var(--text-xs)',
-          }}
+          placeholder="搜索标题、正文、标签…"
+          style={fieldStyle}
         />
-        <button
-          className="c-btn c-btn--secondary c-btn--sm"
-          onClick={() => setComposing((v) => !v)}
-        >
-          {composing ? '取消' : '+ 新增'}
-        </button>
+
+        {allTags.length > 0 && (
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
+            <TagChip active={!tag} onClick={() => setTag('')}>
+              全部
+            </TagChip>
+            {allTags.map((t) => (
+              <TagChip key={t} active={tag === t} onClick={() => setTag(tag === t ? '' : t)}>
+                #{t}
+              </TagChip>
+            ))}
+          </div>
+        )}
       </div>
 
+      {/* 编辑区 */}
       {composing && (
         <div
           className="fade-up"
           style={{
+            padding: 'var(--space-3)',
+            borderBottom: '1px solid var(--border-subtle)',
             background: 'var(--bg-surface)',
-            border: '1px solid var(--accent-border)',
-            borderRadius: 'var(--radius-md)',
-            padding: 10,
-            marginBottom: 'var(--space-3)',
-            display: 'grid',
-            gap: 6,
+            flexShrink: 0,
           }}
         >
           <input
+            autoFocus
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="标题，如：代码风格"
-            style={fieldStyle}
+            placeholder="标题，例如：接口错误统一用 wrapError"
+            style={{ ...fieldStyle, marginBottom: 6 }}
           />
           <textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            placeholder="内容，如：Go 用 %w 包装错误，禁止 panic"
-            rows={3}
-            style={{ ...fieldStyle, resize: 'vertical', lineHeight: 1.6 }}
+            placeholder="具体内容。agent 会把它当作上下文读到。"
+            rows={4}
+            style={{ ...fieldStyle, resize: 'vertical', marginBottom: 6, lineHeight: 1.6 }}
           />
           <input
             value={tags}
             onChange={(e) => setTags(e.target.value)}
-            placeholder="标签，逗号分隔：go, style"
-            style={fieldStyle}
+            placeholder="标签，逗号分隔，例如：约定, 后端"
+            style={{ ...fieldStyle, marginBottom: 6 }}
           />
-          <select value={scope} onChange={(e) => setScope(e.target.value)} style={fieldStyle}>
-            <option value="">全局（所有 Agent 可见）</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                仅 {a.name}
-              </option>
-            ))}
-          </select>
           <button className="c-btn c-btn--primary c-btn--sm" onClick={submit}>
-            保存笔记
+            保存
           </button>
         </div>
       )}
 
-      {filtered.length === 0 && (
-        <div className="c-empty">
-          知识库还是空的
-          <br />
-          <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
-            写入团队约定，新 Agent 创建时自动带上这些上下文
-          </span>
+      {/* 列表 */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-2)', minHeight: 0 }}>
+        {sorted.length === 0 && (
+          <div className="c-empty">
+            {notes.length === 0 ? (
+              <>
+                还没有笔记
+                <br />
+                <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
+                  写下团队约定、术语、踩过的坑 —— agent 会把它们读进上下文
+                </span>
+              </>
+            ) : (
+              '没有匹配的笔记'
+            )}
+          </div>
+        )}
+
+        {sorted.map((n) => {
+          const users = usersByNote.get(n.id) ?? []
+          const isOpen = expanded === n.id
+          return (
+            <NoteCard
+              key={n.id}
+              note={n}
+              users={users}
+              agents={agents}
+              open={isOpen}
+              onToggle={() => setExpanded(isOpen ? null : n.id)}
+              onDelete={() => onDelete(n.id)}
+              onAttach={onAttach}
+              onDetach={onDetach}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function NoteCard({
+  note,
+  users,
+  agents,
+  open,
+  onToggle,
+  onDelete,
+  onAttach,
+  onDetach,
+}: {
+  note: Note
+  users: Agent[]
+  agents: Agent[]
+  open: boolean
+  onToggle: () => void
+  onDelete: () => void
+  onAttach?: (noteId: string, agentId: string) => void
+  onDetach?: (noteId: string, agentId: string) => void
+}) {
+  const body = note.body ?? ''
+  const long = body.length > 160
+
+  return (
+    <div
+      style={{
+        background: 'var(--bg-surface)',
+        border: `1px solid ${users.length > 0 ? 'var(--border-default)' : 'var(--border-subtle)'}`,
+        borderRadius: 'var(--radius-md)',
+        padding: '9px 11px',
+        marginBottom: 'var(--space-2)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span
+          style={{
+            fontSize: 'var(--text-sm)',
+            fontWeight: 600,
+            color: 'var(--text-primary)',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={note.title}
+        >
+          {note.title || '(无标题)'}
+        </span>
+        <button
+          className="c-icon-btn c-icon-btn--danger"
+          style={{ marginLeft: 'auto', width: 18, height: 18, fontSize: 12, flexShrink: 0 }}
+          onClick={onDelete}
+          title="删除笔记"
+        >
+          ×
+        </button>
+      </div>
+
+      {body && (
+        <div
+          style={{
+            marginTop: 4,
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-secondary)',
+            lineHeight: 1.65,
+            whiteSpace: 'pre-wrap',
+            ...(long && !open
+              ? {
+                  display: '-webkit-box',
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: 'l' as const,
+                  overflow: 'hidden',
+                }
+              : {}),
+          }}
+        >
+          {body}
+        </div>
+      )}
+      {long && (
+        <button
+          className="c-link-btn"
+          onClick={onToggle}
+          style={{ fontSize: 'var(--text-xs)', marginTop: 2 }}
+        >
+          {open ? '收起' : '展开全文'}
+        </button>
+      )}
+
+      {(note.tags ?? []).length > 0 && (
+        <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+          {(note.tags ?? []).map((t) => (
+            <span
+              key={t}
+              className="mono"
+              style={{
+                fontSize: 9,
+                color: 'var(--text-disabled)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 'var(--radius-full)',
+                padding: '0 6px',
+              }}
+            >
+              #{t}
+            </span>
+          ))}
         </div>
       )}
 
-      {filtered.map((n) => (
-        <div
-          key={n.id}
-          style={{
-            background: 'var(--bg-surface)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-md)',
-            padding: '9px 11px',
-            marginBottom: 'var(--space-2)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>
-              {n.title || '(无标题)'}
-            </span>
+      {/* 引用情况：这才是「沉淀」的可见证据 */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          marginTop: 7,
+          flexWrap: 'wrap',
+          paddingTop: 6,
+          borderTop: '1px solid var(--border-subtle)',
+        }}
+      >
+        {users.length === 0 ? (
+          <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>暂无 agent 引用</span>
+        ) : (
+          users.map((a) => (
             <span
-              className="c-badge"
-              style={{ fontSize: 9, padding: '0 5px' }}
-              title={n.scope ? '仅对该 Agent 生效' : '全局'}
-            >
-              {n.scope ? agents.find((a) => a.id === n.scope)?.name ?? '会话' : '全局'}
-            </span>
-            <button
-              className="c-icon-btn c-icon-btn--danger"
-              style={{ marginLeft: 'auto', width: 18, height: 18, fontSize: 12 }}
-              onClick={() => onDelete(n.id)}
-              title="删除笔记"
-            >
-              ×
-            </button>
-          </div>
-          {n.body && (
-            <div
+              key={a.id}
+              title={`${a.name} 正在引用${onDetach ? '，点击取消' : ''}`}
+              onClick={onDetach ? () => onDetach(note.id, a.id) : undefined}
               style={{
-                marginTop: 4,
-                fontSize: 'var(--text-xs)',
-                color: 'var(--text-secondary)',
-                lineHeight: 'var(--leading-normal)',
-                whiteSpace: 'pre-wrap',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+                fontSize: 10,
+                color: a.color,
+                border: `1px solid color-mix(in srgb, ${a.color} 40%, transparent)`,
+                background: `color-mix(in srgb, ${a.color} 10%, transparent)`,
+                borderRadius: 'var(--radius-full)',
+                padding: '0 6px',
+                cursor: onDetach ? 'pointer' : 'default',
               }}
             >
-              {n.body}
-            </div>
-          )}
-          {(n.tags ?? []).length > 0 && (
-            <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-              {(n.tags ?? []).map((t) => (
-                <span
-                  key={t}
-                  className="mono"
-                  style={{
-                    fontSize: 9,
-                    color: 'var(--text-disabled)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: 'var(--radius-full)',
-                    padding: '0 6px',
-                  }}
-                >
-                  #{t}
-                </span>
-              ))}
-            </div>
-          )}
-          {onAttach && agents.length > 0 && (
-            <select
-              value=""
-              onChange={(e) => {
-                if (e.target.value) onAttach(n.id, e.target.value)
-                e.currentTarget.value = ''
-              }}
-              style={{ ...fieldStyle, marginTop: 6, fontSize: 10 }}
-            >
-              <option value="">注入到会话…</option>
-              {agents.map((a) => (
+              {a.name}
+            </span>
+          ))
+        )}
+
+        {onAttach && agents.length > users.length && (
+          <select
+            value=""
+            onChange={(e) => {
+              if (e.target.value) onAttach(note.id, e.target.value)
+              e.currentTarget.value = ''
+            }}
+            title="让某个 agent 引用这条笔记"
+            style={{
+              marginLeft: 'auto',
+              fontSize: 10,
+              padding: '1px 4px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border-subtle)',
+              background: 'transparent',
+              color: 'var(--text-tertiary)',
+              cursor: 'pointer',
+            }}
+          >
+            <option value="">+ 引用</option>
+            {agents
+              .filter((a) => !users.some((u) => u.id === a.id))
+              .map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
                 </option>
               ))}
-            </select>
-          )}
-        </div>
-      ))}
+          </select>
+        )}
+      </div>
     </div>
+  )
+}
+
+function TagChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        fontFamily: 'inherit',
+        fontSize: 10,
+        padding: '1px 7px',
+        borderRadius: 'var(--radius-full)',
+        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+        background: active ? 'var(--accent-dim)' : 'transparent',
+        color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+        cursor: 'pointer',
+      }}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -220,4 +436,5 @@ const fieldStyle: React.CSSProperties = {
   background: 'var(--bg-surface)',
   color: 'var(--text-primary)',
   fontSize: 'var(--text-xs)',
+  fontFamily: 'inherit',
 }

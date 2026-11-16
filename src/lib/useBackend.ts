@@ -32,6 +32,8 @@ type State = {
   streaming: Record<string, string>
   errors: Record<string, string>
   shell: ShellLog[]
+  /** 每个 agent 执行过的命令，按 agentId 归集，直接渲染在对话流里 */
+  shellByAgent: Record<string, ShellLog[]>
   changes: FileChange[]
   todos: TodoItem[]
   tools: ToolCall[]
@@ -52,6 +54,7 @@ const EMPTY: State = {
   streaming: {},
   errors: {},
   shell: [],
+  shellByAgent: {},
   changes: [],
   todos: [],
   tools: [],
@@ -185,20 +188,47 @@ export function useBackend() {
         }
       })
     })
+    // 命令执行结果直接进对话流，不再另开一个面板：
+    // 用户在一个地方就能看到「我敲了什么 → 输出了什么」。
     sub(events.shellStart, (e: ShellEvent) =>
-      setState((s) => ({
-        ...s,
-        shell: [
-          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, command: e.command, at: Date.now() },
-          ...s.shell,
-        ].slice(0, 40),
-      })),
+      setState((s) => {
+        const log: ShellLog = {
+          id: `sh-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          command: e.command,
+          at: Date.now(),
+        }
+        return {
+          ...s,
+          shell: [log, ...s.shell].slice(0, 40),
+          shellByAgent: {
+            ...s.shellByAgent,
+            [e.agentId]: [...(s.shellByAgent[e.agentId] ?? []), log].slice(-40),
+          },
+        }
+      }),
     )
     sub(events.shellResult, (e: ShellResultEvent) =>
-      setState((s) => ({
-        ...s,
-        shell: s.shell.map((l) => (l.command === e.command && !l.result ? { ...l, result: e.result } : l)),
-      })),
+      setState((s) => {
+        const apply = (logs: ShellLog[]) => {
+          // 从后往前找最近一条尚未有结果的同命令记录
+          const next = [...logs]
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i].command === e.command && !next[i].result) {
+              next[i] = { ...next[i], result: e.result }
+              break
+            }
+          }
+          return next
+        }
+        return {
+          ...s,
+          shell: apply(s.shell),
+          shellByAgent: {
+            ...s.shellByAgent,
+            [e.agentId]: apply(s.shellByAgent[e.agentId] ?? []),
+          },
+        }
+      }),
     )
     sub(events.llmConfig, (llm) => setState((s) => ({ ...s, llm })))
     sub(events.workdir, ({ dir }) => setState((s) => ({ ...s, workDir: dir })))
@@ -315,6 +345,10 @@ export function useBackend() {
       case 'note.attach': {
         const { noteId, agentId } = data as { noteId: string; agentId: string }
         return API.attachNoteToAgent(noteId, agentId)
+      }
+      case 'note.detach': {
+        const { noteId, agentId } = data as { noteId: string; agentId: string }
+        return API.detachNoteFromAgent(noteId, agentId)
       }
     }
   }, [])

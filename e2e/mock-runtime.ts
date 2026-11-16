@@ -116,3 +116,5 @@ export const test = base.extend<{ callLog: () => Promise<CallLog[]> }>({
 })
 
 export { expect } from '@playwright/test'
+
+export type { Page } from "@playwright/test"

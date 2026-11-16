@@ -28,6 +28,10 @@ export interface AgentView {
   knowledge?: string[];
   /** BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值 */
   blockedReason?: string;
+  /** 以下为本轮运行时指标，监控台据此显示「跑了多久 / 产出多少 / 在用什么工具」。 */
+  startedAt?: number;
+  lastTool?: string;
+  chars?: number;
 }
 
 export interface Channel {

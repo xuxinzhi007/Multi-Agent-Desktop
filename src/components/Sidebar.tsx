@@ -19,6 +19,44 @@ type Props = {
   /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
   createOpen: boolean
   onCreateOpenChange: (open: boolean) => void
+  /** 主区域当前视图：舰队总览 / 对话 */
+  view: 'fleet' | 'chat'
+  onViewChange: (v: 'fleet' | 'chat') => void
+}
+
+function ViewTab({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  title: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      style={{
+        flex: 1,
+        padding: '4px 6px',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        background: active ? 'var(--bg-surface)' : 'transparent',
+        color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+        fontFamily: 'inherit',
+        fontSize: 'var(--text-xs)',
+        fontWeight: active ? 600 : 400,
+        cursor: 'pointer',
+      }}
+    >
+      {children}
+    </button>
+  )
 }
 
 export default function Sidebar(p: Props) {
@@ -188,6 +226,35 @@ export default function Sidebar(p: Props) {
             }}
           >
             AGENTS
+          </div>
+        )}
+
+        {/* 视图切换：舰队总览（并排监控） / 单个对话 */}
+        {p.agents.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 2,
+              padding: 2,
+              margin: '4px 0 6px',
+              background: 'var(--bg-inset)',
+              borderRadius: 'var(--radius-md)',
+            }}
+          >
+            <ViewTab
+              active={p.view === 'fleet'}
+              onClick={() => p.onViewChange('fleet')}
+              title="并排查看所有 agent 的进度"
+            >
+              ▦ 舰队
+            </ViewTab>
+            <ViewTab
+              active={p.view === 'chat'}
+              onClick={() => p.onViewChange('chat')}
+              title="查看当前 agent 的完整对话"
+            >
+              💬 对话
+            </ViewTab>
           </div>
         )}
 
