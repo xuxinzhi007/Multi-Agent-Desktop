@@ -1,13 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
-import { ContextMenu } from 'radix-ui'
+import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
 import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 import type { ShellLog } from '../lib/useBackend'
+import { parseMessage } from '../lib/message'
 
 type Props = {
   agent: Agent | null
@@ -99,7 +100,6 @@ export default function AgentView(p: Props) {
 
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
-  const [selectedMentions, setSelectedMentions] = useState<string[]>([])
 
   // 传给 Bubble 做 @ 上色的名字/颜色表。内容变化才换引用，
   // 否则 memo 化的 Bubble 会每秒重渲染全部历史消息。
@@ -202,7 +202,6 @@ export default function AgentView(p: Props) {
       }
     }
     setInput('')
-    setSelectedMentions([])
   }
 
   // 输入时检测 @ 弹出补全
@@ -475,30 +474,33 @@ export default function AgentView(p: Props) {
         </div>
       </div>
 
-      {/* 右键菜单：radix ContextMenu 自己管理定位（贴着触发元素，自动边缘翻转）。
-          不要用受控 open + 手写 left/top —— 会和 radix 的定位系统冲突。 */}
+      {/* 右键菜单：用 Popover + 虚拟锚点定位到鼠标坐标。
+          radix 的 ContextMenu 是绑定 Trigger 元素的，用 1px fixed div 当 trigger
+          会被碰撞检测推到视口边缘 —— 菜单就跑到了最左边。 */}
       {contextMenu && (
-        <ContextMenu.Root
-          open
-          onOpenChange={(v) => {
-            if (!v) closeContextMenu()
-          }}
-        >
-          <ContextMenu.Trigger
-            style={{
-              position: 'fixed',
-              left: contextMenu.x,
-              top: contextMenu.y,
-              width: 1,
-              height: 1,
-              pointerEvents: 'none',
-            }}
-          />
-          <ContextMenu.Portal>
-            <ContextMenu.Content
+        <Popover.Root open modal={false} onOpenChange={(v) => !v && closeContextMenu()}>
+          <Popover.Anchor asChild>
+            <span
+              style={{
+                position: 'fixed',
+                left: contextMenu.x,
+                top: contextMenu.y,
+                width: 0,
+                height: 0,
+                pointerEvents: 'none',
+              }}
+            />
+          </Popover.Anchor>
+          <Popover.Portal>
+            <Popover.Content
+              side="bottom"
+              align="start"
+              sideOffset={2}
+              collisionPadding={8}
+              onOpenAutoFocus={(e) => e.preventDefault()}
               className="fade-up"
               style={{
-                minWidth: 180,
+                minWidth: 184,
                 background: 'var(--bg-elevated)',
                 border: '1px solid var(--border-default)',
                 borderRadius: 'var(--radius-md)',
@@ -515,18 +517,8 @@ export default function AgentView(p: Props) {
               )}
               {p.agents && p.agents.length > 1 && (
                 <>
-                  <ContextMenu.Separator
-                    style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }}
-                  />
-                  <ContextMenu.Label
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: 'var(--text-xs)',
-                      color: 'var(--text-disabled)',
-                    }}
-                  >
-                    引用给…
-                  </ContextMenu.Label>
+                  <MenuSeparator />
+                  <MenuLabel>引用给…</MenuLabel>
                   {p.agents
                     .filter((a) => a.id !== p.agent?.id)
                     .map((a) => (
@@ -552,9 +544,9 @@ export default function AgentView(p: Props) {
                     ))}
                 </>
               )}
-            </ContextMenu.Content>
-          </ContextMenu.Portal>
-        </ContextMenu.Root>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
       )}
     </div>
   )
@@ -1077,11 +1069,10 @@ function BubbleImpl({
   const isUser = m.role === 'user'
 
   // 检测路由消息：[from xxx] 或 [to xxx]
-  const fromMatch = m.content.match(/^\[from\s+(\S+)\]\s*/)
-  const toMatch = m.content.match(/^\[to\s+(\S+)\]\s*/)
-  const isRouted = !!(fromMatch || toMatch)
-  const routeInfo = fromMatch ? `来自 ${fromMatch[1]}` : toMatch ? `发给 ${toMatch[1]}` : ''
-  const displayContent = m.content.replace(/^\[(from|to)\s+\S+\]\s*/, '')
+  const parsed = parseMessage(m.content)
+  const isRouted = parsed.isRouted
+  const routeInfo = parsed.from ? `来自 ${parsed.from}` : parsed.to ? `发给 ${parsed.to}` : ''
+  const displayContent = parsed.body
 
   return (
     <div
@@ -1184,8 +1175,10 @@ function formatTokens(n: number): string {
 /** 右键菜单项：统一 hover / 焦点样式。 */
 function MenuItem({ onSelect, children }: { onSelect: () => void; children: React.ReactNode }) {
   return (
-    <ContextMenu.Item
-      onSelect={onSelect}
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onSelect}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -1196,6 +1189,11 @@ function MenuItem({ onSelect, children }: { onSelect: () => void; children: Reac
         cursor: 'pointer',
         outline: 'none',
         userSelect: 'none',
+        border: 'none',
+        background: 'transparent',
+        width: '100%',
+        fontFamily: 'inherit',
+        textAlign: 'left',
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface-hover)')}
       onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -1203,6 +1201,24 @@ function MenuItem({ onSelect, children }: { onSelect: () => void; children: Reac
       onBlur={(e) => (e.currentTarget.style.background = 'transparent')}
     >
       {children}
-    </ContextMenu.Item>
+    </button>
+  )
+}
+
+function MenuSeparator() {
+  return <div style={{ height: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />
+}
+
+function MenuLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        padding: '4px 10px',
+        fontSize: 'var(--text-xs)',
+        color: 'var(--text-disabled)',
+      }}
+    >
+      {children}
+    </div>
   )
 }

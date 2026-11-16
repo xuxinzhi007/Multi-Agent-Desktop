@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { API, type AgentView as Agent, type Channel } from '../mygo'
 import CreateAgentModal from './CreateAgentModal'
+import { bodyOf, truncate } from '../lib/message'
 
 type Props = {
   agents: Agent[]
@@ -70,7 +71,8 @@ export default function Sidebar(p: Props) {
       style={{
         width: 'var(--sidebar-w)',
         flexShrink: 0,
-        background: 'var(--bg-chrome)',
+        background: 'var(--bg-glass)',
+        backdropFilter: 'blur(var(--glass-blur))',
         borderRight: '1px solid var(--border-subtle)',
       }}
     >
@@ -367,7 +369,7 @@ export default function Sidebar(p: Props) {
                       : a.status === 'queued'
                         ? `排队中 (${a.queueLen})`
                       : a.messages.length > 1
-                        ? a.messages[a.messages.length - 1].content.slice(0, 30) + (a.messages[a.messages.length - 1].content.length > 30 ? '…' : '')
+                        ? truncate(bodyOf(a.messages[a.messages.length - 1].content), 30)
                         : a.role}
                 </div>
               </div>

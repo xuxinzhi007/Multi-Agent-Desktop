@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
+import { StrictMode, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { events, API, type MiniStatus } from './mygo'
@@ -21,14 +21,6 @@ document.documentElement.dataset.surface = 'island'
 
 /** 分组顺序：需要你的排最前。 */
 const GROUP_ORDER = ['blocked', 'running', 'queued', 'done', 'error', 'idle'] as const
-const GROUP_LABEL: Record<string, string> = {
-  blocked: 'Needs input',
-  running: 'Working',
-  queued: 'Queued',
-  done: 'Completed',
-  error: 'Failed',
-  idle: 'Idle',
-}
 
 const COLLAPSED_ROWS = 3
 const EXPANDED_ROWS = 8
@@ -38,7 +30,6 @@ function MiniApp() {
   const [expanded, setExpanded] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; agentId: string } | null>(null)
-  const [pendingStop, setPendingStop] = useState<string | null>(null)
   const [, tick] = useState(0)
 
   // 每秒刷新一次年龄显示
@@ -327,6 +318,7 @@ function MiniApp() {
             <button
               type="button"
               onClick={() => {
+                if (!selected) return
                 API.stopAgent(selected).catch(() => {})
                 setSelected(null)
               }}
@@ -352,10 +344,7 @@ function MiniApp() {
         <>
           <div
             style={{ position: 'fixed', inset: 0, zIndex: 900 }}
-            onClick={() => {
-              setMenu(null)
-              setPendingStop(null)
-            }}
+            onClick={() => setMenu(null)}
           />
           <div
             style={{
@@ -392,48 +381,27 @@ function MiniApp() {
             >
               打开会话
             </button>
-            {pendingStop === menu.agentId ? (
-              <button
-                type="button"
-                onClick={() => {
-                  API.stopAgent(menu.agentId).catch(() => {})
-                  setMenu(null)
-                  setPendingStop(null)
-                }}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  padding: '7px 12px',
-                  fontSize: 11,
-                  textAlign: 'left',
-                  background: 'var(--danger-dim, rgba(229,83,75,0.12))',
-                  border: 'none',
-                  color: 'var(--danger)',
-                  cursor: 'pointer',
-                  fontWeight: 600,
-                }}
-              >
-                确认停止？
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setPendingStop(menu.agentId)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  padding: '7px 12px',
-                  fontSize: 11,
-                  textAlign: 'left',
-                  background: 'transparent',
-                  border: 'none',
-                  color: 'var(--danger)',
-                  cursor: 'pointer',
-                }}
-              >
-                停止
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                API.stopAgent(menu.agentId).catch(() => {})
+                setMenu(null)
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '7px 12px',
+                fontSize: 11,
+                textAlign: 'left',
+                background: 'var(--danger-dim, rgba(229,83,75,0.12))',
+                border: 'none',
+                color: 'var(--danger)',
+                cursor: 'pointer',
+                fontWeight: 600,
+              }}
+            >
+              停止
+            </button>
           </div>
         </>
       )}

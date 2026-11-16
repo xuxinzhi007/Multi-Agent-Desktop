@@ -18,6 +18,12 @@
   --bg-elevated: #212734;    /* 弹窗 / 下拉 */
   --bg-inset: #0d1015;       /* 输入框 / 代码块（比面板更暗）*/
 
+  /* --- 玻璃层：让背景柔光透上来，界面才有纵深 --- */
+  --bg-glass: rgba(16, 19, 24, 0.72);
+  --bg-glass-strong: rgba(16, 19, 24, 0.88);
+  --glass-blur: 18px;
+  --glass-highlight: rgba(255, 255, 255, 0.045);
+
   /* --- 边框 --- */
   --border-subtle: #1d222c;
   --border-default: #262d3a;
@@ -532,4 +538,107 @@ textarea::placeholder {
 
 .agent-avatar-glow {
   box-shadow: 0 0 12px color-mix(in srgb, var(--avatar-color, #5b9dff) 40%, transparent);
+}
+
+/* ============================================================
+   氛围层：深色底上的柔光 + 细网格
+   目标是有纵深、有光的界面，而不是一块纯色板。
+   光斑用 transform 动画，交给合成器，不占主线程。
+   ============================================================ */
+
+.c-ambient {
+  --px: 0;
+  --py: 0;
+  --ambient-tint: var(--accent-primary);
+  position: fixed;
+  inset: 0;
+  z-index: -1; /* 压在内容之下，不遮挡任何交互与文本 */
+  pointer-events: none;
+  overflow: hidden;
+  /* 底色在这里而不是 body：保证氛围层自身不透明，
+     同时因为 z-index 负值 + pointer-events none，不会盖住内容 */
+  background: var(--bg-base);
+}
+
+/* 极细网格：给深色底一点"材质"，几乎看不见但去掉就变平 */
+.c-ambient__grid {
+  position: absolute;
+  inset: -50%;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 30%, transparent 75%);
+  transform: translate3d(calc(var(--px) * -8px), calc(var(--py) * -8px), 0);
+  will-change: transform;
+}
+
+/* 两个错相位的柔光斑 */
+.c-ambient__blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  will-change: transform;
+}
+
+.c-ambient__blob--a {
+  width: 46vw;
+  height: 46vw;
+  top: -12vw;
+  left: -8vw;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--ambient-tint) 46%, transparent),
+    transparent 68%
+  );
+  transform: translate3d(calc(var(--px) * 18px), calc(var(--py) * 18px), 0);
+  animation: ambient-drift-a 26s ease-in-out infinite alternate;
+}
+
+.c-ambient__blob--b {
+  width: 40vw;
+  height: 40vw;
+  right: -10vw;
+  bottom: -14vw;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--agent-4) 38%, transparent),
+    transparent 68%
+  );
+  transform: translate3d(calc(var(--px) * -22px), calc(var(--py) * -22px), 0);
+  animation: ambient-drift-b 32s ease-in-out infinite alternate;
+}
+
+@keyframes ambient-drift-a {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 6vw 4vw;
+  }
+}
+@keyframes ambient-drift-b {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: -5vw -6vw;
+  }
+}
+
+/* 暗角：把注意力收回中心 */
+.c-ambient__vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 70% at 50% 45%, transparent 45%, var(--bg-base) 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-ambient__blob {
+    animation: none;
+  }
+  .c-ambient__grid {
+    transform: none;
+  }
 }

@@ -61,9 +61,11 @@ test('运行中的 agent 显示耗时与产出字数', async ({ page }) => {
   await page.goto('/')
   await page.waitForSelector('.c-shell')
 
-  // 用户要能判断「它在动，不是在卡」
-  await expect(page.getByText('42 字')).toBeVisible()
-  await expect(page.locator('text=/\\d+s/').first()).toBeVisible()
+  // 用户要能判断「它在动，不是在卡」：耗时和产出都在指标带里，
+  // 它们被拆成多个 span，所以整体取文本再断言
+  const metrics = (await page.locator('.c-fleet-card').first().textContent()) ?? ''
+  expect(metrics, `卡片内容: ${metrics}`).toMatch(/\d+s/)
+  expect(metrics, `卡片内容: ${metrics}`).toMatch(/42 字/)
 })
 
 test('舰队列显示当前任务与最近产出', async ({ page }) => {

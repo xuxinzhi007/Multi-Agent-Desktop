@@ -56,8 +56,6 @@ export default function Inspector({
   todos,
   tools,
   onClose,
-  onApprove,
-  onReject,
   knowledge,
 }: {
   tab: Tab
@@ -66,8 +64,6 @@ export default function Inspector({
   todos: TodoItem[]
   tools: ToolCall[]
   onClose: () => void
-  onApprove?: (id: string) => void
-  onReject?: (id: string) => void
   /** 知识库面板内容；不传则不显示该 Tab */
   knowledge?: { count: number; node: React.ReactNode }
 }) {
@@ -81,7 +77,8 @@ export default function Inspector({
       style={{
         width: 'var(--inspector-w)',
         flexShrink: 0,
-        background: 'var(--bg-chrome)',
+        background: 'var(--bg-glass)',
+        backdropFilter: 'blur(var(--glass-blur))',
         borderLeft: '1px solid var(--border-subtle)',
       }}
     >
@@ -508,22 +505,8 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
                 {t.detail}
               </div>
             )}
-            {t.status === 'waiting' && (
-              <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                <button
-                  className="c-btn c-btn--success c-btn--sm"
-                  onClick={() => onApprove?.(t.id)}
-                >
-                  允许
-                </button>
-                <button
-                  className="c-btn c-btn--danger c-btn--sm"
-                  onClick={() => onReject?.(t.id)}
-                >
-                  拒绝
-                </button>
-              </div>
-            )}
+            {/* 审批流尚未实现：工具调用直接执行，这里不放假按钮。
+                等后端有了真正的待批状态再加回来。 */}
           </div>
         )
       })}

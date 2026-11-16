@@ -288,7 +288,7 @@ function NoteCard({
               ? {
                   display: '-webkit-box',
                   WebkitLineClamp: 3,
-                  WebkitBoxOrient: 'l' as const,
+                  WebkitBoxOrient: 'vertical' as const,
                   overflow: 'hidden',
                 }
               : {}),

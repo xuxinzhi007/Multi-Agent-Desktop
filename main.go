@@ -401,8 +401,10 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		byDecision[d.Member.ID] = d
 	}
 
-	// 6. 按原 recipients 顺序投递，保证 deliveries 顺序稳定
-	prompt := fmt.Sprintf("%s\n[user] %s: %s", transcript.Render(), fromName, text)
+	// 6. 按原 recipients 顺序投递，保证 deliveries 顺序稳定。
+	// prompt 里只放「谁说的 + 说了什么」，不塞频道 ID —— ID 是内部标识，
+	// 混进对话历史后既污染上下文也会原样显示给用户。
+	prompt := fmt.Sprintf("%s\n%s: %s", transcript.Render(), fromName, text)
 	deliveries := make([]channel.Delivery, 0, len(recipients))
 	var errs []string
 
@@ -932,6 +934,48 @@ func toAgentChannelReply(data any) (AgentChannelReply, bool) {
 	}, true
 }
 
+// notifyBlocked / notifyError 走系统通知中心。
+//
+// 应用不常在前台，把「有东西在等你」塞在窗口角落的活动流里没人会看到。
+// 用系统通知，用户离开应用也能收到；点通知由 mygo 的 OnNotificationClick
+// 回到应用（见 main 里的注册）。
+// notificationsEnabled 由 main 置为 true；测试里保持 false，避免真弹系统通知。
+var notificationsEnabled bool
+
+func notifyBlocked(agentName, reason string) {
+	if !notificationsEnabled || agentName == "" {
+		return
+	}
+	if reason == "" {
+		reason = "有任务需要你确认"
+	}
+	n := mygo.NewNotification(mygo.NotificationOptions{
+		ID:       "blocked-" + agentName,
+		Title:    agentName + " 在等你",
+		Body:     reason,
+		Group:    "multi-agent-desktop",
+		Subtitle: "Agent 需要你的输入才能继续",
+	})
+	if err := n.Show(); err != nil {
+		log.Printf("notification: %v", err)
+	}
+}
+
+func notifyError(agentName, msg string) {
+	if !notificationsEnabled || agentName == "" || msg == "" {
+		return
+	}
+	n := mygo.NewNotification(mygo.NotificationOptions{
+		ID:    "error-" + agentName,
+		Title: agentName + " 出错了",
+		Body:  msg,
+		Group: "multi-agent-desktop",
+	})
+	if err := n.Show(); err != nil {
+		log.Printf("notification: %v", err)
+	}
+}
+
 // emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
 func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, event string, data any) {
 	if win != nil && !win.IsDestroyed() {
@@ -947,6 +991,14 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.status":
 			if v, ok := toAgentStatus(data); ok {
 				AgentStatus.Emit(win, v)
+				// 只有「需要你处理」才打扰：进入 blocked 时发系统通知。
+				// 其余状态变化在界面上看得到，不值得弹窗。
+				if v.Status == string(agent.StatusBlocked) && mgr != nil {
+					if a, ok := mgr.Get(v.ID); ok {
+						sn := a.Snapshot()
+						notifyBlocked(sn.Name, sn.BlockedReason)
+					}
+				}
 			}
 		case "agent.delta":
 			if v, ok := toAgentDelta(data); ok {
@@ -959,6 +1011,11 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.error":
 			if v, ok := toAgentError(data); ok {
 				AgentError.Emit(win, v)
+				if mgr != nil {
+					if a, ok := mgr.Get(v.ID); ok {
+						notifyError(a.Snapshot().Name, v.Error)
+					}
+				}
 			}
 		case "tool.start":
 			if v, ok := toToolStart(data); ok {
@@ -1045,6 +1102,8 @@ func main() {
 	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
 
 	mygo.Bind(api)
+
+	notificationsEnabled = true
 
 	mygo.App.WhenReady(func() {
 		win = mygo.NewWindow(mygo.WindowOptions{

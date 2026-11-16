@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -201,4 +202,85 @@ func TestKnowledgeInjection(t *testing.T) {
 	if strings.Contains(b.Messages[0].Content, "知识库") {
 		t.Errorf("nil knowledge should not inject: %q", b.Messages[0].Content)
 	}
+}
+
+// 停止必须立刻生效：状态回到 idle，且不再有后续状态事件把它覆盖。
+func TestStopReturnsToIdleAndStaysThere(t *testing.T) {
+	var events []string
+	mu := sync.Mutex{}
+	m := NewManager(llm.Config{Provider: "mock"}, func(ev string, data any) {
+		if ev != "agent.status" {
+			return
+		}
+		s, _ := data.(map[string]any)
+		v := fmt.Sprint(s["status"])
+		mu.Lock()
+		events = append(events, v)
+		mu.Unlock()
+	})
+
+	a := m.Create("", "T", "r")
+	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "hi"}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// 等它真的跑起来
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Snapshot().Status == StatusRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !m.Stop(a.ID) {
+		t.Fatal("Stop 返回 false")
+	}
+
+	// 停止后状态必须是 idle，且之后不会再变回 running
+	time.Sleep(400 * time.Millisecond)
+	sn := a.Snapshot()
+	if sn.Status != StatusIdle {
+		t.Errorf("停止后状态 = %q, want idle（worker 可能在新状态事件里覆盖了它）", sn.Status)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// 最后一条状态事件必须是 idle
+	if len(events) == 0 || events[len(events)-1] != string(StatusIdle) {
+		t.Errorf("最后一条状态事件 = %v, want 以 idle 结尾", events)
+	}
+}
+
+// 停止后立刻发新消息必须能正常执行，不能被上一次的取消影响。
+func TestPromptAfterStopWorks(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	a := m.Create("", "T", "r")
+
+	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "first"}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Snapshot().Status == StatusRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.Stop(a.ID)
+
+	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "second"}); err != nil {
+		t.Fatalf("Stop 后 Prompt 失败: %v", err)
+	}
+
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		sn := a.Snapshot()
+		if sn.Status == StatusIdle && len(sn.Messages) >= 3 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	sn := a.Snapshot()
+	t.Fatalf("停止后新消息没跑完: status=%s messages=%d", sn.Status, len(sn.Messages))
 }

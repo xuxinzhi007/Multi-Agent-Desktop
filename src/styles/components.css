@@ -198,7 +198,10 @@
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  background: var(--bg-base);
+  /* 氛围层在底下，这一层透明，让柔光透上来 */
+  background: transparent;
+  position: relative;
+  z-index: 1;
 }
 
 .c-col {
@@ -316,4 +319,233 @@
 }
 .c-link-btn:hover {
   text-decoration: underline;
+}
+
+/* ==================== 舰队监控台 ==================== */
+
+/* 卡片：顶部一条身份色，运行时有呼吸光 */
+.c-fleet-card {
+  --card-accent: var(--accent-primary);
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  /* 玻璃底：让氛围光透上来，卡片才有"浮在空间里"的感觉 */
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--card-accent) 6%, var(--bg-glass-strong)),
+    var(--bg-glass)
+  );
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  min-height: 0;
+  transition:
+    border-color var(--dur-base) var(--ease),
+    box-shadow var(--dur-base) var(--ease),
+    transform var(--dur-base) var(--ease);
+}
+.c-fleet-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+
+.c-fleet-card--live {
+  border-color: color-mix(in srgb, var(--card-accent) 45%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--card-accent) 18%, transparent),
+    0 0 28px -6px color-mix(in srgb, var(--card-accent) 55%, transparent),
+    inset 0 1px 0 var(--glass-highlight);
+}
+.c-fleet-card--live .c-fleet-card__accent {
+  animation: fleet-pulse 2.2s var(--ease) infinite;
+}
+
+.c-fleet-card--blocked {
+  border-color: var(--danger-border);
+  box-shadow: 0 0 0 1px var(--danger-dim);
+}
+
+/* 顶部身份色条：视觉上把「这是谁」提到最前 */
+.c-fleet-card__accent {
+  height: 2px;
+  flex-shrink: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--card-accent) 20%,
+    var(--card-accent) 80%,
+    transparent
+  );
+  opacity: 0.9;
+  box-shadow: 0 0 12px -2px var(--card-accent);
+}
+
+@keyframes fleet-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.c-fleet-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  color: var(--bg-base);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.c-fleet-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.c-fleet-status--live > span:first-child {
+  animation: fleet-blink 1.4s var(--ease) infinite;
+}
+
+@keyframes fleet-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* 汇总胶囊 */
+.c-fleet-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.c-fleet-pill--danger {
+  color: var(--danger);
+  background: var(--danger-dim);
+  border-color: var(--danger-border);
+}
+.c-fleet-pill--warning {
+  color: var(--warning);
+  background: var(--warning-dim);
+  border-color: var(--warning-border);
+}
+.c-fleet-pill--live {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+.c-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--success);
+  animation: fleet-blink 1.4s var(--ease) infinite;
+}
+
+/* 产出强度条 */
+.c-fleet-meter {
+  height: 2px;
+  margin-top: 7px;
+  border-radius: var(--radius-full);
+  background: var(--border-subtle);
+  overflow: hidden;
+}
+.c-fleet-meter__fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width 260ms var(--ease);
+  opacity: 0.75;
+}
+
+.c-fleet-blocked {
+  margin-top: 7px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--danger);
+  background: var(--danger-dim);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+}
+
+.c-fleet-task {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.c-fleet-stream {
+  /* 流式文本每秒变化多次；提升为独立合成层，
+     避免每次文本更新都触发卡片的 backdrop-filter 重算 */
+  contain: content;
+  transform: translateZ(0);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: hidden;
+}
+
+.c-fleet-reply {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 8;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 流式光标 */
+.c-caret {
+  display: inline-block;
+  width: 5px;
+  height: 11px;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: fleet-blink 1s steps(2, start) infinite;
+}
+
+/* 尊重系统的「减少动态效果」设置：动画一律停掉 */
+@media (prefers-reduced-motion: reduce) {
+  .c-fleet-card--live .c-fleet-card__accent,
+  .c-fleet-status--live > span:first-child,
+  .c-live-dot,
+  .c-caret {
+    animation: none;
+  }
+  .c-fleet-card:hover {
+    transform: none;
+  }
 }

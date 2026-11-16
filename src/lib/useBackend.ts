@@ -11,7 +11,6 @@ import {
   type ShellResultEvent,
 } from '../mygo'
 import type { FileChange, TodoItem, ToolCall } from '../components/Inspector'
-import type { Activity } from '../components/ActivityFeed'
 
 export type LLMConfig = Config
 export type ShellLog = {
@@ -37,7 +36,6 @@ type State = {
   changes: FileChange[]
   todos: TodoItem[]
   tools: ToolCall[]
-  activities: Activity[]
   tokenUsage: Record<string, { in: number; out: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
@@ -58,7 +56,6 @@ const EMPTY: State = {
   changes: [],
   todos: [],
   tools: [],
-  activities: [],
   tokenUsage: {},
   focusAgentId: null,
 }
@@ -84,23 +81,6 @@ export function useBackend() {
     API.getLLMConfig().then((llm) => alive && setState((s) => ({ ...s, llm })))
     API.getWorkDir().then((workDir) => alive && setState((s) => ({ ...s, workDir })))
 
-    // 辅助函数：添加活动记录
-    const addActivity = (type: Activity['type'], fromId: string, text: string, toName?: string) => {
-      setState((s) => {
-        const from = s.agents.find((a) => a.id === fromId)
-        const activity: Activity = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          type,
-          fromName: from?.name ?? '系统',
-          fromColor: from?.color ?? '#888',
-          toName,
-          text: text.slice(0, 60),
-          at: Date.now(),
-        }
-        return { ...s, activities: [...s.activities, activity].slice(-50) }
-      })
-    }
-
     sub(events.agentCreated, (a) =>
       setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, a] })),
     )
@@ -125,15 +105,6 @@ export function useBackend() {
     )
     sub(events.agentMessage, ({ id, message, tokensIn, tokensOut }) =>
       setState((s) => {
-        const agent = s.agents.find((a) => a.id === id)
-        const activity: Activity = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          type: message.role === 'user' ? 'prompt' : 'status',
-          fromName: message.role === 'user' ? '你' : agent?.name ?? 'Agent',
-          fromColor: message.role === 'user' ? '#888' : agent?.color ?? '#5b9dff',
-          text: message.content.slice(0, 60),
-          at: Date.now(),
-        }
         const newTokenUsage = { ...s.tokenUsage }
         if (tokensIn || tokensOut) {
           const existing = newTokenUsage[id] ?? { in: 0, out: 0 }
@@ -143,27 +114,16 @@ export function useBackend() {
           ...s,
           agents: s.agents.map((a) => (a.id === id ? { ...a, messages: [...a.messages, message] } : a)),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
-          activities: [...s.activities, activity].slice(-50),
           tokenUsage: newTokenUsage,
         }
       }),
     )
     sub(events.agentError, ({ id, error }) =>
       setState((s) => {
-        const agent = s.agents.find((a) => a.id === id)
-        const activity: Activity = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          type: 'error',
-          fromName: agent?.name ?? 'Agent',
-          fromColor: agent?.color ?? '#e5534b',
-          text: error.slice(0, 60),
-          at: Date.now(),
-        }
         return {
           ...s,
           errors: { ...s.errors, [id]: error },
           streaming: omit(s.streaming, id),
-          activities: [...s.activities, activity].slice(-50),
         }
       }),
     )
@@ -171,22 +131,10 @@ export function useBackend() {
       // 工具已开始执行 —— 这是信息事件，不是审批请求。
       // 真正的「等你审批」要等后端接入工具审批流程后由后端发状态，
       // 前端不能在这里把 agent 标成 blocked（会永久锁在等人状态）。
-      setState((s) => {
-        const agent = s.agents.find((a) => a.id === e.agentId)
-        const activity: Activity = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          type: 'tool',
-          fromName: agent?.name ?? 'Agent',
-          fromColor: agent?.color ?? '#e8a33d',
-          text: `${e.tool}: ${e.target.slice(0, 40)}`,
-          at: Date.now(),
-        }
-        return {
-          ...s,
-          tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
-          activities: [...s.activities, activity].slice(-50),
-        }
-      })
+      setState((s) => ({
+        ...s,
+        tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
+      }))
     })
     // 命令执行结果直接进对话流，不再另开一个面板：
     // 用户在一个地方就能看到「我敲了什么 → 输出了什么」。
@@ -280,7 +228,8 @@ export function useBackend() {
     }
   }, [])
 
-  const send = useCallback((action: string, data?: unknown) => {
+  /** send 返回按 action 变化的类型；用泛型让调用处拿到精确结果。 */
+  const sendImpl = useCallback((action: string, data?: unknown): Promise<unknown> => {
     switch (action) {
       case 'agent.create':
         return API.createAgent(data as { name: string; role: string })
@@ -351,7 +300,10 @@ export function useBackend() {
         return API.detachNoteFromAgent(noteId, agentId)
       }
     }
+    return Promise.resolve(undefined)
   }, [])
+
+  const send = sendImpl as <T = unknown>(action: string, data?: unknown) => Promise<T>
 
   // 批准/拒绝工具调用。
   // 当前后端还没有审批流（工具直接执行），所以这里只更新本地展示状态，

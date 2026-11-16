@@ -3,12 +3,13 @@ import Sidebar from './components/Sidebar'
 import AgentView from './components/AgentView'
 import ChannelView from './components/ChannelView'
 import FleetView from './components/FleetView'
+import AmbientBackground from './components/AmbientBackground'
 import Inspector, { type InspectorTab } from './components/Inspector'
 import KnowledgePanel from './components/KnowledgePanel'
 import SettingsModal from './components/SettingsModal'
-import ActivityFeed from './components/ActivityFeed'
 import ToastContainer from './components/Toast'
 import { useBackend } from './lib/useBackend'
+import type { AgentView as Agent } from './mygo'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
 
@@ -64,10 +65,10 @@ export default function App() {
   const err = activeAgent ? s.errors[activeAgent.id] : undefined
 
   const createAgent = async (name: string, role: string, backend: string, workDir?: string) => {
-    const created =
-      backend === 'mock'
-        ? await s.send('agent.create', { name, role })
-        : await s.send('agent.createCLI', { name, role, backend })
+    const created = await s.send<Agent | null>(
+      backend === 'mock' ? 'agent.create' : 'agent.createCLI',
+      backend === 'mock' ? { name, role } : { name, role, backend },
+    )
     // 两阶段：先创建，再写入会话级工作目录（避免改 CreateAgentRequest 形状）
     if (created && workDir) {
       await s.send('agent.workDir', { id: created.id, dir: workDir })
@@ -76,7 +77,9 @@ export default function App() {
   }
 
   return (
-    <div className="c-shell">
+    <>
+      <AmbientBackground />
+      <div className="c-shell">
       <Sidebar
         agents={s.agents}
         channels={s.channels}
@@ -160,7 +163,7 @@ export default function App() {
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
           onQuickCreate={async (name, role) => {
-            const created = await s.send('agent.create', { name, role })
+            const created = await s.send<Agent | null>('agent.create', { name, role })
             if (created) setActive({ kind: 'agent', id: created.id })
           }}
           onCreateRequest={() => setCreateOpen(true)}
@@ -175,8 +178,6 @@ export default function App() {
           todos={s.todos}
           tools={s.tools}
           onClose={() => setInspectorOpen(false)}
-          onApprove={s.approveTool}
-          onReject={s.rejectTool}
           knowledge={{
             count: s.notes.length,
             node: (
@@ -200,8 +201,8 @@ export default function App() {
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
       />
 
-      <ActivityFeed activities={s.activities} />
       <ToastContainer />
-    </div>
+      </div>
+    </>
   )
 }

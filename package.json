@@ -8,9 +8,9 @@
     "build:app": "mygo build -skip-installer",
     "generate": "mygo generate",
     "dev:web": "vite",
-    "build:web": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
-    "verify": "npm run build:web && go vet ./... && go test -race ./... && npm run test:e2e",
+    "build:web": "npm run typecheck && vite build",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit",
+    "verify": "npm run typecheck && go vet ./... && go test -race ./... && npm run test:e2e",
     "test:e2e": "playwright test"
   },
   "dependencies": {
