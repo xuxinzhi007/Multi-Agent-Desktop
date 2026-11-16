@@ -261,3 +261,27 @@ test('收起过程中胶囊最后才出现，不是立刻替换内容', async ({
     `收起 80ms 后面板 opacity=${panelOpacity}，应该还在退场`,
   ).toBeGreaterThan(0)
 })
+
+test('展开态必须有「回到主窗」的入口', async ({ page }) => {
+  await openIsland(page)
+  await page.locator('.island__pill').click()
+  await page.waitForTimeout(600)
+
+  // 之前从中控切到悬浮岛之后没有任何回去的路
+  const back = page.getByRole('button', { name: /主窗/ })
+  await expect(back).toBeVisible()
+
+  const calls: string[] = []
+  await page.exposeFunction('__rec', (m: string) => calls.push(m))
+  await page.evaluate(() => {
+    const w = window as unknown as { mygo: { call: (m: string, ...a: unknown[]) => Promise<unknown> } }
+    const orig = w.mygo.call
+    w.mygo.call = (method: string, ...args: unknown[]) => {
+      void (window as unknown as { __rec: (m: string) => void }).__rec(`${method}:${String(args[0])}`)
+      return orig(method, ...args)
+    }
+  })
+  await back.click()
+  await page.waitForTimeout(200)
+  expect(calls.some((c) => c.includes('ToggleMiniWindow:false'))).toBe(true)
+})

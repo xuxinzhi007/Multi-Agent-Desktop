@@ -449,7 +449,14 @@ export const API = {
   stopAllAgents(): Promise<number> {
     return call("API.StopAllAgents");
   },
-  /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
+  /**
+   * ToggleMiniWindow 显示/隐藏迷你悬浮窗。
+   * ToggleMiniWindow 在主窗与悬浮岛之间切换。
+   *
+   * 顺序很重要：先让目标窗口可见、再隐藏另一个。
+   * 反过来的话，如果隐藏操作把「最后一个可见窗口」藏掉，
+   * 进程可能进入两个窗口都不可见的状态 —— 用户就再也切不回来了。
+   */
   toggleMiniWindow(show: boolean): Promise<boolean> {
     return call("API.ToggleMiniWindow", show);
   },

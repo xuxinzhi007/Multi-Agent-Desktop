@@ -978,21 +978,34 @@ func (s *API) PickDirectory() string {
 }
 
 // ToggleMiniWindow 显示/隐藏迷你悬浮窗。
+// ToggleMiniWindow 在主窗与悬浮岛之间切换。
+//
+// 顺序很重要：先让目标窗口可见、再隐藏另一个。
+// 反过来的话，如果隐藏操作把「最后一个可见窗口」藏掉，
+// 进程可能进入两个窗口都不可见的状态 —— 用户就再也切不回来了。
 func (s *API) ToggleMiniWindow(show bool) bool {
-	if miniWindowRef != nil {
-		if show {
-			miniWindowRef.Show()
-			// 隐藏主窗口
-			if s.win != nil {
-				s.win.Hide()
-			}
-		} else {
-			miniWindowRef.Hide()
-			// 显示主窗口
-			if s.win != nil {
-				s.win.Show()
-			}
+	mini := miniWindowRef
+	if mini == nil || mini.IsDestroyed() {
+		// 悬浮岛不可用时确保主窗可见，别把用户关在门外
+		if s.win != nil && !s.win.IsDestroyed() {
+			s.win.Show()
+			s.win.Focus()
 		}
+		return false
+	}
+
+	if show {
+		mini.Show()
+		mini.Focus()
+		if s.win != nil && !s.win.IsDestroyed() {
+			s.win.Hide()
+		}
+	} else {
+		if s.win != nil && !s.win.IsDestroyed() {
+			s.win.Show()
+			s.win.Focus()
+		}
+		mini.Hide()
 	}
 	return show
 }

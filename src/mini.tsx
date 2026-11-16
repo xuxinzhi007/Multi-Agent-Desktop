@@ -243,6 +243,16 @@ function MiniApp() {
               已暂停
             </span>
           )}
+          {/* 唯一的「回到主窗」出口。之前没有这个按钮，
+              从中控点进悬浮岛之后就再也回不去了。 */}
+          <button
+            type="button"
+            className="panel__back"
+            onClick={() => API.toggleMiniWindow(false)}
+            title="回到主窗口"
+          >
+            ⤢ 主窗
+          </button>
           <button
             type="button"
             className="panel__close"
