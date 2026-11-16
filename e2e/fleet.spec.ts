@@ -167,3 +167,42 @@ test('空舰队时提供一键创建', async ({ page }) => {
   const ctas = page.locator('.c-empty').getByRole('button')
   expect(await ctas.count()).toBeGreaterThan(0)
 })
+
+test('舰队视图默认不吃掉检查器空间', async ({ page }) => {
+  await mockRuntime(page, {
+    agents: [
+      agent({ id: 'a1', name: '前端' }),
+      agent({ id: 'a2', name: '后端' }),
+      agent({ id: 'a3', name: '测试' }),
+    ],
+    channels: [],
+    notes: [],
+  })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+
+  // 检查器初始收起：舰队的价值是一眼看全，被挤窄就没意义
+  await expect(page.getByText('agent 还没有改动文件')).toHaveCount(0)
+
+  // 三张卡片都在视口内，不需要横向滚动才能看全
+  const cards = page.locator('.c-fleet-card')
+  await expect(cards).toHaveCount(3)
+  const viewport = page.viewportSize()!
+  for (let i = 0; i < 3; i++) {
+    const box = (await cards.nth(i).boundingBox())!
+    expect(box.x + box.width, `第 ${i + 1} 张卡片超出视口`).toBeLessThanOrEqual(viewport.width + 1)
+  }
+})
+
+test('切到对话视图时检查器自动展开', async ({ page }) => {
+  await mockRuntime(page, {
+    agents: [agent({ id: 'a1', name: '前端' })],
+    channels: [],
+    notes: [],
+  })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+
+  await page.getByRole('button', { name: /对话/ }).first().click()
+  await expect(page.getByText('agent 还没有改动文件')).toBeVisible()
+})

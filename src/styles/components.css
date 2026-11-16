@@ -326,8 +326,11 @@
 /* 卡片：顶部一条身份色，运行时有呼吸光 */
 .c-fleet-card {
   --card-accent: var(--accent-primary);
-  width: 300px;
-  flex-shrink: 0;
+  /* 少 agent 时铺满可用宽度，多 agent 时保持可读的最小宽度并横向滚动。
+     basis 0 + min-width 是让它「能伸能缩但不塌」的标准写法。 */
+  flex: 1 1 0;
+  min-width: 288px;
+  max-width: 460px;
   display: flex;
   flex-direction: column;
   position: relative;

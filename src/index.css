@@ -18,6 +18,13 @@
   --bg-elevated: #212734;    /* 弹窗 / 下拉 */
   --bg-inset: #0d1015;       /* 输入框 / 代码块（比面板更暗）*/
 
+  /* --- 氛围层（暗色）---
+     暗色下光斑要克制：过强会把深色变得浑浊。
+     网格用微弱的白线，暗角压回底色。 */
+  --ambient-grid: rgba(255, 255, 255, 0.028);
+  --ambient-vignette: var(--bg-base);
+  --ambient-opacity: 0.62;
+
   /* --- 玻璃层：让背景柔光透上来，界面才有纵深 --- */
   --bg-glass: rgba(16, 19, 24, 0.72);
   --bg-glass-strong: rgba(16, 19, 24, 0.88);
@@ -105,19 +112,23 @@
 /* ============ 亮色主题 ============ */
 :root[data-theme='light'] {
   color-scheme: light;
-  /* --- 中性色阶（背景：越靠上层越暗，与暗色相反）--- */
-  --bg-base: #f2f3f5;
-  --bg-chrome: #e8eaed;
+  /* --- 中性色阶 ---
+     底色是带一点冷调的近白，不是中性灰。
+     之前的 #f2f3f5 让整个界面看起来"蒙了一层灰"：
+     灰底 + 纯白卡片，视觉上既不干净也没有层次。
+     主题参考 Vercel / Linear：底色冷白、卡片纯白、靠边框分层。 */
+  --bg-base: #fafbfc;
+  --bg-chrome: #ffffff;
   --bg-surface: #ffffff;
-  --bg-surface-hover: #f0f1f3;
-  --bg-surface-active: #e4e6e9;
+  --bg-surface-hover: #f4f6f8;
+  --bg-surface-active: #eceff3;
   --bg-elevated: #ffffff;
-  --bg-inset: #e9eaec;
+  --bg-inset: #f4f6f9;
 
-  /* --- 边框 --- */
-  --border-subtle: #d4d7db;
-  --border-default: #c4c8ce;
-  --border-strong: #a8adb5;
+  /* --- 边框（亮色下浮起来主要靠它，所以要略明显）--- */
+  --border-subtle: #e8ebef;
+  --border-default: #dbe0e7;
+  --border-strong: #bcc3cd;
   --border-focus: #3b7de0;
 
   /* --- 文字 --- */
@@ -135,6 +146,22 @@
   --accent-bright: #2a5eb0;
   --accent-dim: rgba(59, 125, 224, 0.1);
   --accent-border: rgba(59, 125, 224, 0.35);
+
+  /* --- 玻璃层（亮色）---
+     之前没定义，直接继承了暗色的 rgba(16,19,24,.72) ——
+     等于在亮色界面上盖了层半透明黑，这是「发灰」的第二个来源。
+     亮色下用偏白的半透明，让氛围光透上来而不是压暗。 */
+  --bg-glass: rgba(255, 255, 255, 0.76);
+  --bg-glass-strong: rgba(255, 255, 255, 0.9);
+  --glass-blur: 18px;
+  --glass-highlight: rgba(255, 255, 255, 0.7);
+
+  /* --- 氛围层（亮色）---
+     亮色下光斑必须更明显才看得出层次，但不能变成脏色块。
+     暗角用极淡的冷灰（而不是 bg-base），避免四周蒙灰。 */
+  --ambient-grid: rgba(15, 23, 42, 0.045);
+  --ambient-vignette: rgba(226, 232, 240, 0.55);
+  --ambient-opacity: 0.72;
 
   /* --- 语义色（亮主题下加深）--- */
   --success: #1a9e66;
@@ -564,9 +591,10 @@ textarea::placeholder {
 .c-ambient__grid {
   position: absolute;
   inset: -50%;
+  /* 网格线颜色走 token：暗色用白线，亮色用黑线，否则亮色下完全看不见 */
   background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+    linear-gradient(to right, var(--ambient-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--ambient-grid) 1px, transparent 1px);
   background-size: 56px 56px;
   mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 30%, transparent 75%);
   transform: translate3d(calc(var(--px) * -8px), calc(var(--py) * -8px), 0);
@@ -578,33 +606,33 @@ textarea::placeholder {
   position: absolute;
   border-radius: 50%;
   filter: blur(90px);
-  opacity: 0.5;
+  opacity: var(--ambient-opacity, 0.5);
   will-change: transform;
 }
 
 .c-ambient__blob--a {
-  width: 46vw;
-  height: 46vw;
-  top: -12vw;
-  left: -8vw;
+  width: 54vw;
+  height: 54vw;
+  top: -16vw;
+  left: -12vw;
   background: radial-gradient(
     circle at 50% 50%,
-    color-mix(in srgb, var(--ambient-tint) 46%, transparent),
-    transparent 68%
+    color-mix(in srgb, var(--ambient-tint) 62%, transparent),
+    transparent 70%
   );
   transform: translate3d(calc(var(--px) * 18px), calc(var(--py) * 18px), 0);
   animation: ambient-drift-a 26s ease-in-out infinite alternate;
 }
 
 .c-ambient__blob--b {
-  width: 40vw;
-  height: 40vw;
-  right: -10vw;
-  bottom: -14vw;
+  width: 48vw;
+  height: 48vw;
+  right: -14vw;
+  bottom: -18vw;
   background: radial-gradient(
     circle at 50% 50%,
-    color-mix(in srgb, var(--agent-4) 38%, transparent),
-    transparent 68%
+    color-mix(in srgb, var(--agent-4) 54%, transparent),
+    transparent 70%
   );
   transform: translate3d(calc(var(--px) * -22px), calc(var(--py) * -22px), 0);
   animation: ambient-drift-b 32s ease-in-out infinite alternate;
@@ -631,7 +659,13 @@ textarea::placeholder {
 .c-ambient__vignette {
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse 80% 70% at 50% 45%, transparent 45%, var(--bg-base) 100%);
+  /* 用 --ambient-vignette 而不是 bg-base：亮色下 bg-base 是接近白，
+     直接在四周压一圈会变成"灰雾"。亮色改用极淡的冷灰。 */
+  background: radial-gradient(
+    ellipse 88% 82% at 50% 45%,
+    transparent 58%,
+    var(--ambient-vignette) 100%
+  );
 }
 
 @media (prefers-reduced-motion: reduce) {

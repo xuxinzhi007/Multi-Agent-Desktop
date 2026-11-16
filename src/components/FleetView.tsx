@@ -61,6 +61,9 @@ export default function FleetView({
           display: 'flex',
           gap: 'var(--space-3)',
           padding: 'var(--space-3)',
+          // minWidth:0 必须写：flex 子项默认 min-width:auto，
+          // 会被卡片内容撑开，导致溢出而不是出现横向滚动条
+          minWidth: 0,
           minHeight: 0,
         }}
       >

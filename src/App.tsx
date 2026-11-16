@@ -24,7 +24,9 @@ export default function App() {
   const [view, setView] = useState<MainView>('fleet')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
-  const [inspectorOpen, setInspectorOpen] = useState(true)
+  // 默认视图是舰队，检查器会把它挤窄，所以初始收起。
+  // 进对话视图时 onViewChange 会把它展开。
+  const [inspectorOpen, setInspectorOpen] = useState(false)
   const [tab, setTab] = useState<InspectorTab>('changes')
 
   // 选中项失效时自动回落到第一个可用项
@@ -93,7 +95,12 @@ export default function App() {
           setView('chat')
         }}
         view={view}
-        onViewChange={setView}
+        onViewChange={(v) => {
+          setView(v)
+          // 舰队的价值是「一眼看全」；检查器会把监控台挤窄，切过去时自动收起。
+          // 回到对话再展开，因为 diff / 工具面板是看对话时才用得上的。
+          setInspectorOpen(v === 'chat')
+        }}
         onCreate={createAgent}
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
