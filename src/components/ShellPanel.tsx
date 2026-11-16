@@ -1,4 +1,4 @@
-import type { ShellLog } from '../lib/useSidecar'
+import type { ShellLog } from '../lib/useBackend'
 import { prettyTime } from '../lib/presets'
 
 export default function ShellPanel({ logs, onClose }: { logs: ShellLog[]; onClose: () => void }) {

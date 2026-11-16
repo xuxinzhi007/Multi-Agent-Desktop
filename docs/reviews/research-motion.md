@@ -1,7 +1,7 @@
 # 研究：前端动画与状态过渡的工程实现（Electron / WebView 悬浮窗场景）
 
 > 调研日期：2025-11-12
-> 范围：`src/mini.tsx`（灵动岛悬浮窗）、`src/components/ActivityFeed.tsx`、`src/lib/useSidecar.ts`（高频事件源）
+> 范围：`src/mini.tsx`（灵动岛悬浮窗）、`src/components/ActivityFeed.tsx`、`src/lib/useBackend.ts`（高频事件源）
 > 资料：Motion 官方文档（context7 拉取 `motion.dev/docs/*` 原文） + 社区/浏览器规范经验
 >
 > **置信度标注**
@@ -19,8 +19,8 @@
 
 | 位置 | 现状 | 动画层面意味着什么 |
 |---|---|---|
-| `src/lib/useSidecar.ts:61` | 单一 `useState<State>` 大对象，任何事件都 `setState(s => ({...s, ...}))` | **全树重渲染**。一整条 `agents` 数组换新引用，所有 agent 卡片重算。这是最大的性能债，比动画本身更贵。 |
-| `src/lib/useSidecar.ts:133-140` | `agentMessage` 事件把 `[...a.messages, message]` 追加进数组 | 长会话下数组复制 O(n)，且一条 assistant 消息就触发整棵树。 |
+| `src/lib/useBackend.ts:61` | 单一 `useState<State>` 大对象，任何事件都 `setState(s => ({...s, ...}))` | **全树重渲染**。一整条 `agents` 数组换新引用，所有 agent 卡片重算。这是最大的性能债，比动画本身更贵。 |
+| `src/lib/useBackend.ts:133-140` | `agentMessage` 事件把 `[...a.messages, message]` 追加进数组 | 长会话下数组复制 O(n)，且一条 assistant 消息就触发整棵树。 |
 | `src/mygo.ts:342` | `agentDelta`（流式 token 增量）事件存在 | **每秒可达几十次**。`mini.tsx:51-57` 只在 ref 里累积、不进 state —— 这个做法是对的，不要改坏。 |
 | `mini.tsx:79-82` | `useEffect` → `Sidecar.resizeMiniWindow(height)`，高度靠 layout 计算 | 窗口尺寸变化是 **Go 侧 IPC**，比 CSS 慢一个数量级。见 `floating-window-review.html` 的 `FitContent` 提案。 |
 | `mini.tsx:281-292` | `animation: pulse 1s infinite`（无限 CSS 动画） | 无限动画在隐藏/后台窗口仍占用合成线程；多实例叠加时是"卡"的常见来源。 |
@@ -389,7 +389,7 @@ const animate = reduce ? { opacity: 1 } : { x: 0, opacity: 1 }
 
 ### 4.3 React 重渲染：真正的瓶颈
 
-**问题根源**：`useSidecar.ts:61` 的单一 `useState`，`agents` 数组每次都是新引用 → `App.tsx:39-46` 的 `useMemo` 依赖 `s.agents`，全部失效 → 所有子组件重渲染。
+**问题根源**：`useBackend.ts:61` 的单一 `useState`，`agents` 数组每次都是新引用 → `App.tsx:39-46` 的 `useMemo` 依赖 `s.agents`，全部失效 → 所有子组件重渲染。
 
 **手段 1：拆 state / 拆分订阅（最有效）** 🔶
 把"每秒多次"和"每秒 0 次"的数据分开放：
@@ -399,7 +399,7 @@ const animate = reduce ? { opacity: 1 } : { x: 0, opacity: 1 }
 // 快变：streaming token 增量 → 完全不走 React state
 ```
 
-`mini.tsx:51-57` 的做法（`lastOutputs` 存 `useRef`，不 `setState`）**已经是正确范式**，应推广到 `useSidecar.ts`。目前 `useSidecar` 里 `streaming` 放在 state 里（`useSidecar.ts:32`），且 `agentMessage` 每次都写 → 主窗会随 token 流重渲染整树。
+`mini.tsx:51-57` 的做法（`lastOutputs` 存 `useRef`，不 `setState`）**已经是正确范式**，应推广到 `useBackend.ts`。目前 `useBackend` 里 `streaming` 放在 state 里（`useBackend.ts:32`），且 `agentMessage` 每次都写 → 主窗会随 token 流重渲染整树。
 
 **手段 2：`useSyncExternalStore` + selector 订阅**
 把 `agents` 里单个 agent 的订阅粒度降到 item 级，配合 `useSyncExternalStore` 避免父级 state 变化时全量重算。
@@ -443,7 +443,7 @@ return <motion.div style={{ x }} />
 |---|---|---|---|
 | **P0** | `mini.tsx` 去掉 `transition: 'all'`；`max-height` 过渡改 `transform`/`layout`；`errorPulse` 去掉 `box-shadow` | §4.1 ✅ | 否 |
 | **P0** | 全局加 `@media (prefers-reduced-motion: reduce)` 兜底 | §3.1 ③ 🌐 | 否 |
-| **P0** | `useSidecar` 把 `streaming` 移出 React state（改用 ref/外部 store） | §4.3 | 否 |
+| **P0** | `useBackend` 把 `streaming` 移出 React state（改用 ref/外部 store） | §4.3 | 否 |
 | **P1** | 引入 `motion`，用 `<MotionConfig reducedMotion="user">` + `AnimatePresence mode="popLayout" initial={false}` 做状态点增删 | §1.2 §3.1 ✅ | 是（`motion`） |
 | **P1** | agent 状态点拆 `memo` 组件，回调 `useCallback` | §4.3 | 否 |
 | **P1** | 悬浮窗改 `FitContent`，React 不再调 `resizeMiniWindow` | §4.4 | 否（Go 侧） |

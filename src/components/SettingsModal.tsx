@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import { Sidecar } from '../mygo'
-import type { LLMConfig } from '../lib/useSidecar'
+import { API } from '../mygo'
+import type { LLMConfig } from '../lib/useBackend'
 
 type Props = {
   open: boolean
@@ -31,7 +31,7 @@ export default function SettingsModal(p: Props) {
     setLoadingModels(true)
     setModelError('')
     try {
-      const list = await Sidecar.listModels(cfg)
+      const list = await API.listModels(cfg)
       setModels(list)
       if (list.length === 0) {
         setModelError('未获取到模型列表')
@@ -189,7 +189,7 @@ export default function SettingsModal(p: Props) {
                 style={{ width: '100%' }}
               />
               <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginTop: 4 }}>
-                {cfg.provider === 'ollama' ? 'Ollama 本地不需要，留空' : '仅存在 sidecar 内存，不落盘'}
+                {cfg.provider === 'ollama' ? 'Ollama 本地不需要，留空' : '仅存在进程内存，不落盘'}
               </div>
             </Field>
           </>

@@ -1,7 +1,7 @@
 # 设计文档：multi-agent-desktop
 
-> 版本：0.3.0（MyGo 迁移后）
-> 最后更新：2026-11-12
+> 版本：0.3.0
+> 最后更新：2026-11-16
 
 ---
 
@@ -53,7 +53,7 @@ React 19 前端（Vite 构建）
 
 ```go
 // Go 端
-mygo.Bind(Sidecar{})  // 暴露 Sidecar 的方法给前端
+mygo.Bind(API{})  // 暴露 API 的方法给前端
 
 var AgentCreated = mygo.NewEvent[Agent]("agent.created")
 AgentCreated.Emit(win, agent)  // 推给前端
@@ -61,7 +61,7 @@ AgentCreated.Emit(win, agent)  // 推给前端
 
 ```ts
 // 前端（自动生成 src/mygo.ts）
-await Sidecar.createAgent({ name: "前端", role: "..." })
+await API.createAgent({ name: "前端", role: "..." })
 events.agentCreated.on((agent) => { ... })
 ```
 
@@ -125,12 +125,12 @@ events.agentCreated.on((agent) => { ... })
 
 ### 4.1 单一状态源
 
-`useSidecar.ts` 是唯一状态管理：
+`useBackend.ts` 是唯一状态管理：
 - 订阅 MyGo events → 更新 React state
 - 暴露 `send(action, data)` → 调 Mygo 方法
 
 ```
-Go Event → useSidecar reducer → React state → 组件渲染
+Go Event → useBackend reducer → React state → 组件渲染
                 ↑
          用户操作 → send() → Go 方法
 ```
@@ -270,7 +270,7 @@ func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message,
 - 解耦：agent 包不依赖 MyGo
 - 可测试：单测时换成 channel 收集事件
 - `emitToWindow` 只做「字符串事件 → 强类型 payload → Emit」的转发，每个 `toXxx(data)` 是纯函数，`win == nil` 时可单测
-- **新子系统不走 `map[string]any` 协议**：channel / knowledge 事件直接在 Sidecar 层用 typed `Event.Emit`
+- **新子系统不走 `map[string]any` 协议**：channel / knowledge 事件直接在 API 层用 typed `Event.Emit`
 
 ### 5.5 会话级配置（单一事实源）
 
@@ -383,7 +383,7 @@ useEffect(() => {
 | 无知识库 | ✅ 完成 | `internal/knowledge` + `KnowledgePanel.tsx` |
 | 检查器面板是演示数据 | 🟡 中 | 接 CLI agent 产生真实数据 |
 | agent 不能读写代码 | 🟡 中 | 加 tools 包 |
-| 无 git worktree 隔离 | 🟡 中 | worktree 包 |
+| 无 git worktree 隔离 | 🟡 中 | 未开始，需新建包 |
 | LLMCfg 的 API Key 明文落盘 | 🟡 中 | 迁移到 `mygo.Secrets`（`// TODO(secrets)`） |
 | 频道是广播触发，非讨论收敛 | 🟡 中 | 语义保持为「广播」，不做多轮收敛编排 |
 
@@ -392,5 +392,4 @@ useEffect(() => {
 ## 8. 参考
 
 - MyGo: https://github.com/egoist/mygo
-- 调研: docs/research.md
-- 交接: HANDOVER.md
+- 架构评审历史：`docs/reviews/`

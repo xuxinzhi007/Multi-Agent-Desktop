@@ -11,7 +11,7 @@
 
 **证据（文件:符号 行号）**
 - `src/App.tsx:ChannelView onSend`（`App.tsx` 第二处 `s.send('channel.send', ...)`）→ 只传 `channelId/fromId/fromName/text`，一行一个 IPC 调用。
-- `src/lib/useSidecar.ts:send` `case 'channel.send'` → `Sidecar.sendToChannel(...)`，`.catch` 后 `return null`（错误被吞）。
+- `src/lib/useBackend.ts:send` `case 'channel.send'` → `Sidecar.sendToChannel(...)`，`.catch` 后 `return null`（错误被吞）。
 - `main.go:Sidecar.SendToChannel`，行 **318-376**：
   - `319` `s.channels.Broadcast(...)` 拿到 `recipients`
   - `332` `for _, agentId := range recipients`（**同步 for 循环，逐个 `Prompt`**）
@@ -25,7 +25,7 @@
 1. 一次发送 = 在 `SendToChannel` 的同一个 goroutine 里对 N 个成员**顺序**调用 `Prompt`；`Prompt` 只是入队，所以用户侧「立即返回」，N 个 agent 各自 goroutine **并行**流式输出。这就是「5 个成员同时跑」的真实形态：5 个独立 goroutine、5 条独立 SSE/CLI 流、5 份独立 token 消耗。
 2. 并发上限**只有队列容量 32/agent**，没有全局并发控制、没有速率限制、没有「群内 turn」概念。`executeMock` 里若 `cfg.Provider == "mock"` 还会额外 `m.demoTrail(a.ID, a.Name)`（`manager.go:501-503`，`internal/agent/demo.go:demoTrail`）——**每个成员都会注入一整套假的 todo/tool/file.change 事件**，5 个成员就是 5 套假事件打同一个 Inspector。
 3. 「彼此看不见对方回复」是**必然**的：`executeMock` 只把**自己的** `a.Messages` 快照送给模型（`manager.go:493-496`），频道历史从不进入任何 agent 的 `Messages`（见 F3）。
-4. 由于 `ChannelView` 的 `onSend` 不 await 也不展示错误（`useSidecar.ts:293` 吞异常），**用户对「有成员没收到」零感知**。
+4. 由于 `ChannelView` 的 `onSend` 不 await 也不展示错误（`useBackend.ts:293` 吞异常），**用户对「有成员没收到」零感知**。
 
 **判定**：已证实（1/2/3 为逐行可复核；5 个成员的并行度与 token 倍数为直接推论）。
 
@@ -39,7 +39,7 @@
   —— `text` 是**入队时的 `req.Text`**，只有 `SendToChannel` 在 `main.go:360` 拼过 `[channel:...]` 前缀。
 - `extractChannelId` 行 **770-779**：纯字符串 `strings.Index(text, "[channel:")` + 第一个 `]`，即 `[channel:ch-xxx]`。**无转义、无长度校验、无「是否是会员/是否仍是成员」校验**。
 - 消费端：`main.go:emitToWindow` 行 **870-878** `case "agent.channel.reply"` → `chMgr.AddMessage(...)` + `ChannelMessage.Emit(win, *msg)`。**它只写历史 + 推前端，从不调用 `SendToChannel`/`Broadcast`/`Prompt`。**
-- 前端：`src/lib/useSidecar.ts:events.channelMessage` 只 `setState` 追加消息，无任何回调后端。
+- 前端：`src/lib/useBackend.ts:events.channelMessage` 只 `setState` 追加消息，无任何回调后端。
 
 **实际后果**
 - 不存在「A 回复 → 触发 B → 触发 A」的回声风暴：**回声风险被实现层面的「少一条边」规避，而不是被某条显式规则规避**。群聊实际是「单轮扇出（fan-out only）」。
@@ -76,7 +76,7 @@
 - 行 **361-367**：`Prompt` 出错只 `errs = append(errs, err.Error())`，**不回滚消息、不标记消息状态**。
 - 行 **372-375**：`return fmt.Errorf("部分成员未能接收: %s", strings.Join(errs, "; "))` —— 一个**字符串拼接的聚合错误**，丢失「谁失败/为什么失败」的结构（仅靠 `err.Error()` 里嵌的 agent id 可辨）。
 - `internal/agent/manager.go:Prompt` 行 **414**：`return fmt.Errorf("agent %s queue full", req.AgentID)`。
-- 前端吞错：`src/lib/useSidecar.ts` `case 'channel.send'` → `.catch((e) => { console.error(...); return null })`；`src/App.tsx:ChannelView onSend` 不 await、不 toast。
+- 前端吞错：`src/lib/useBackend.ts` `case 'channel.send'` → `.catch((e) => { console.error(...); return null })`；`src/App.tsx:ChannelView onSend` 不 await、不 toast。
 - `channel.Message` 结构（`channel.go:12-20`）**没有 `status` / `pending` / `failed` 字段**，所以「部分成功」这个状态在数据模型里**无处安放**。
 
 **实际后果**
@@ -102,7 +102,7 @@
 | `internal/agent/manager.go:Agent.Messages` | `[channel:...]` 前缀 + 私有历史 | ❌ 随 agent 一起删（无引用问题） |
 | `internal/agent/manager.go:Delete` **360-385** | `close(a.done)` + `a.stop()` | ⚠️ 两者之间有窗口：`workerLoop` 的 `select` 可能已取到 `req` 并进入 `execute`，`a.stop()` 里 `a.cancel == nil` 时返回 false → **该轮照跑并在结束后 `m.emit` 一个已删 agent 的 `agent.message` / `agent.channel.reply`（`finish`/`executeMock` 均不校验 agent 是否还在）** |
 | `src/App.tsx` 选中态回落 **22-36** | `active.kind === 'agent' && !s.agents.some(...)` → 回落 | ✅ 有回落；但 **`active.kind === 'channel'` 的回落只在频道消失时触发**，删的是 agent 时不触发（不影响） |
-| `src/lib/useSidecar.ts:events.agentDeleted` **102-108** | 只 `filter` + `omit(streaming)` | ⚠️ **不清 `errors[id]` / `tokenUsage[id]` / `activities[*]`**，残留内存与活动流幽灵条目 |
+| `src/lib/useBackend.ts:events.agentDeleted` **102-108** | 只 `filter` + `omit(streaming)` | ⚠️ **不清 `errors[id]` / `tokenUsage[id]` / `activities[*]`**，残留内存与活动流幽灵条目 |
 
 **实际后果**
 - 无悬挂**指针**（Go 侧 `Get` 返回 `!ok` 会被 `SendToChannel:334-337` `continue` 跳过），但有**悬挂引用语义**：频道历史保留 `fromId` 却查不到人 → `ChannelView` 的成员色/成员徽章失配，且**没有任何「已离开成员」的呈现**。
@@ -117,7 +117,7 @@
 
 **证据**
 - `src/App.tsx` 行 **40-52**：`activeAgent` / `activeChannel` 由 `active.kind` **二选一**，渲染分支 `activeChannel ? <ChannelView/> : <AgentView/>`（**完整 unmount/remount**，不是并排）。
-- `src/components/ChannelView.tsx` 行 **14** `useState('')` + `taRef`；`src/components/AgentView.tsx` 行 **27** `useState('')` + `taRef`。切换即 **remount → `input` 状态清零**。半个句子在切换时**直接丢失**（无 draft 提升到 `App`/`useSidecar`）。
+- `src/components/ChannelView.tsx` 行 **14** `useState('')` + `taRef`；`src/components/AgentView.tsx` 行 **27** `useState('')` + `taRef`。切换即 **remount → `input` 状态清零**。半个句子在切换时**直接丢失**（无 draft 提升到 `App`/`useBackend`）。
 - 滚动位置：`ChannelView.tsx:22-26` 依赖 `channel?.messages.length`，remount 后 `useEffect` 强制 `scrollTop = scrollHeight`（永远回到底部）；`AgentView.tsx` 有 `pinnedToBottom` ref 的「智能 pin」，**两套策略**。
 - @ 提及：`ChannelView.tsx:handleInputChange/insertMention/filtered` 与 `AgentView.tsx:handleInputChange/insertMention/filteredAgents/parseMentions` 是**两份独立实现**，语义还不同：
   - `AgentView.parseMentions` 用 `/@(\S+)/g` 并**剥掉 @ 再路由**；
@@ -131,7 +131,7 @@
 - 切换代价 = 输入框内容清零 + 滚动位置重置 + 群聊中看不到「谁在想」。没有丢**已落库**的消息（频道历史在 `s.channels` 里，AgentView 消息在 `s.agents` 里），丢的是**未提交的输入**与**在途流式片段**（`ChannelView` 不显示 `streaming`，切走再切回最多看到整条）。
 - 「群聊」与「单聊」是两个 **shallow adapter** 贴在同一份后端 API（`Prompt` / `SendToChannel`）上：UI 层 90% 重复（textarea 自动高度、Enter 提交、mention 弹层、mention 插入），仅发言人身份与目标集合不同。**任何输入体验改进都要改两遍**，这是 leverage 最差的位置。
 
-**判定**：已证实（双份实现、draft 丢失、mention 第三份实现）；「在途片段丢失」为推断（取决于流式事件是否落在已 unmount 的订阅上——订阅在 `useSidecar`，是全局的，故 `streaming` 状态**不丢**，只是 `ChannelView` 不显示）。
+**判定**：已证实（双份实现、draft 丢失、mention 第三份实现）；「在途片段丢失」为推断（取决于流式事件是否落在已 unmount 的订阅上——订阅在 `useBackend`，是全局的，故 `streaming` 状态**不丢**，只是 `ChannelView` 不显示）。
 
 ---
 

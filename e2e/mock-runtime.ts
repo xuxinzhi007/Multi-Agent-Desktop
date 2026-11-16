@@ -4,7 +4,7 @@ import { test as base, type Page } from '@playwright/test'
  * 在浏览器里 mock MyGo runtime。
  *
  * 真实环境由 MyGo 窗口注入 globalThis.mygo；浏览器里没有，
- * 不 mock 的话 useSidecar 的 Sidecar.* 全部 reject，UI 渲染不出来。
+ * 不 mock 的话 useBackend 的 API.* 全部 reject，UI 渲染不出来。
  *
  * 只 mock UI 结构测试需要的方法，返回值都是空数据。
  */
@@ -27,18 +27,18 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
     ;(window as unknown as Record<string, unknown>).__mockCalls = calls
 
     const handlers: Record<string, (...args: unknown[]) => unknown> = {
-      'Sidecar.ListAgents': () => initial.agents,
-      'Sidecar.ListChannels': () => initial.channels,
-      'Sidecar.QueryNotes': () => initial.notes,
-      'Sidecar.GetLLMConfig': () => ({
+      'API.ListAgents': () => initial.agents,
+      'API.ListChannels': () => initial.channels,
+      'API.QueryNotes': () => initial.notes,
+      'API.GetLLMConfig': () => ({
         provider: 'mock',
         baseUrl: '',
         apiKey: '',
         model: 'mock',
       }),
-      'Sidecar.GetWorkDir': () => '',
-      'Sidecar.IsAlwaysOnTop': () => false,
-      'Sidecar.CreateAgent': (req) => ({
+      'API.GetWorkDir': () => '',
+      'API.IsAlwaysOnTop': () => false,
+      'API.CreateAgent': (req) => ({
         id: 'agent-test-1',
         name: (req as { name?: string })?.name ?? 'test',
         role: (req as { role?: string })?.role ?? '',
@@ -50,15 +50,15 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         backend: (req as { backend?: string })?.backend ?? 'mock',
         workDir: '',
       }),
-      'Sidecar.CreateChannel': () => ({
+      'API.CreateChannel': () => ({
         id: 'ch-test-1',
         name: 'test',
         members: [],
         messages: [],
       }),
-      'Sidecar.SetLLMConfig': (cfg) => cfg,
-      'Sidecar.SetWorkDir': () => undefined,
-      'Sidecar.ListModels': () => ['mock'],
+      'API.SetLLMConfig': (cfg) => cfg,
+      'API.SetWorkDir': () => undefined,
+      'API.ListModels': () => ['mock'],
     }
 
     ;(window as unknown as Record<string, unknown>).mygo = {

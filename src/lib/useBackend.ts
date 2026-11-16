@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Sidecar,
+  API,
   events,
   type AgentView as Agent,
   type Channel,
@@ -60,7 +60,7 @@ const EMPTY: State = {
   focusAgentId: null,
 }
 
-export function useSidecar() {
+export function useBackend() {
   const [state, setState] = useState<State>(EMPTY)
 
   useEffect(() => {
@@ -71,15 +71,15 @@ export function useSidecar() {
       unsubs.push(evt.on((p) => alive && cb(p)))
     }
 
-    Sidecar.listAgents().then((agents) => alive && setState((s) => ({ ...s, agents })))
-    Sidecar.listChannels().then(
+    API.listAgents().then((agents) => alive && setState((s) => ({ ...s, agents })))
+    API.listChannels().then(
       (channels) => alive && setState((s) => ({ ...s, channels: channels ?? [] })),
     )
-    Sidecar.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }).then(
+    API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }).then(
       (notes) => alive && setState((s) => ({ ...s, notes: notes ?? [] })),
     )
-    Sidecar.getLLMConfig().then((llm) => alive && setState((s) => ({ ...s, llm })))
-    Sidecar.getWorkDir().then((workDir) => alive && setState((s) => ({ ...s, workDir })))
+    API.getLLMConfig().then((llm) => alive && setState((s) => ({ ...s, llm })))
+    API.getWorkDir().then((workDir) => alive && setState((s) => ({ ...s, workDir })))
 
     // 辅助函数：添加活动记录
     const addActivity = (type: Activity['type'], fromId: string, text: string, toName?: string) => {
@@ -253,48 +253,48 @@ export function useSidecar() {
   const send = useCallback((action: string, data?: unknown) => {
     switch (action) {
       case 'agent.create':
-        return Sidecar.createAgent(data as { name: string; role: string })
+        return API.createAgent(data as { name: string; role: string })
       case 'agent.createCLI':
-        return Sidecar.createCLIAgent(
+        return API.createCLIAgent(
           (data as { name: string }).name,
           (data as { role: string }).role,
           (data as { backend: string }).backend,
         )
       case 'agent.delete':
-        return Sidecar.deleteAgent((data as { id: string }).id)
+        return API.deleteAgent((data as { id: string }).id)
       case 'agent.stop':
-        return Sidecar.stopAgent((data as { id: string }).id)
+        return API.stopAgent((data as { id: string }).id)
       case 'agent.prompt':
-        return Sidecar.promptAgent(data as { agentId: string; text: string })
+        return API.promptAgent(data as { agentId: string; text: string })
       case 'agent.route':
-        return Sidecar.routeAgent(
+        return API.routeAgent(
           (data as { fromId: string }).fromId,
           (data as { toId: string }).toId,
           (data as { text: string }).text,
         )
       case 'shell.run':
-        return Sidecar.runShell(data as { agentId: string; command: string })
+        return API.runShell(data as { agentId: string; command: string })
       case 'llm.config':
-        return Sidecar.setLLMConfig(data as Config)
+        return API.setLLMConfig(data as Config)
       case 'workdir.set':
-        return Sidecar.setWorkDir((data as { dir: string }).dir)
+        return API.setWorkDir((data as { dir: string }).dir)
       case 'agent.workDir': {
         const { id, dir } = data as { id: string; dir: string }
-        return Sidecar.setAgentWorkDir(id, dir).catch((e) => {
+        return API.setAgentWorkDir(id, dir).catch((e) => {
           console.error('setAgentWorkDir failed', e)
           return null
         })
       }
       case 'agent.llm': {
         const { id, cfg } = data as { id: string; cfg: Config }
-        return Sidecar.setAgentLLM(id, cfg).catch((e) => {
+        return API.setAgentLLM(id, cfg).catch((e) => {
           console.error('setAgentLLM failed', e)
           return null
         })
       }
       case 'channel.create': {
         const { name, members } = data as { name: string; members: string[] }
-        return Sidecar.createChannel(name, members, 'discuss')
+        return API.createChannel(name, members, 'discuss')
       }
       case 'channel.send': {
         const { channelId, fromId, fromName, text } = data as {
@@ -303,18 +303,18 @@ export function useSidecar() {
           fromName: string
           text: string
         }
-        return Sidecar.sendToChannel(channelId, fromId, fromName, text).catch((e) => {
+        return API.sendToChannel(channelId, fromId, fromName, text).catch((e) => {
           console.error('sendToChannel failed', e)
           return null
         })
       }
       case 'note.upsert':
-        return Sidecar.upsertNote(data as Note)
+        return API.upsertNote(data as Note)
       case 'note.delete':
-        return Sidecar.deleteNote((data as { id: string }).id)
+        return API.deleteNote((data as { id: string }).id)
       case 'note.attach': {
         const { noteId, agentId } = data as { noteId: string; agentId: string }
-        return Sidecar.attachNoteToAgent(noteId, agentId)
+        return API.attachNoteToAgent(noteId, agentId)
       }
     }
   }, [])

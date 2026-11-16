@@ -18,8 +18,9 @@ import (
 	"multi-agent-desktop/internal/pty"
 )
 
-// Sidecar 暴露给前端的 API。`mygo generate` 会生成 typed TS client。
-type Sidecar struct {
+// API 是暴露给前端的全部能力。`mygo generate` 据此生成 typed TS client。
+// 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
+type API struct {
 	mgr      *agent.Manager
 	runner   *pty.Runner
 	channels *channel.Manager
@@ -67,7 +68,7 @@ var (
 
 	// 会话级配置变更：携带完整 AgentView，前端整体替换即可。
 	AgentConfig = mygo.NewEvent[AgentView]("agent.config")
-	// 频道事件（由 Sidecar 直接 Emit，不走 emitToWindow 的 map 协议）。
+	// 频道事件（由 API 直接 Emit，不走 emitToWindow 的 map 协议）。
 	ChannelCreated = mygo.NewEvent[channel.Channel]("channel.created")
 	ChannelMessage = mygo.NewEvent[channel.Message]("channel.message")
 	// 知识库事件。
@@ -282,7 +283,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 	return v
 }
 
-func (s *Sidecar) ListAgents() []AgentView {
+func (s *API) ListAgents() []AgentView {
 	list := s.mgr.List()
 	out := make([]AgentView, len(list))
 	for i, a := range list {
@@ -292,13 +293,13 @@ func (s *Sidecar) ListAgents() []AgentView {
 }
 
 // CreateAgent 新建一个 agent。
-func (s *Sidecar) CreateAgent(req CreateAgentRequest) AgentView {
+func (s *API) CreateAgent(req CreateAgentRequest) AgentView {
 	a := s.mgr.Create("", req.Name, req.Role)
 	return toAgentView(a)
 }
 
 // DeleteAgent 删除一个 agent，并从所有频道成员中剔除。
-func (s *Sidecar) DeleteAgent(id string) bool {
+func (s *API) DeleteAgent(id string) bool {
 	ok := s.mgr.Delete(id)
 	if ok {
 		s.channels.RemoveMember(id)
@@ -307,40 +308,40 @@ func (s *Sidecar) DeleteAgent(id string) bool {
 }
 
 // StopAgent 停止一个 agent 的推理并清空队列。
-func (s *Sidecar) StopAgent(id string) bool {
+func (s *API) StopAgent(id string) bool {
 	return s.mgr.Stop(id)
 }
 
 // BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。
-func (s *Sidecar) BlockAgent(id, reason string) error {
+func (s *API) BlockAgent(id, reason string) error {
 	return s.mgr.SetBlocked(id, reason)
 }
 
 // UnblockAgent 解除「在等人」状态。
-func (s *Sidecar) UnblockAgent(id string) error {
+func (s *API) UnblockAgent(id string) error {
 	return s.mgr.Unblock(id)
 }
 
 // RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。
-func (s *Sidecar) RouteAgent(fromId, toId, text string) error {
+func (s *API) RouteAgent(fromId, toId, text string) error {
 	return s.mgr.Route(fromId, toId, text)
 }
 
 // CreateChannel 新建频道。policy 为空时由 channel 包回落 discuss。
-func (s *Sidecar) CreateChannel(name string, members []string, policy string) channel.Channel {
+func (s *API) CreateChannel(name string, members []string, policy string) channel.Channel {
 	ch := s.channels.Create("", name, members, channel.TurnPolicy(policy))
 	ChannelCreated.Emit(s.win, ch)
 	return ch
 }
 
 // ListChannels 返回所有频道快照。
-func (s *Sidecar) ListChannels() []channel.Channel {
+func (s *API) ListChannels() []channel.Channel {
 	return s.channels.List()
 }
 
 // SendToChannel 发消息到频道，并触发相关成员 agent。
 // 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
-func (s *Sidecar) SendToChannel(ctx context.Context, channelId, fromId, fromName, text string) error {
+func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, text string) error {
 	// 1. 广播消息到频道（返回副本，不持有内部状态）
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
 	if err != nil {
@@ -443,18 +444,18 @@ func (s *Sidecar) SendToChannel(ctx context.Context, channelId, fromId, fromName
 
 // isRelevantToRole 判断消息是否与角色相关。
 // CreateCLIAgent 新建一个 CLI backend 的 agent。
-func (s *Sidecar) CreateCLIAgent(name, role, backend string) AgentView {
+func (s *API) CreateCLIAgent(name, role, backend string) AgentView {
 	a := s.mgr.CreateWithBackend("", name, role, backend)
 	return toAgentView(a)
 }
 
 // PromptAgent 发消息并流式回流。
-func (s *Sidecar) PromptAgent(ctx context.Context, req PromptRequest) error {
+func (s *API) PromptAgent(ctx context.Context, req PromptRequest) error {
 	return s.mgr.Prompt(ctx, req)
 }
 
 // RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。
-func (s *Sidecar) RunShell(ctx context.Context, req ShellRequest) {
+func (s *API) RunShell(ctx context.Context, req ShellRequest) {
 	go func() {
 		ShellStart.Emit(s.win, ShellEvent{AgentID: req.AgentID, Command: req.Command})
 		res := s.runner.Run(ctx, req.Command)
@@ -467,36 +468,36 @@ func (s *Sidecar) RunShell(ctx context.Context, req ShellRequest) {
 }
 
 // GetLLMConfig 返回当前模型配置。
-func (s *Sidecar) GetLLMConfig() LLMConfig {
+func (s *API) GetLLMConfig() LLMConfig {
 	return s.mgr.LLMConfig()
 }
 
 // SetLLMConfig 切换模型配置。
-func (s *Sidecar) SetLLMConfig(cfg LLMConfig) LLMConfig {
+func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
 	s.mgr.SetLLMConfig(cfg)
 	LLMConfigEvt.Emit(s.win, cfg)
 	return cfg
 }
 
 // ListModels 返回指定配置下可用的模型列表。
-func (s *Sidecar) ListModels(cfg LLMConfig) ([]string, error) {
+func (s *API) ListModels(cfg LLMConfig) ([]string, error) {
 	return llm.ListModels(context.Background(), cfg)
 }
 
 // GetWorkDir 返回工作目录。
-func (s *Sidecar) GetWorkDir() string {
+func (s *API) GetWorkDir() string {
 	return s.runner.Dir()
 }
 
 // SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。
-func (s *Sidecar) SetWorkDir(dir string) string {
+func (s *API) SetWorkDir(dir string) string {
 	s.runner.SetDir(dir)
 	WorkDirEvt.Emit(s.win, WorkDirEvent{Dir: dir})
 	return dir
 }
 
 // SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。
-func (s *Sidecar) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
+func (s *API) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
 	if err := s.mgr.SetAgentWorkDir(agentId, dir); err != nil {
 		return AgentView{}, err
 	}
@@ -510,7 +511,7 @@ func (s *Sidecar) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
 }
 
 // SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。
-func (s *Sidecar) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
+func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 	if err := s.mgr.SetAgentLLM(agentId, cfg); err != nil {
 		return AgentView{}, err
 	}
@@ -524,13 +525,13 @@ func (s *Sidecar) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) 
 }
 
 // GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。
-func (s *Sidecar) GetAgentConfig(agentId string) LLMConfig {
+func (s *API) GetAgentConfig(agentId string) LLMConfig {
 	return s.mgr.LLMConfigFor(agentId)
 }
 
 // ListModelsFor 用会话级配置拉取可用模型列表。
 // mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
-func (s *Sidecar) ListModelsFor(agentId string, cfg LLMConfig) ([]string, error) {
+func (s *API) ListModelsFor(agentId string, cfg LLMConfig) ([]string, error) {
 	if cfg.Provider == "" {
 		cfg = s.mgr.LLMConfigFor(agentId)
 	}
@@ -552,7 +553,7 @@ type SystemInfo struct {
 }
 
 // Info 返回系统信息。
-func (s *Sidecar) Info() SystemInfo {
+func (s *API) Info() SystemInfo {
 	return SystemInfo{
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
@@ -570,7 +571,7 @@ type KnowledgeNote = knowledge.Note
 type KnowledgeQuery = knowledge.Query
 
 // UpsertNote 新增或覆盖一条知识笔记。
-func (s *Sidecar) UpsertNote(n KnowledgeNote) (KnowledgeNote, error) {
+func (s *API) UpsertNote(n KnowledgeNote) (KnowledgeNote, error) {
 	if s.kb == nil {
 		return KnowledgeNote{}, fmt.Errorf("知识库未初始化")
 	}
@@ -583,7 +584,7 @@ func (s *Sidecar) UpsertNote(n KnowledgeNote) (KnowledgeNote, error) {
 }
 
 // QueryNotes 按 scope / tags / 文本查询笔记。
-func (s *Sidecar) QueryNotes(q KnowledgeQuery) []KnowledgeNote {
+func (s *API) QueryNotes(q KnowledgeQuery) []KnowledgeNote {
 	if s.kb == nil {
 		return []KnowledgeNote{}
 	}
@@ -595,7 +596,7 @@ func (s *Sidecar) QueryNotes(q KnowledgeQuery) []KnowledgeNote {
 }
 
 // DeleteNote 删除一条笔记。
-func (s *Sidecar) DeleteNote(id string) bool {
+func (s *API) DeleteNote(id string) bool {
 	if s.kb == nil {
 		return false
 	}
@@ -607,7 +608,7 @@ func (s *Sidecar) DeleteNote(id string) bool {
 }
 
 // SearchNotes 全文搜索笔记。
-func (s *Sidecar) SearchNotes(text string, limit int) []KnowledgeNote {
+func (s *API) SearchNotes(text string, limit int) []KnowledgeNote {
 	if s.kb == nil {
 		return []KnowledgeNote{}
 	}
@@ -616,7 +617,7 @@ func (s *Sidecar) SearchNotes(text string, limit int) []KnowledgeNote {
 }
 
 // MatchNotesForAgent 根据 agent 角色匹配相关知识。
-func (s *Sidecar) MatchNotesForAgent(agentId string) []KnowledgeNote {
+func (s *API) MatchNotesForAgent(agentId string) []KnowledgeNote {
 	if s.kb == nil {
 		return []KnowledgeNote{}
 	}
@@ -629,7 +630,7 @@ func (s *Sidecar) MatchNotesForAgent(agentId string) []KnowledgeNote {
 }
 
 // ListNotesByTag 按标签列出笔记。
-func (s *Sidecar) ListNotesByTag(tag string) []KnowledgeNote {
+func (s *API) ListNotesByTag(tag string) []KnowledgeNote {
 	if s.kb == nil {
 		return []KnowledgeNote{}
 	}
@@ -639,7 +640,7 @@ func (s *Sidecar) ListNotesByTag(tag string) []KnowledgeNote {
 
 // AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
 // 后续对话会把它作为上下文。返回更新后的会话视图。
-func (s *Sidecar) AttachNoteToAgent(noteId, agentId string) (AgentView, error) {
+func (s *API) AttachNoteToAgent(noteId, agentId string) (AgentView, error) {
 	if s.kb == nil {
 		return AgentView{}, fmt.Errorf("知识库未初始化")
 	}
@@ -668,7 +669,7 @@ func (s *Sidecar) AttachNoteToAgent(noteId, agentId string) (AgentView, error) {
 }
 
 // DetachNoteFromAgent 从 agent 移除知识笔记。
-func (s *Sidecar) DetachNoteFromAgent(noteId, agentId string) (AgentView, error) {
+func (s *API) DetachNoteFromAgent(noteId, agentId string) (AgentView, error) {
 	if s.kb == nil {
 		return AgentView{}, fmt.Errorf("知识库未初始化")
 	}
@@ -682,12 +683,12 @@ func (s *Sidecar) DetachNoteFromAgent(noteId, agentId string) (AgentView, error)
 }
 
 // GetAgentKnowledge 返回 agent 附加的知识笔记 ID 列表。
-func (s *Sidecar) GetAgentKnowledge(agentId string) []string {
+func (s *API) GetAgentKnowledge(agentId string) []string {
 	return s.mgr.GetKnowledge(agentId)
 }
 
 // SetAlwaysOnTop 控制窗口置顶（悬浮）。
-func (s *Sidecar) SetAlwaysOnTop(v bool) bool {
+func (s *API) SetAlwaysOnTop(v bool) bool {
 	if s.win != nil {
 		s.win.SetAlwaysOnTop(v)
 	}
@@ -695,7 +696,7 @@ func (s *Sidecar) SetAlwaysOnTop(v bool) bool {
 }
 
 // IsAlwaysOnTop 返回窗口是否置顶。
-func (s *Sidecar) IsAlwaysOnTop() bool {
+func (s *API) IsAlwaysOnTop() bool {
 	if s.win == nil {
 		return false
 	}
@@ -703,7 +704,7 @@ func (s *Sidecar) IsAlwaysOnTop() bool {
 }
 
 // PickDirectory 弹出原生目录选择对话框。
-func (s *Sidecar) PickDirectory() string {
+func (s *API) PickDirectory() string {
 	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 		Title:       "选择工作目录",
 		Directory:   true,
@@ -716,7 +717,7 @@ func (s *Sidecar) PickDirectory() string {
 }
 
 // ToggleMiniWindow 显示/隐藏迷你悬浮窗。
-func (s *Sidecar) ToggleMiniWindow(show bool) bool {
+func (s *API) ToggleMiniWindow(show bool) bool {
 	if miniWindowRef != nil {
 		if show {
 			miniWindowRef.Show()
@@ -736,7 +737,7 @@ func (s *Sidecar) ToggleMiniWindow(show bool) bool {
 }
 
 // FocusAgent 聚焦主窗口并切换到指定 agent。
-func (s *Sidecar) FocusAgent(agentId string) {
+func (s *API) FocusAgent(agentId string) {
 	if s.win != nil {
 		s.win.Show()
 		s.win.Focus()
@@ -994,9 +995,9 @@ func main() {
 	}
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
-	sidecar := &Sidecar{mgr: mgr, runner: runner, channels: channels, kb: kbStore}
+	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore}
 
-	mygo.Bind(sidecar)
+	mygo.Bind(api)
 
 	mygo.App.WhenReady(func() {
 		win = mygo.NewWindow(mygo.WindowOptions{
@@ -1009,7 +1010,7 @@ func main() {
 			StateKey:        "main",
 			URL:             "/",
 		})
-		sidecar.win = win
+		api.win = win
 
 		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景、可拖动
 		// 悬浮岛：FitContent 让尺寸由内容决定，不再靠前端算魔数。

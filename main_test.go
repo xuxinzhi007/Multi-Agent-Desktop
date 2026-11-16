@@ -15,10 +15,10 @@ import (
 	"multi-agent-desktop/internal/llm"
 )
 
-// newTestSidecar 构造一个不连真实窗口的 Sidecar。
+// newTestAPI 构造一个不连真实窗口的 API。
 // 事件发到零值 Window：mygo 只在 Encode/入队时用到它，
 // 零值未销毁、无 native 句柄，push 是安全 no-op（真正的 nil 会 panic）。
-func newTestSidecar(t *testing.T) *Sidecar {
+func newTestAPI(t *testing.T) *API {
 	t.Helper()
 	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "global-m"}, func(string, any) {})
 	t.Cleanup(func() {
@@ -27,16 +27,16 @@ func newTestSidecar(t *testing.T) *Sidecar {
 			mgr.Delete(a.ID)
 		}
 	})
-	return &Sidecar{
+	return &API{
 		mgr:      mgr,
 		channels: channel.NewManager(),
 		win:      &mygo.Window{},
 	}
 }
 
-// newWiredTestSidecar 让 emitter 真正走 emitToWindow，
-// 用于验证「事件 → 频道」这条链路（newTestSidecar 的 emitter 是空函数，跑不到）。
-func newWiredTestSidecar(t *testing.T) *Sidecar {
+// newWiredTestAPI 让 emitter 真正走 emitToWindow，
+// 用于验证「事件 → 频道」这条链路（newTestAPI 的 emitter 是空函数，跑不到）。
+func newWiredTestAPI(t *testing.T) *API {
 	t.Helper()
 	chMgr := channel.NewManager()
 	var mgr *agent.Manager
@@ -50,11 +50,11 @@ func newWiredTestSidecar(t *testing.T) *Sidecar {
 			mgr.Delete(a.ID)
 		}
 	})
-	return &Sidecar{mgr: mgr, channels: chMgr, win: win}
+	return &API{mgr: mgr, channels: chMgr, win: win}
 }
 
 // stopAll 停掉所有 agent，避免测试结束时仍有 goroutine 跑 mock 流。
-func stopAll(t *testing.T, s *Sidecar) {
+func stopAll(t *testing.T, s *API) {
 	t.Helper()
 	for _, a := range s.mgr.List() {
 		s.mgr.Stop(a.ID)
@@ -105,7 +105,7 @@ func TestListModelsForShortCircuit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := agent.NewManager(tc.globalCfg, func(string, any) {})
 			mgr.Create(tc.agentID, "A1", "r")
-			s := &Sidecar{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
+			s := &API{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
 
 			models, err := s.ListModelsFor(tc.agentID, tc.cfg)
 			if tc.wantErr != nil {
@@ -132,10 +132,10 @@ func TestListModelsForShortCircuit(t *testing.T) {
 	}
 }
 
-// TC-001/007 的 Sidecar 层 —— SetAgentWorkDir / SetAgentLLM 返回更新后的 AgentView，
+// TC-001/007 的 API 层 —— SetAgentWorkDir / SetAgentLLM 返回更新后的 AgentView，
 // 且不影响其他会话；GetAgentConfig 反映会话级覆盖。
-func TestSidecarSessionConfig(t *testing.T) {
-	s := newTestSidecar(t)
+func TestAPISessionConfig(t *testing.T) {
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 	s.mgr.SetWorkDir("/global")
 
@@ -181,7 +181,7 @@ func TestSidecarSessionConfig(t *testing.T) {
 // TC-022 —— AttachNoteToAgent 改引用集合（不再追加 system message）。
 // attach 幂等；detach 可撤销；引用集合能过 Save/Load 往返。
 func TestAttachNoteToAgent(t *testing.T) {
-	s := newTestSidecar(t)
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 	s.kb = newTestKB(t)
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
@@ -271,7 +271,7 @@ func countID(ids []string, want string) int {
 
 // TC-024 —— 0 成员频道仍然记录消息，且 SendToChannel 不报错。
 func TestSendToChannelNoMembers(t *testing.T) {
-	s := newTestSidecar(t)
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 
 	ch := s.CreateChannel("空频道", nil, "")
@@ -296,7 +296,7 @@ func TestSendToChannelNoMembers(t *testing.T) {
 // agent ID（Manager.Get 必然失败）——比"把队列灌满再抢时间"更稳定：
 // 队列是 32 缓冲且 worker 持续消费，灌满本身是有竞态的。
 func TestSendToChannelPartialFailureKeepsOthers(t *testing.T) {
-	s := newTestSidecar(t)
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 
 	gone := s.CreateAgent(CreateAgentRequest{Name: "Gone", Role: "r"})
@@ -346,7 +346,7 @@ func TestSendToChannelPartialFailureKeepsOthers(t *testing.T) {
 
 // TC-028 —— 删 agent 后频道成员被清理，List 中也不再有该 agent。
 func TestDeleteAgentRemovesChannelMember(t *testing.T) {
-	s := newTestSidecar(t)
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 
 	a1 := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
@@ -497,7 +497,7 @@ func TestKnowledgeProviderNotesForSystemPrompt(t *testing.T) {
 // TC-029 —— SendToChannel 只推频道消息，不重复创建频道；
 // 成员回复走 agent.message（频道 Messages 只有用户那一条）。
 func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
-	s := newTestSidecar(t)
+	s := newTestAPI(t)
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
@@ -538,7 +538,7 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 // 这条测试在修复 PromptRequest.ChannelID 之前是红的：
 // agent 跑了 150+ delta，但频道里始终只有用户那一条。
 func TestChannelReplyLandsInChannel(t *testing.T) {
-	s := newWiredTestSidecar(t)
+	s := newWiredTestAPI(t)
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
@@ -575,7 +575,7 @@ func TestChannelReplyLandsInChannel(t *testing.T) {
 
 // TestSendToChannelTranscriptExcludesCurrent —— transcript 不应重复包含本轮消息。
 func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
-	s := newWiredTestSidecar(t)
+	s := newWiredTestAPI(t)
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
@@ -633,7 +633,7 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 // blockAgent 把 agent 标成「在等人」，而真实审批流不存在，永远无人解除。
 // demoTrail 删除后这个假状态不应再出现。
 func TestMockPromptDoesNotLeaveAgentBlocked(t *testing.T) {
-	s := newWiredTestSidecar(t)
+	s := newWiredTestAPI(t)
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "后端"})

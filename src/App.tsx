@@ -8,14 +8,14 @@ import ShellPanel from './components/ShellPanel'
 import SettingsModal from './components/SettingsModal'
 import ActivityFeed from './components/ActivityFeed'
 import ToastContainer from './components/Toast'
-import { useSidecar } from './lib/useSidecar'
+import { useBackend } from './lib/useBackend'
 import { useTheme } from './lib/useTheme'
-import type { LLMConfig } from './lib/useSidecar'
+import type { LLMConfig } from './lib/useBackend'
 
 type ActiveRef = { kind: 'agent' | 'channel'; id: string } | null
 
 export default function App() {
-  const s = useSidecar()
+  const s = useBackend()
   useTheme() // 应用主题到 document.documentElement
   const [active, setActive] = useState<ActiveRef>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)

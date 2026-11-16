@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Sidecar, type AgentView as Agent, type Channel } from '../mygo'
+import { API, type AgentView as Agent, type Channel } from '../mygo'
 import CreateAgentModal from './CreateAgentModal'
 
 type Props = {
@@ -333,7 +333,7 @@ export default function Sidebar(p: Props) {
         </button>
         <button
           className="c-btn c-btn--ghost c-btn--full"
-          onClick={() => Sidecar.toggleMiniWindow(true)}
+          onClick={() => API.toggleMiniWindow(true)}
           title="缩小到悬浮条"
         >
           ─ 缩小到悬浮条

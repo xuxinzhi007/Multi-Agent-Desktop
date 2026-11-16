@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import { events, Sidecar, type MiniStatus } from './mygo'
+import { events, API, type MiniStatus } from './mygo'
 import AgentRow, { type AgentRowData } from './components/AgentRow'
 
 // 主题跟随主窗：localStorage 同源共享，storage 事件做实时同步。
@@ -49,7 +49,7 @@ function MiniApp() {
 
   useEffect(() => {
     const unsub = events.miniStatus.on((s) => setStatus(s))
-    Sidecar.listAgents()
+    API.listAgents()
       .then((agents) =>
         setStatus({
           agents: agents.map((a) => ({
@@ -102,7 +102,7 @@ function MiniApp() {
     setSelected((prev) => (prev === id ? null : id))
   }
   const handleOpen = (id: string) => {
-    Sidecar.focusAgent(id)
+    API.focusAgent(id)
   }
   const handleContextMenu = (e: React.MouseEvent, id: string) => {
     e.preventDefault()
@@ -202,7 +202,7 @@ function MiniApp() {
           </button>
           <button
             type="button"
-            onClick={() => Sidecar.toggleMiniWindow(false)}
+            onClick={() => API.toggleMiniWindow(false)}
             title="打开主窗口"
             style={{
               width: 20,
@@ -327,7 +327,7 @@ function MiniApp() {
             <button
               type="button"
               onClick={() => {
-                Sidecar.stopAgent(selected).catch(() => {})
+                API.stopAgent(selected).catch(() => {})
                 setSelected(null)
               }}
               style={{
@@ -396,7 +396,7 @@ function MiniApp() {
               <button
                 type="button"
                 onClick={() => {
-                  Sidecar.stopAgent(menu.agentId).catch(() => {})
+                  API.stopAgent(menu.agentId).catch(() => {})
                   setMenu(null)
                   setPendingStop(null)
                 }}

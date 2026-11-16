@@ -10,7 +10,7 @@
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run build:web && go vet ./... && go test ./... && npm run test:e2e",
+    "verify": "npm run build:web && go vet ./... && go test -race ./... && npm run test:e2e",
     "test:e2e": "playwright test"
   },
   "dependencies": {

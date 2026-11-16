@@ -200,166 +200,169 @@ export interface WorkDirEvent {
 
 // ---- Services ----
 
-/** Sidecar 暴露给前端的 API。`mygo generate` 会生成 typed TS client。 */
-export const Sidecar = {
+/**
+ * API 是暴露给前端的全部能力。`mygo generate` 据此生成 typed TS client。
+ * 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
+ */
+export const API = {
   /**
    * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
    * 后续对话会把它作为上下文。返回更新后的会话视图。
    */
   attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
-    return call("Sidecar.AttachNoteToAgent", noteId, agentId);
+    return call("API.AttachNoteToAgent", noteId, agentId);
   },
   /** BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。 */
   blockAgent(id: string, reason: string): Promise<void> {
-    return call("Sidecar.BlockAgent", id, reason);
+    return call("API.BlockAgent", id, reason);
   },
   /** CreateAgent 新建一个 agent。 */
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
-    return call("Sidecar.CreateAgent", req);
+    return call("API.CreateAgent", req);
   },
   /**
    * isRelevantToRole 判断消息是否与角色相关。
    * CreateCLIAgent 新建一个 CLI backend 的 agent。
    */
   createCLIAgent(name: string, role: string, backend: string): Promise<AgentView> {
-    return call("Sidecar.CreateCLIAgent", name, role, backend);
+    return call("API.CreateCLIAgent", name, role, backend);
   },
   /** CreateChannel 新建频道。policy 为空时由 channel 包回落 discuss。 */
   createChannel(name: string, members: string[], policy: string): Promise<Channel> {
-    return call("Sidecar.CreateChannel", name, members, policy);
+    return call("API.CreateChannel", name, members, policy);
   },
   /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
-    return call("Sidecar.DeleteAgent", id);
+    return call("API.DeleteAgent", id);
   },
   /** DeleteNote 删除一条笔记。 */
   deleteNote(id: string): Promise<boolean> {
-    return call("Sidecar.DeleteNote", id);
+    return call("API.DeleteNote", id);
   },
   /** DetachNoteFromAgent 从 agent 移除知识笔记。 */
   detachNoteFromAgent(noteId: string, agentId: string): Promise<AgentView> {
-    return call("Sidecar.DetachNoteFromAgent", noteId, agentId);
+    return call("API.DetachNoteFromAgent", noteId, agentId);
   },
   /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
   focusAgent(agentId: string): Promise<void> {
-    return call("Sidecar.FocusAgent", agentId);
+    return call("API.FocusAgent", agentId);
   },
   /** GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。 */
   getAgentConfig(agentId: string): Promise<Config> {
-    return call("Sidecar.GetAgentConfig", agentId);
+    return call("API.GetAgentConfig", agentId);
   },
   /** GetAgentKnowledge 返回 agent 附加的知识笔记 ID 列表。 */
   getAgentKnowledge(agentId: string): Promise<string[]> {
-    return call("Sidecar.GetAgentKnowledge", agentId);
+    return call("API.GetAgentKnowledge", agentId);
   },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
-    return call("Sidecar.GetLLMConfig");
+    return call("API.GetLLMConfig");
   },
   /** GetWorkDir 返回工作目录。 */
   getWorkDir(): Promise<string> {
-    return call("Sidecar.GetWorkDir");
+    return call("API.GetWorkDir");
   },
   /** Info 返回系统信息。 */
   info(): Promise<SystemInfo> {
-    return call("Sidecar.Info");
+    return call("API.Info");
   },
   /** IsAlwaysOnTop 返回窗口是否置顶。 */
   isAlwaysOnTop(): Promise<boolean> {
-    return call("Sidecar.IsAlwaysOnTop");
+    return call("API.IsAlwaysOnTop");
   },
   listAgents(): Promise<AgentView[]> {
-    return call("Sidecar.ListAgents");
+    return call("API.ListAgents");
   },
   /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
-    return call("Sidecar.ListChannels");
+    return call("API.ListChannels");
   },
   /** ListModels 返回指定配置下可用的模型列表。 */
   listModels(cfg: Config): Promise<string[]> {
-    return call("Sidecar.ListModels", cfg);
+    return call("API.ListModels", cfg);
   },
   /**
    * ListModelsFor 用会话级配置拉取可用模型列表。
    * mock / 未配置 BaseURL 时就地短路，不发起无意义网络请求。
    */
   listModelsFor(agentId: string, cfg: Config): Promise<string[]> {
-    return call("Sidecar.ListModelsFor", agentId, cfg);
+    return call("API.ListModelsFor", agentId, cfg);
   },
   /** ListNotesByTag 按标签列出笔记。 */
   listNotesByTag(tag: string): Promise<Note[]> {
-    return call("Sidecar.ListNotesByTag", tag);
+    return call("API.ListNotesByTag", tag);
   },
   /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
   matchNotesForAgent(agentId: string): Promise<Note[]> {
-    return call("Sidecar.MatchNotesForAgent", agentId);
+    return call("API.MatchNotesForAgent", agentId);
   },
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
-    return call("Sidecar.PickDirectory");
+    return call("API.PickDirectory");
   },
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
-    return call("Sidecar.PromptAgent", req);
+    return call("API.PromptAgent", req);
   },
   /** QueryNotes 按 scope / tags / 文本查询笔记。 */
   queryNotes(q: Query): Promise<Note[]> {
-    return call("Sidecar.QueryNotes", q);
+    return call("API.QueryNotes", q);
   },
   /** RouteAgent 从一个 agent 发消息给另一个 agent（agent 主动协作）。 */
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
-    return call("Sidecar.RouteAgent", fromId, toId, text);
+    return call("API.RouteAgent", fromId, toId, text);
   },
   /** RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。 */
   runShell(req: ShellRequest): Promise<void> {
-    return call("Sidecar.RunShell", req);
+    return call("API.RunShell", req);
   },
   /** SearchNotes 全文搜索笔记。 */
   searchNotes(text: string, limit: number): Promise<Note[]> {
-    return call("Sidecar.SearchNotes", text, limit);
+    return call("API.SearchNotes", text, limit);
   },
   /**
    * SendToChannel 发消息到频道，并触发相关成员 agent。
    * 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
    */
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
-    return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);
+    return call("API.SendToChannel", channelId, fromId, fromName, text);
   },
   /** SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。 */
   setAgentLLM(agentId: string, cfg: Config): Promise<AgentView> {
-    return call("Sidecar.SetAgentLLM", agentId, cfg);
+    return call("API.SetAgentLLM", agentId, cfg);
   },
   /** SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。 */
   setAgentWorkDir(agentId: string, dir: string): Promise<AgentView> {
-    return call("Sidecar.SetAgentWorkDir", agentId, dir);
+    return call("API.SetAgentWorkDir", agentId, dir);
   },
   /** SetAlwaysOnTop 控制窗口置顶（悬浮）。 */
   setAlwaysOnTop(v: boolean): Promise<boolean> {
-    return call("Sidecar.SetAlwaysOnTop", v);
+    return call("API.SetAlwaysOnTop", v);
   },
   /** SetLLMConfig 切换模型配置。 */
   setLLMConfig(cfg: Config): Promise<Config> {
-    return call("Sidecar.SetLLMConfig", cfg);
+    return call("API.SetLLMConfig", cfg);
   },
   /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。 */
   setWorkDir(dir: string): Promise<string> {
-    return call("Sidecar.SetWorkDir", dir);
+    return call("API.SetWorkDir", dir);
   },
   /** StopAgent 停止一个 agent 的推理并清空队列。 */
   stopAgent(id: string): Promise<boolean> {
-    return call("Sidecar.StopAgent", id);
+    return call("API.StopAgent", id);
   },
   /** ToggleMiniWindow 显示/隐藏迷你悬浮窗。 */
   toggleMiniWindow(show: boolean): Promise<boolean> {
-    return call("Sidecar.ToggleMiniWindow", show);
+    return call("API.ToggleMiniWindow", show);
   },
   /** UnblockAgent 解除「在等人」状态。 */
   unblockAgent(id: string): Promise<void> {
-    return call("Sidecar.UnblockAgent", id);
+    return call("API.UnblockAgent", id);
   },
   /** UpsertNote 新增或覆盖一条知识笔记。 */
   upsertNote(n: Note): Promise<Note> {
-    return call("Sidecar.UpsertNote", n);
+    return call("API.UpsertNote", n);
   },
 } as const;
 
@@ -380,7 +383,7 @@ export const events = {
   workdir: event<WorkDirEvent>("workdir"),
   /** 会话级配置变更：携带完整 AgentView，前端整体替换即可。 */
   agentConfig: event<AgentView>("agent.config"),
-  /** 频道事件（由 Sidecar 直接 Emit，不走 emitToWindow 的 map 协议）。 */
+  /** 频道事件（由 API 直接 Emit，不走 emitToWindow 的 map 协议）。 */
   channelCreated: event<Channel>("channel.created"),
   channelMessage: event<ChannelMessage>("channel.message"),
   /** 知识库事件。 */

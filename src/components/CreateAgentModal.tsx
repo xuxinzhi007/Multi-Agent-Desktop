@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
-import { Sidecar } from '../mygo'
+import { API } from '../mygo'
 import Modal from './Modal'
 
 type Props = {
@@ -138,7 +138,7 @@ export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
             <button
               className="c-btn c-btn--secondary c-btn--sm"
               onClick={async () => {
-                const picked = await Sidecar.pickDirectory()
+                const picked = await API.pickDirectory()
                 if (picked) setWorkDir(picked)
               }}
             >

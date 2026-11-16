@@ -28,11 +28,11 @@
 | # | 位置 | 写入点 | 内容形状 |
 |---|---|---|---|
 | 1 | 频道历史 `Channel.Messages[i]` | `main.go:319` `s.channels.Broadcast(...)` → `internal/channel/channel.go:208` `AddMessage` | `Message{FromID:"user", FromName:"你", Text}` |
-| 2 | 用户在侧栏 ActivityFeed 的一条活动 | `src/lib/useSidecar.ts:163` `sub(events.agentMessage, ...)` 里 `addActivity` 逻辑（`useSidecar.ts:157` `activities: [...s.activities, activity]`） | `Activity{type:'prompt', fromName:'你'}` |
+| 2 | 用户在侧栏 ActivityFeed 的一条活动 | `src/lib/useBackend.ts:163` `sub(events.agentMessage, ...)` 里 `addActivity` 逻辑（`useBackend.ts:157` `activities: [...s.activities, activity]`） | `Activity{type:'prompt', fromName:'你'}` |
 | 3 | **每个被选中的 agent 的 `Agent.Messages`**，且文本被改写 | `main.go:360` `prompt := fmt.Sprintf("[channel:%s] %s: %s", channelId, fromName, text)` → `internal/agent/manager.go:392` `Prompt` → `internal/agent/manager.go:460` `execute`（`a.Messages = append(..., llm.Message{Role:"user", Content: req.Text})`） | `Role:"user", Content:"[channel:ch-1] 你: hi"` |
-| 4 | 前端 agent 气泡 | `internal/agent/manager.go:474` `m.emit("agent.message", ...)` → `src/lib/useSidecar.ts:127-160` 再 append 一次到 `agents[i].messages` | 同上，带 `[channel:…]` 前缀 |
+| 4 | 前端 agent 气泡 | `internal/agent/manager.go:474` `m.emit("agent.message", ...)` → `src/lib/useBackend.ts:127-160` 再 append 一次到 `agents[i].messages` | 同上，带 `[channel:…]` 前缀 |
 
-前端内存里第 1 份与第 3/4 份**同时存在**且都不可能互相派生：`useSidecar.ts:203-211`（channel 只 patch `s.channels`）、`useSidecar.ts:155`（agent.message 只 patch `s.agents`）。
+前端内存里第 1 份与第 3/4 份**同时存在**且都不可能互相派生：`useBackend.ts:203-211`（channel 只 patch `s.channels`）、`useBackend.ts:155`（agent.message 只 patch `s.agents`）。
 
 ### deletion test
 
@@ -234,15 +234,15 @@ type Channel struct {
 
 ---
 
-## 6. 前端侧的 module 形状：`ChannelView` 是 shallow 壳，`useSidecar` 是两个 store 的缝合点
+## 6. 前端侧的 module 形状：`ChannelView` 是 shallow 壳，`useBackend` 是两个 store 的缝合点
 
 ### 证据
 
 - `src/components/ChannelView.tsx:15` 只有 4 个 prop：`{channel, agents, onSend, onDelete}`。**`onDelete` 从未被 `App.tsx` 传入**（`src/App.tsx:78-92` 的 `<ChannelView>` 只有 `channel / agents / onSend`）→ `ChannelView.tsx:148` `{onDelete && ...}` 死分支。
 - `ChannelView.tsx:47` `const members = agents.filter((a) => channel.members.includes(a.id))` → 每次 render 做 `O(|agents| × |members|)` 的集合求交，**这是 `Channel.Members` 与 `agents` 两个 store 的 join**，且 join 只在视图里发生（后端没有 join 后的形状）。`ChannelView.tsx:48` 再为每条消息 `agents.find(...)` → `O(|messages| × |agents|)`。
 - `ChannelView.tsx:307` `const isUser = msg.fromId === 'user'` — 字面量跨层耦合（同 `main.go` 侧 `main.go:328` 无此判别，但 `main_test.go` 多处硬编码 `"user"`）。
-- `src/lib/useSidecar.ts:203-211` `sub(events.channelMessage, ...)` 是 channel 的唯一写入路径，做的是「按 id 去重后 append」；`useSidecar.ts:66` `Sidecar.listChannels()` 初始化。两次数据源（初始全量 + 增量事件）**各自独立打补丁到同一个 `channels` 数组**。
-- 结构上 `useSidecar` 是**单一 store**：`src/lib/useSidecar.ts:23-40` `type State` 里 `agents` 与 `channels` 平级，`send()` 的 switch（`useSidecar.ts:240-303`）把 14 个 action 名映射到 typed call，`channel.create` / `channel.send` 只是其中 2 个 case。
+- `src/lib/useBackend.ts:203-211` `sub(events.channelMessage, ...)` 是 channel 的唯一写入路径，做的是「按 id 去重后 append」；`useBackend.ts:66` `Sidecar.listChannels()` 初始化。两次数据源（初始全量 + 增量事件）**各自独立打补丁到同一个 `channels` 数组**。
+- 结构上 `useBackend` 是**单一 store**：`src/lib/useBackend.ts:23-40` `type State` 里 `agents` 与 `channels` 平级，`send()` 的 switch（`useBackend.ts:240-303`）把 14 个 action 名映射到 typed call，`channel.create` / `channel.send` 只是其中 2 个 case。
 - `src/App.tsx:15` `ActiveRef` 的 `kind` 判别联合是**唯一把两个体系缝到一起的 seam**；`App.tsx:26-37` 的失效回落逻辑对两个 kind 各写一遍（同形状，2 份）。
 
 ### deletion test
@@ -251,7 +251,7 @@ type Channel struct {
 
 ### 判定
 
-**已证实**：`ChannelView` 的 `onDelete` 是死 prop（与后端缺失 `Delete` 一致，见 Finding 3/4）；`useSidecar` 是双 store 的唯一缝合点；`App.ActiveRef.kind` 是两个 module 在前端唯一的 seam。
+**已证实**：`ChannelView` 的 `onDelete` 是死 prop（与后端缺失 `Delete` 一致，见 Finding 3/4）；`useBackend` 是双 store 的唯一缝合点；`App.ActiveRef.kind` 是两个 module 在前端唯一的 seam。
 **推断**：`Message.fromId === "user"` 这个 sentinel 是 channel module 缺 `Kind`/`senderType` 字段的直接后果，前端只是被迫接受这个 shape。
 
 ---

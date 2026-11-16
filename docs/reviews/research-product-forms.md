@@ -461,6 +461,6 @@ Warp 的并发表达是「**按打扰成本分三档**」，且明确区分 in-a
 | `src/mini.tsx:85` | `done` 计数误用 `status === 'idle'` |
 | `src/mini.tsx:89-94` | `statusColor` / `statusLabel`，**未处理 `done`** |
 | `docs/reviews/floating-window-review.html` | 拖动/点击冲突的既有取证 |
-| `docs/reviews/research-motion.md` | 动画与重渲染（`useSidecar` 全树重渲染问题） |
+| `docs/reviews/research-motion.md` | 动画与重渲染（`useBackend` 全树重渲染问题） |
 | `docs/adr/0001-group-chat-discussion-model.md` | P3「子 agent 侧栏嵌套在父 agent 下方」 |
 | `docs/reviews/collaboration-plan.md` | 投递失败被吞、无 tool_calls、单轮 execute |

@@ -9,7 +9,7 @@ import (
 	"multi-agent-desktop/internal/llm"
 )
 
-// newTestKB 返回一个内存知识库，用于 Sidecar 层测试（不落盘）。
+// newTestKB 返回一个内存知识库，用于 API 层测试（不落盘）。
 func newTestKB(t *testing.T) knowledge.Store {
 	t.Helper()
 	return knowledge.NewMemoryStore()

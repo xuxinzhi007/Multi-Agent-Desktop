@@ -64,7 +64,7 @@ test('提交新建 Agent 会调用 CreateAgent', async ({ page, callLog }) => {
 
   await expect(page.getByRole('dialog')).toBeHidden()
   const calls = await callLog()
-  expect(calls.some((c) => c.method === 'Sidecar.CreateAgent')).toBe(true)
+  expect(calls.some((c) => c.method === 'API.CreateAgent')).toBe(true)
 })
 
 test('设置弹窗能打开且分组可见', async ({ page }) => {

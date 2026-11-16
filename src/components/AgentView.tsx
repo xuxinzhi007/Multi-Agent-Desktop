@@ -4,7 +4,7 @@ import TextareaAutosize from 'react-textarea-autosize'
 import { ContextMenu } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import remarkGfm from 'remark-gfm'
-import { Sidecar, type AgentView as Agent, type Config, type Message } from '../mygo'
+import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
 import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
 
 type Props = {
@@ -551,7 +551,7 @@ function SessionConfigChips({
     setLoadingModels(true)
     setModelHint('')
     try {
-      const list = await Sidecar.listModelsFor(agent.id, cfgDraft)
+      const list = await API.listModelsFor(agent.id, cfgDraft)
       setModels(list)
       if (list.length === 0) setModelHint('未获取到模型列表')
     } catch (e) {
@@ -622,7 +622,7 @@ function SessionConfigChips({
                   <button
                     className="c-btn c-btn--secondary c-btn--sm"
                     onClick={async () => {
-                      const picked = await Sidecar.pickDirectory()
+                      const picked = await API.pickDirectory()
                       if (picked) setDirDraft(picked)
                     }}
                   >

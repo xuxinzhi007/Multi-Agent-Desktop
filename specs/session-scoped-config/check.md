@@ -41,7 +41,7 @@ ok   multi-agent-desktop/internal/llm
 - `main.go`：`AgentView` 新字段、会话/频道/知识 Sidecar 方法、新事件、`emitToWindow` 拆成 `toXxx`
 - `src/components/{AgentView,Sidebar,CreateAgentModal,SettingsModal,Inspector}.tsx`
 - `src/components/{ChannelView,KnowledgePanel}.tsx`（新）
-- `src/{App.tsx,lib/useSidecar.ts,lib/presets.ts}`
+- `src/{App.tsx,lib/useBackend.ts,lib/presets.ts}`
 - `src/mygo.ts`（生成）
 - `docs/{design,architecture}.md`
 - 测试：`internal/{agent,channel,knowledge,llm}/*_test.go`

@@ -116,7 +116,7 @@ func TestListModelsUpstreamError(t *testing.T) {
 	}
 }
 
-// TC-013 的归一化层 —— 空 BaseURL 会拼出相对 URL，由 Sidecar 短路层负责 ErrNotConfigured。
+// TC-013 的归一化层 —— 空 BaseURL 会拼出相对 URL，由 API 短路层负责 ErrNotConfigured。
 // 这里只锁定：ListModels 自身对空 BaseURL 必须有明确行为（错误或 nil），不得 panic。
 func TestListModelsEmptyBaseURLDoesNotPanic(t *testing.T) {
 	models, err := ListModels(context.Background(), Config{Provider: "openai", BaseURL: ""})

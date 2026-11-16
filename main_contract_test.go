@@ -15,11 +15,11 @@ import (
 // 前端一个都没监听 —— 后端白跑、前端状态永远是空数组，没人发现。
 //
 // 这里反过来断言：Go 侧每个 NewEvent 声明的事件名，都必须在前端
-// useSidecar / mini.tsx 里出现订阅调用，否则测试失败。
+// useBackend / mini.tsx 里出现订阅调用，否则测试失败。
 
 // eventSources 是允许订阅事件的源文件。
 var eventSources = []string{
-	"src/lib/useSidecar.ts",
+	"src/lib/useBackend.ts",
 	"src/mini.tsx",
 }
 
@@ -93,7 +93,7 @@ func TestEveryBackendEventIsSubscribed(t *testing.T) {
 	src := subscribedSource(t)
 
 	// agent.delta 由流式渲染直接消费，不走 events.* 订阅表，
-	// 但仍在 useSidecar 里以其它形式引用；这里统一按 camelCase 名字查。
+	// 但仍在 useBackend 里以其它形式引用；这里统一按 camelCase 名字查。
 	var missing []string
 	for _, ev := range declared {
 		ts := camelCase(ev)
