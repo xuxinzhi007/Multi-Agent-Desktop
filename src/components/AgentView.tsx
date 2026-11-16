@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
 import { ContextMenu } from 'radix-ui'
@@ -96,6 +96,22 @@ export default function AgentView(p: Props) {
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   const [selectedMentions, setSelectedMentions] = useState<string[]>([])
+
+  // 传给 Bubble 做 @ 上色的名字/颜色表。内容变化才换引用，
+  // 否则 memo 化的 Bubble 会每秒重渲染全部历史消息。
+  const mentionKey = (p.agents ?? []).map((a) => `${a.id}:${a.name}:${a.color}`).join('|')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const agentsForPicker = useMemo(
+    () =>
+      (p.agents ?? []).map((a) => ({
+        id: a.id,
+        name: a.name,
+        color: a.color,
+        role: a.role,
+      })),
+    [mentionKey],
+  )
+
 
   if (!p.agent) {
     return (
@@ -210,13 +226,6 @@ export default function AgentView(p: Props) {
     taRef.current?.focus()
   }
 
-  const agentsForPicker = (p.agents ?? []).map((a) => ({
-    id: a.id,
-    name: a.name,
-    color: a.color,
-    role: a.role,
-  }))
-
   const running = p.agent.status === 'running'
   const visible = p.agent.messages.filter((m) => m.role !== 'system')
 
@@ -269,11 +278,6 @@ export default function AgentView(p: Props) {
         </div>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <SessionConfigChips
-            agent={p.agent}
-            fallbackWorkDir={p.workDir}
-            onConfig={p.onConfig}
-          />
           {running && (
             <button className="c-btn c-btn--danger c-btn--sm" onClick={p.onStop}>
               停止
@@ -312,6 +316,7 @@ export default function AgentView(p: Props) {
             key={i}
             m={m}
             color={p.agent!.color}
+            agents={agentsForPicker}
             tokens={i === visible.length - 1 && m.role === 'assistant' ? p.tokenUsage : undefined}
             onContextMenu={handleContextMenu}
           />
@@ -428,22 +433,16 @@ export default function AgentView(p: Props) {
               终端
             </ModeBtn>
 
-            <span
-              className="mono"
-              style={{
-                marginLeft: 'auto',
-                fontSize: 'var(--text-xs)',
-                color: 'var(--text-disabled)',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                maxWidth: 260,
-                marginRight: 6,
-              }}
-              title={p.workDir}
-            >
-              {p.workDir ? p.workDir.split('/').filter(Boolean).pop() : '—'}
-            </span>
+            {/* 会话级配置：工作目录 + 模型。放在输入框里，
+                跟它影响的「这一轮对话」在同一个视觉区，用户不必去头部找。 */}
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <SessionConfigChips
+                agent={p.agent}
+                fallbackWorkDir={p.workDir}
+                onConfig={p.onConfig}
+                direction="up"
+              />
+            </div>
 
             <button
               className="c-btn c-btn--primary c-btn--sm"
@@ -557,10 +556,13 @@ function SessionConfigChips({
   agent,
   fallbackWorkDir,
   onConfig,
+  direction = 'down',
 }: {
   agent: Agent
   fallbackWorkDir: string
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
+  /** 弹层方向。放在输入框底栏时用 'up'，否则会被输入区挡住。 */
+  direction?: 'down' | 'up'
 }) {
   const [open, setOpen] = useState<'none' | 'dir' | 'model'>('none')
   const [dirDraft, setDirDraft] = useState('')
@@ -582,6 +584,16 @@ function SessionConfigChips({
     setModels([])
     setModelHint('')
   }, [agent.id, agent.llm])
+
+  // Esc 关闭弹层：之前只有点击遮罩能关，键盘用户被卡住
+  useEffect(() => {
+    if (open === 'none') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen('none')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
 
   const loadModels = async () => {
     setLoadingModels(true)
@@ -607,20 +619,22 @@ function SessionConfigChips({
           setOpen(open === 'dir' ? 'none' : 'dir')
           setDirDraft(effectiveDir)
         }}
-        title={`工作目录：${effectiveDir || '未设置'}`}
+        title={`工作目录：${effectiveDir || '未设置'}（点击修改，仅影响本会话）`}
         style={chipStyle(open === 'dir')}
       >
         📁 {shortPath(effectiveDir)}
+        <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
       </button>
 
       {/* 模型 chip */}
       <button
         className="mono"
         onClick={() => setOpen(open === 'model' ? 'none' : 'model')}
-        title={`模型：${effectiveProvider}${effectiveModel ? ' / ' + effectiveModel : ''}`}
+        title={`模型：${effectiveProvider}${effectiveModel ? ' / ' + effectiveModel : ''}（点击修改，仅影响本会话）`}
         style={chipStyle(open === 'model')}
       >
         ✦ {effectiveModel || effectiveProvider}
+        <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
       </button>
 
       {open !== 'none' && (
@@ -633,7 +647,9 @@ function SessionConfigChips({
             className="fade-up"
             style={{
               position: 'absolute',
-              top: 'calc(100% + 6px)',
+              ...(direction === 'up'
+                ? { bottom: 'calc(100% + 6px)' }
+                : { top: 'calc(100% + 6px)' }),
               right: 0,
               width: 320,
               zIndex: 901,
@@ -848,10 +864,15 @@ const hintStyle: React.CSSProperties = {
   lineHeight: 'var(--leading-normal)',
 }
 
+/**
+ * shortPath 把绝对路径压成「能认出来是哪个项目」的最短形式。
+ * 只取最后一级时，/a/b/src 和 /x/y/src 长得一样，用户分不清。
+ */
 function shortPath(dir: string): string {
   if (!dir) return '未设置'
   const parts = dir.split('/').filter(Boolean)
-  return parts.length ? parts[parts.length - 1] : dir
+  if (parts.length === 0) return dir
+  return parts.length === 1 ? parts[0] : parts.slice(-2).join('/')
 }
 
 function ModeBtn({
@@ -963,10 +984,83 @@ const Bubble = memo(
     a.color === b.color &&
     a.live === b.live &&
     a.tokens?.in === b.tokens?.in &&
-    a.tokens?.out === b.tokens?.out,
+    a.tokens?.out === b.tokens?.out &&
+    a.agents === b.agents,
 )
 
-function BubbleImpl({ m, color, live, tokens, onContextMenu }: { m: Message; color: string; live?: boolean; tokens?: { in: number; out: number }; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
+type MentionTargets = { id: string; name: string; color: string }[]
+
+/**
+ * MentionText 把纯文本里的 @名字 渲染成带颜色的 chip。
+ *
+ * 用户消息不走 markdown（纯文本语义更准），所以 @ 需要自己处理：
+ * 把文本按 @提及切开，命中的名字用该 agent 的身份色标出来。
+ * 未命中的 @xxx 保持原样，避免把邮箱之类误染色。
+ */
+function MentionText({
+  text,
+  agents,
+  selfColor,
+}: {
+  text: string
+  agents?: MentionTargets
+  selfColor: string
+}) {
+  if (!agents || agents.length === 0 || !text.includes('@')) {
+    return <>{text}</>
+  }
+
+  // 长名字优先匹配，避免 @前端 吃掉 @前端开发
+  const names = [...agents].sort((a, b) => b.name.length - a.name.length)
+  const byName = new Map(agents.map((a) => [a.name, a]))
+
+  const parts: React.ReactNode[] = []
+  let cursor = 0
+  let key = 0
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '@') continue
+    const hit = names.find((a) => text.startsWith(a.name, i + 1))
+    if (!hit) continue
+
+    if (i > cursor) parts.push(text.slice(cursor, i))
+    const color = byName.get(hit.name)?.color ?? selfColor
+    parts.push(
+      <span
+        key={`m-${key++}`}
+        className="c-mention"
+        style={{
+          color,
+          borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
+          background: `color-mix(in srgb, ${color} 12%, transparent)`,
+        }}
+      >
+        @{hit.name}
+      </span>,
+    )
+    cursor = i + 1 + hit.name.length
+    i = cursor - 1
+  }
+
+  if (cursor < text.length) parts.push(text.slice(cursor))
+  return <>{parts}</>
+}
+
+function BubbleImpl({
+  m,
+  color,
+  live,
+  tokens,
+  agents,
+  onContextMenu,
+}: {
+  m: Message
+  color: string
+  live?: boolean
+  tokens?: { in: number; out: number }
+  agents?: MentionTargets
+  onContextMenu?: (e: React.MouseEvent, msg: Message) => void
+}) {
   const isUser = m.role === 'user'
 
   // 检测路由消息：[from xxx] 或 [to xxx]
@@ -1039,14 +1133,17 @@ function BubbleImpl({ m, color, live, tokens, onContextMenu }: { m: Message; col
             fontSize: 'var(--text-md)',
             lineHeight: 1.7,
             wordBreak: 'break-word',
-            color: isUser ? 'var(--text-primary)' : isRouted ? 'var(--text-secondary)' : 'var(--text-secondary)',
+            color: isUser ? 'var(--text-primary)' : 'var(--text-secondary)',
             fontStyle: isRouted ? 'italic' : 'normal',
+            whiteSpace: isUser ? 'pre-wrap' : undefined,
           }}
-          className="markdown-body"
+          className={isUser ? undefined : 'markdown-body'}
         >
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-            {displayContent}
-          </ReactMarkdown>
+          {isUser ? (
+            <MentionText text={displayContent} agents={agents} selfColor={color} />
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+          )}
         </div>
         {tokens && (tokens.in > 0 || tokens.out > 0) && (
           <div

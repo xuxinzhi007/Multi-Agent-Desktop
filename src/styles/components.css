@@ -289,3 +289,17 @@
 .c-empty-cta:active {
   transform: scale(0.98);
 }
+
+/* ---------- 消息里的 @提及 chip ---------- */
+.c-mention {
+  display: inline-block;
+  padding: 0 5px;
+  margin: 0 1px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 0.95em;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
