@@ -110,8 +110,8 @@ func (m *Manager) Save() error {
 			data = append(data, Channel{
 				ID:       ch.ID,
 				Name:     ch.Name,
-				Members:  append([]string(nil), ch.Members...),
-				Messages: append([]Message(nil), ch.Messages...),
+				Members:  append([]string{}, ch.Members...),
+				Messages: append([]Message{}, ch.Messages...),
 				Policy:   ch.Policy,
 			})
 		}
@@ -161,9 +161,12 @@ func (m *Manager) Load() error {
 		if _, ok := m.channels[saved.ID]; ok {
 			continue // 已存在则不覆盖（避免重复加载）
 		}
-		// 防御：确保 Messages 非 nil，避免前端 null 崩溃
+		// 防御：确保切片非 nil，避免前端拿到 null 后崩
 		if saved.Messages == nil {
 			saved.Messages = []Message{}
+		}
+		if saved.Members == nil {
+			saved.Members = []string{}
 		}
 		m.channels[saved.ID] = saved
 		m.order = append(m.order, saved.ID)
@@ -178,7 +181,7 @@ func (c *Channel) clone() Channel {
 	out := Channel{
 		ID:      c.ID,
 		Name:    c.Name,
-		Members: append([]string(nil), c.Members...),
+		Members: append([]string{}, c.Members...),
 		Policy:  c.Policy,
 	}
 	if c.Messages == nil {

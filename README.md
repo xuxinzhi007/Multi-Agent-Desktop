@@ -123,6 +123,7 @@ Prompt → queue(chan, 32) → workerLoop → execute → idle/queued
 
 | 文件 | 内容 | 写入方式 |
 |---|---|---|
+| `config.json` | 全局模型配置、默认目录（含 API Key） | 全量，tmp + rename，权限 600 |
 | `agents.json` | 会话、历史、会话级配置 | 全量，tmp + rename 原子替换 |
 | `channels.json` | 频道、消息、回合策略 | 全量，tmp + rename |
 | `knowledge.jsonl` | 知识笔记 | 追加写，删除时整体重写 |
@@ -150,12 +151,30 @@ ollama pull qwen2.5-coder:7b
 
 ### 环境变量
 
+环境变量会覆盖配置文件里的同名字段（未设置的不受影响）：
+
 ```bash
 MAD_LLM_PROVIDER=ollama
 MAD_LLM_BASE_URL=http://127.0.0.1:11434
 MAD_LLM_MODEL=qwen2.5-coder:7b
 MAD_LLM_API_KEY=sk-...
+MAD_WORK_DIR=/path/to/project
 ```
+
+### 配置存在哪
+
+```
+<用户数据目录>/config.json     ← 全局模型配置与默认目录，权限 600
+```
+
+| 平台 | 路径 |
+|---|---|
+| macOS | `~/Library/Application Support/multi-agent-desktop/config.json` |
+| Windows | `%APPDATA%\multi-agent-desktop\config.json` |
+| Linux | `$XDG_DATA_HOME/multi-agent-desktop/config.json` |
+
+设置面板底部会显示实际路径。文件是人可读的 JSON，可手动编辑；
+损坏时会被备份为 `.corrupt` 并以默认值启动，不会导致应用起不来。
 
 ---
 
@@ -213,7 +232,7 @@ multi-agent-desktop/
 - **shell 是同步等结果**，长命令会卡住，没有超时控制
 - **工具调用没有审批闸门**，CLI agent 直接执行
 - **无 worktree 隔离**，多 agent 并行改同一仓库会冲突
-- **API Key 明文落盘** 到 `agents.json`
+- **API Key 明文落盘**（`config.json`，权限 600）—— 计划迁移到系统钥匙串
 
 ---
 

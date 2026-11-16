@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import TextareaAutosize from 'react-textarea-autosize'
 import MentionPicker from './MentionPicker'
+import MentionText, { type MentionTarget } from './MentionText'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 
 type Props = {
@@ -53,7 +54,13 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
     )
   }
 
-  const members = agents.filter((a) => channel.members.includes(a.id))
+  const members = agents.filter((a) => (channel.members ?? []).includes(a.id))
+  // 用全部 agent 而非仅成员：历史消息里被 @ 的人可能已退出频道
+  const mentionTargets: MentionTarget[] = agents.map((a) => ({
+    id: a.id,
+    name: a.name,
+    color: a.color,
+  }))
   const memberById = (id: string) => agents.find((a) => a.id === id)
 
   const submit = () => {
@@ -182,7 +189,12 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
           </div>
         )}
         {(channel.messages ?? []).map((m) => (
-          <ChannelBubble key={m.id} msg={m} agent={memberById(m.fromId)} />
+          <ChannelBubble
+            key={m.id}
+            msg={m}
+            agent={memberById(m.fromId)}
+            mentionTargets={mentionTargets}
+          />
         ))}
 
         {/* 流式输出：正在生成回复的成员 */}
@@ -276,9 +288,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
               padding: '11px 13px 4px',
               lineHeight: 'var(--leading-normal)',
               fontSize: 'var(--text-md)',
-              minHeight: 24,
-              maxHeight: 120,
-              overflowY: 'auto',
             }}
           />
 
@@ -350,7 +359,15 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
   )
 }
 
-function ChannelBubble({ msg, agent }: { msg: ChannelMessage; agent?: Agent }) {
+function ChannelBubble({
+  msg,
+  agent,
+  mentionTargets,
+}: {
+  msg: ChannelMessage
+  agent?: Agent
+  mentionTargets: MentionTarget[]
+}) {
   const color = agent?.color ?? 'var(--text-tertiary)'
   const name = msg.fromName || agent?.name || msg.fromId
   const isUser = msg.fromId === 'user'
@@ -403,7 +420,7 @@ function ChannelBubble({ msg, agent }: { msg: ChannelMessage; agent?: Agent }) {
             whiteSpace: 'pre-wrap',
           }}
         >
-          {msg.text}
+          <MentionText text={msg.text} agents={mentionTargets} selfColor={color} />
         </div>
         <DeliveryRow msg={msg} />
       </div>

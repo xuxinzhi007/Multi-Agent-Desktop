@@ -15,9 +15,17 @@ type Props = {
 export default function SettingsModal(p: Props) {
   const [cfg, setCfg] = useState<LLMConfig>(p.llm)
   const { theme, setTheme } = useTheme()
+  const [settingsPath, setSettingsPath] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [modelError, setModelError] = useState('')
+
+  useEffect(() => {
+    if (!p.open) return
+    API.settingsPath()
+      .then(setSettingsPath)
+      .catch(() => {})
+  }, [p.open])
 
   useEffect(() => {
     if (p.open) {
@@ -209,8 +217,33 @@ export default function SettingsModal(p: Props) {
             }}
           >
             Mock 模式的回复是本地占位内容，不是真实分析。
-            <br />
-            检查器里的改动 / 任务 / 工具是演示数据，用来展示界面结构。
+          </div>
+        )}
+
+        {/* 明确告诉用户密钥存在哪：既是知情权，也方便备份与迁移 */}
+        {settingsPath && (
+          <div
+            style={{
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-disabled)',
+              lineHeight: 1.6,
+              marginBottom: 'var(--space-4)',
+            }}
+          >
+            配置保存在
+            <code
+              className="mono"
+              style={{
+                margin: '0 4px',
+                padding: '1px 5px',
+                background: 'var(--bg-inset)',
+                borderRadius: 'var(--radius-sm)',
+                color: 'var(--text-tertiary)',
+              }}
+            >
+              {settingsPath}
+            </code>
+            （权限 600，重启后保留）
           </div>
         )}
 

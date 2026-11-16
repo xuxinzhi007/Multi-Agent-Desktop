@@ -13,6 +13,7 @@ import (
 
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/channel"
+	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
@@ -25,6 +26,7 @@ type API struct {
 	runner   *pty.Runner
 	channels *channel.Manager
 	kb       knowledge.Store
+	settings *config.Store
 	win      *mygo.Window
 }
 
@@ -472,9 +474,15 @@ func (s *API) GetLLMConfig() LLMConfig {
 	return s.mgr.LLMConfig()
 }
 
-// SetLLMConfig 切换模型配置。
+// SetLLMConfig 切换全局模型配置，并落盘到 config.json。
+// 落盘失败不阻断本次生效，但要记日志 —— 用户下次启动会回到旧配置。
 func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
 	s.mgr.SetLLMConfig(cfg)
+	if s.settings != nil {
+		if err := s.settings.SetLLM(cfg); err != nil {
+			log.Printf("persist llm config: %v", err)
+		}
+	}
 	LLMConfigEvt.Emit(s.win, cfg)
 	return cfg
 }
@@ -489,11 +497,25 @@ func (s *API) GetWorkDir() string {
 	return s.runner.Dir()
 }
 
-// SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。
+// SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。
 func (s *API) SetWorkDir(dir string) string {
 	s.runner.SetDir(dir)
+	if s.settings != nil {
+		if err := s.settings.SetWorkDir(dir); err != nil {
+			log.Printf("persist workdir: %v", err)
+		}
+	}
 	WorkDirEvt.Emit(s.win, WorkDirEvent{Dir: dir})
 	return dir
+}
+
+// SettingsPath 返回配置文件路径。前端用它告诉用户「密钥存在哪」，
+// 也让「打开配置目录」这类操作有明确目标。
+func (s *API) SettingsPath() string {
+	if s.settings == nil {
+		return ""
+	}
+	return s.settings.Path()
 }
 
 // SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。
@@ -967,13 +989,30 @@ func main() {
 		emitToWindow(win, miniWin, mgr, chMgr, event, data)
 	}
 
+	// 持久化到用户数据目录
+	dataDir := mustDataDir()
+	_ = os.MkdirAll(dataDir, 0o755)
+
+	// 应用级设置（含 API Key）：独立配置文件，0600 权限，
+	// 与 agents.json 的历史分离，避免每次对话都重写凭据。
+	settings, err := config.Open(filepath.Join(dataDir, config.FileName))
+	if err != nil {
+		log.Printf("load settings: %v", err)
+		settings, _ = config.Open("") // 降级为内存配置，应用仍可启动
+	}
+	effective := config.ApplyEnv(settings.Get())
+	_ = settings.SetLLM(effective.LLM)
+
+	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
-	runner := pty.NewRunner(mustHome())
+	homeDir := mustHome()
+	if effective.WorkDir != "" {
+		homeDir = effective.WorkDir
+	}
+	runner := pty.NewRunner(homeDir)
 	channels := channel.NewManager()
 	chMgr = channels
 
-	// 持久化到用户数据目录
-	dataDir := mustDataDir()
 	if err := os.MkdirAll(dataDir, 0755); err == nil {
 		if err := mgr.SetStore(filepath.Join(dataDir, "agents.json")); err != nil {
 			log.Printf("load agents: %v", err)
@@ -995,7 +1034,7 @@ func main() {
 	}
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
-	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore}
+	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
 
 	mygo.Bind(api)
 

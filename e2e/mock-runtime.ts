@@ -57,6 +57,8 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         messages: [],
       }),
       'API.SetLLMConfig': (cfg) => cfg,
+      'API.SettingsPath': () =>
+        '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
       'API.SetWorkDir': () => undefined,
       'API.ListModels': () => ['mock'],
     }

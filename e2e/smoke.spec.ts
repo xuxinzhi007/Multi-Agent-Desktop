@@ -94,3 +94,12 @@ test('没有未捕获的 JS 异常', async ({ page }) => {
   await page.waitForTimeout(500)
   expect(errors).toEqual([])
 })
+
+test('设置面板告知用户密钥保存在哪', async ({ page }) => {
+  await page.locator('aside').first().getByRole('button').filter({ hasText: '⚙' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+
+  // 用户有权知道 API Key 落在哪个文件
+  await expect(dialog.getByText(/config\.json/)).toBeVisible()
+})

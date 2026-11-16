@@ -170,7 +170,7 @@ export default function Sidebar(p: Props) {
                   {ch.name}
                 </div>
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                  {ch.members.length} 成员 · {ch.messages.length} 消息
+                  {(ch.members ?? []).length} 成员 · {(ch.messages ?? []).length} 消息
                 </div>
               </div>
             </div>

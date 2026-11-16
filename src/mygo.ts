@@ -340,13 +340,23 @@ export const API = {
   setAlwaysOnTop(v: boolean): Promise<boolean> {
     return call("API.SetAlwaysOnTop", v);
   },
-  /** SetLLMConfig 切换模型配置。 */
+  /**
+   * SetLLMConfig 切换全局模型配置，并落盘到 config.json。
+   * 落盘失败不阻断本次生效，但要记日志 —— 用户下次启动会回到旧配置。
+   */
   setLLMConfig(cfg: Config): Promise<Config> {
     return call("API.SetLLMConfig", cfg);
   },
-  /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值）。 */
+  /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。 */
   setWorkDir(dir: string): Promise<string> {
     return call("API.SetWorkDir", dir);
+  },
+  /**
+   * SettingsPath 返回配置文件路径。前端用它告诉用户「密钥存在哪」，
+   * 也让「打开配置目录」这类操作有明确目标。
+   */
+  settingsPath(): Promise<string> {
+    return call("API.SettingsPath");
   },
   /** StopAgent 停止一个 agent 的推理并清空队列。 */
   stopAgent(id: string): Promise<boolean> {
