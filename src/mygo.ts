@@ -234,6 +234,16 @@ export const API = {
   blockAgent(id: string, reason: string): Promise<void> {
     return call("API.BlockAgent", id, reason);
   },
+  /**
+   * ClearAgentLLM 清掉会话级模型配置，让该会话回落到全局默认。
+   *
+   * 为什么需要独立的方法：之前「跟随全局」被编码成 provider:"mock"，
+   * 但 mock 本身是合法 provider —— 「未设置」和「显式选了 mock」
+   * 无法区分，导致 UI 上无法表达两种不同的意图。
+   */
+  clearAgentLLM(agentId: string): Promise<AgentView> {
+    return call("API.ClearAgentLLM", agentId);
+  },
   /** CreateAgent 新建一个 agent。 */
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("API.CreateAgent", req);

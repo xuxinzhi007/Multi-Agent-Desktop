@@ -760,3 +760,504 @@
     animation: none;
   }
 }
+
+/* ==================== 设置页 ==================== */
+
+/* 双栏：左分类导航 + 右内容。高度锁在 Modal 内容区内 ——
+   两栏各自滚动，否则整页滚动时左导航会跟着跑掉。
+   用 min() 同时兜住「长得放得下」和「小窗不溢出」两种情形。 */
+.c-settings {
+  display: flex;
+  height: min(68vh, 580px);
+  min-height: min(360px, 68vh);
+}
+
+.c-settings__nav {
+  width: 168px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3) var(--space-2);
+  background: var(--bg-inset);
+  border-right: 1px solid var(--border-subtle);
+  overflow-y: auto;
+}
+
+.c-settings__nav-label {
+  padding: 4px 10px 8px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+
+.c-settings__nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.c-settings__nav-item:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.c-settings__nav-item:active {
+  background: var(--bg-surface-active);
+}
+
+/* 选中项：左侧一条强调色竖线 + 悬浮卡片，比整块反白更轻 */
+.c-settings__nav-item--active {
+  background: var(--bg-surface);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+.c-settings__nav-item--active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 50%;
+  translate: 0 -50%;
+  width: 2px;
+  height: 55%;
+  border-radius: var(--radius-full);
+  background: var(--accent-primary);
+}
+.c-settings__nav-item:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.c-settings__nav-icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.c-settings__nav-hint {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-disabled);
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 62px;
+}
+
+.c-settings__body {
+  flex: 1;
+  min-width: 0;
+  /* 底部留白比顶部略多：最后一张卡片不要贴住滚动边界 */
+  padding: var(--space-5) var(--space-6) var(--space-8);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.c-settings__body-inner {
+  animation: fade-up var(--dur-base) var(--ease);
+}
+
+/* 分区标题：标题 + 一句话说明，让每块内容自解释 */
+.c-settings__head {
+  margin-bottom: var(--space-4);
+}
+.c-settings__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0 0 3px;
+}
+.c-settings__desc {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-tertiary);
+  margin: 0;
+  max-width: 56ch;
+}
+
+/* 分组卡片：层次靠边框，不靠底色深浅 */
+.c-settings__card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.c-settings__card:hover {
+  border-color: var(--border-default);
+}
+.c-settings__card + .c-settings__card {
+  margin-top: var(--space-3);
+}
+.c-settings__card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+}
+.c-settings__card-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.c-settings__card-sub {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: var(--leading-normal);
+  margin-top: 1px;
+}
+/* 卡片头右侧的当前值胶囊 */
+.c-settings__pill {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 9px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.c-settings__card-body {
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* 字段：标签 + 控件 + 说明 */
+.c-settings__field {
+  display: grid;
+  gap: 0;
+}
+.c-settings__field-label {
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.c-settings__hint {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-disabled);
+  margin-top: 6px;
+}
+.c-settings__input {
+  width: 100%;
+}
+.c-settings__load-btn {
+  white-space: nowrap;
+  min-width: 82px;
+}
+
+/* 行内代码：路径、默认地址、命令 */
+.c-settings__code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+}
+.c-settings__code--block {
+  display: block;
+  margin: 8px 0;
+  padding: 8px 10px;
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+  word-break: break-all;
+  user-select: all;
+}
+
+.c-settings__prose {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+/* Ollama 命令：等宽 + 可整行选中复制 */
+.c-settings__cmds {
+  display: grid;
+  gap: 6px;
+}
+.c-settings__cmd {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  user-select: all;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* 带描述的卡片选项（外观 / provider 共用） */
+.c-settings__option {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.c-settings__option:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.c-settings__option:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.c-settings__option--active {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+.c-settings__option--active:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+}
+.c-settings__option-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 14px;
+  border: 1px solid var(--border-subtle);
+}
+.c-settings__option--active .c-settings__option-icon {
+  border-color: var(--accent-border);
+  background: var(--bg-surface);
+}
+.c-settings__option-body {
+  flex: 1;
+  min-width: 0;
+}
+.c-settings__option-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.c-settings__option-desc {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: var(--leading-normal);
+  margin-top: 2px;
+}
+
+/* 外观三选一：竖排小卡片，控制区更紧凑 */
+.c-settings__grid {
+  display: grid;
+  gap: var(--space-2);
+}
+.c-settings__grid--3 {
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+}
+.c-settings__option--tile {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 11px;
+}
+.c-settings__option--tile .c-settings__option-desc {
+  margin-top: 0;
+}
+
+/* 复选标记 */
+.c-settings__check {
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  color: var(--accent-bright);
+  border: 1px solid var(--border-default);
+  background: var(--bg-inset);
+}
+.c-settings__check--on {
+  border-color: var(--accent-border);
+  background: var(--bg-surface);
+}
+
+/* 输入 + 内嵌按钮（显示/隐藏密钥、加载列表） */
+.c-settings__input-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.c-settings__input-row > input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 状态行：加载 / 错误 / 空，统一外观，只换语义色 */
+.c-settings__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+}
+.c-settings__status-text {
+  flex: 1;
+  min-width: 0;
+}
+.c-settings__status--error {
+  border-color: var(--danger-border);
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+.c-settings__status--success {
+  border-color: var(--success-border);
+  background: var(--success-dim);
+  color: var(--success);
+}
+.c-settings__status--warning {
+  border-color: var(--warning-border);
+  background: var(--warning-dim);
+  color: var(--warning);
+}
+.c-settings__spinner {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent-bright);
+  animation: settings-spin 0.7s linear infinite;
+}
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 关于页的键值表 */
+.c-settings__kv {
+  margin: 0;
+  display: grid;
+}
+.c-settings__kv-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+}
+.c-settings__kv-row:first-child {
+  padding-top: 0;
+}
+.c-settings__kv-row:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.c-settings__kv-key {
+  width: 84px;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+.c-settings__kv-val {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+/* 底栏左侧的「是否保存过」提示 */
+.c-settings__footer-state {
+  flex: 1;
+  font-size: var(--text-xs);
+  color: var(--text-disabled);
+  align-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窗口变窄时导航退化为图标条，把宽度还给内容 */
+@media (max-width: 720px) {
+  .c-settings__nav {
+    width: 46px;
+    padding: var(--space-3) 6px;
+    align-items: center;
+  }
+  .c-settings__nav-item {
+    justify-content: center;
+    padding: 8px 0;
+  }
+  .c-settings__nav-item > span:not(.c-settings__nav-icon) {
+    display: none;
+  }
+  .c-settings__nav-label {
+    display: none;
+  }
+  .c-settings__body {
+    padding: var(--space-4);
+  }
+  .c-settings__grid--3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-settings__body-inner {
+    animation: none;
+  }
+  .c-settings__spinner {
+    animation: none;
+  }
+}

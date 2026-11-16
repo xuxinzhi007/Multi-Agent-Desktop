@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"runtime"
 	"sync"
+
+	"multi-agent-desktop/internal/proc"
 )
 
 // Result 是一次命令执行的产出。
@@ -54,7 +56,7 @@ func (r *Runner) Run(ctx context.Context, command string) Result {
 	name, args := shellFor()
 	cmd := exec.CommandContext(ctx, name, append(args, command)...)
 	cmd.Dir = r.Dir()
-	setProcAttr(cmd)
+	proc.Setup(cmd)
 
 	var stdout, stderr syncBuffer
 	cmd.Stdout = &stdout
@@ -64,7 +66,7 @@ func (r *Runner) Run(ctx context.Context, command string) Result {
 	code := 0
 	if err != nil {
 		var ee *exec.ExitError
-		if ok := asExitError(err, &ee); ok {
+		if ok := proc.Exited(err); ok {
 			code = ee.ExitCode()
 		} else {
 			code = -1

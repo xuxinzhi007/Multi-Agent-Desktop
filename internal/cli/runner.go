@@ -8,6 +8,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"multi-agent-desktop/internal/proc"
 )
 
 // Event 是 CLI agent 的结构化输出。
@@ -64,6 +66,9 @@ func (r *ClaudeRunner) Run(ctx context.Context, req Request) (<-chan Event, erro
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = r.WorkDir
+	// 必须放进独立进程组：claude 会派生 node / git 等子进程，
+	// 只 kill 直接子进程会让它们继续持有 stdout，事件流永不关闭。
+	proc.Setup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -201,6 +206,7 @@ func (r *CodexRunner) Run(ctx context.Context, req Request) (<-chan Event, error
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = r.WorkDir
+	proc.Setup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

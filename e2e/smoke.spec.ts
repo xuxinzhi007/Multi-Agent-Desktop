@@ -74,7 +74,12 @@ test('设置弹窗能打开且分组可见', async ({ page }) => {
   // 设置入口是侧栏顶部的图标按钮
   await page.locator('aside').first().getByRole('button').filter({ hasText: '⚙' }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
-  await expect(page.getByText('外观', { exact: true })).toBeVisible()
+  // 左侧分类导航三个入口都在，默认落在「外观」
+  const nav = page.getByRole('navigation', { name: '设置分类' })
+  await expect(nav.getByRole('button', { name: '外观' })).toBeVisible()
+  await expect(nav.getByRole('button', { name: /模型/ })).toBeVisible()
+  await expect(nav.getByRole('button', { name: '关于' })).toBeVisible()
+  await expect(page.getByRole('radiogroup', { name: '主题' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toBeHidden()
 })
@@ -100,6 +105,9 @@ test('设置面板告知用户密钥保存在哪', async ({ page }) => {
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
 
-  // 用户有权知道 API Key 落在哪个文件
+  // 用户有权知道 API Key 落在哪个文件 —— 路径在「关于」页
+  await dialog.getByRole('navigation', { name: '设置分类' })
+    .getByRole('button', { name: '关于' })
+    .click()
   await expect(dialog.getByText(/config\.json/)).toBeVisible()
 })

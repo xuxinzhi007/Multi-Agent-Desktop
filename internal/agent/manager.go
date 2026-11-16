@@ -294,7 +294,13 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 		return fmt.Errorf("agent %s not found", id)
 	}
 	a.mu.Lock()
-	a.LLMCfg = &cfg
+	// 零值配置表示「清除会话级设置，回落到全局」。
+	// 用 nil 而不是指向零值的指针，让 EffectiveLLM 的回落逻辑生效。
+	if cfg.Provider == "" {
+		a.LLMCfg = nil
+	} else {
+		a.LLMCfg = &cfg
+	}
 	a.mu.Unlock()
 	m.goSave()
 	return nil

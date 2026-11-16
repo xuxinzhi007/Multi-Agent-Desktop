@@ -559,6 +559,24 @@ func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 	return v, nil
 }
 
+// ClearAgentLLM 清掉会话级模型配置，让该会话回落到全局默认。
+//
+// 为什么需要独立的方法：之前「跟随全局」被编码成 provider:"mock"，
+// 但 mock 本身是合法 provider —— 「未设置」和「显式选了 mock」
+// 无法区分，导致 UI 上无法表达两种不同的意图。
+func (s *API) ClearAgentLLM(agentId string) (AgentView, error) {
+	if err := s.mgr.SetAgentLLM(agentId, llm.Config{}); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(agentId)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, v)
+	return v, nil
+}
+
 // GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。
 func (s *API) GetAgentConfig(agentId string) LLMConfig {
 	return s.mgr.LLMConfigFor(agentId)

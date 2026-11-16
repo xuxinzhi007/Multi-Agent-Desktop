@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ROLE_PRESETS } from '../lib/presets'
 import { AGENT_COLORS } from '../lib/presets'
-import { API } from '../mygo'
 import Modal from './Modal'
-import DropZone from './DropZone'
+import DirectoryPicker from './DirectoryPicker'
 
 type Props = {
   open: boolean
@@ -175,37 +174,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
 
           <div>
             <label style={LABEL_STYLE}>工作目录（可选）</label>
-            <DropZone onPath={setWorkDir} style={{ padding: '8px 10px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span
-                  className="mono"
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    fontSize: 'var(--text-xs)',
-                    color: workDir ? 'var(--text-secondary)' : 'var(--text-disabled)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    textAlign: 'left',
-                  }}
-                  title={workDir}
-                >
-                  {workDir || '拖入文件夹，或'}
-                </span>
-                <button
-                  type="button"
-                  className="c-hint-chip"
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    const picked = await API.pickDirectory()
-                    if (picked) setWorkDir(picked)
-                  }}
-                >
-                  浏览…
-                </button>
-              </div>
-            </DropZone>
+            <DirectoryPicker value={workDir} onChange={setWorkDir} compact />
           </div>
 
           <div>

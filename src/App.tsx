@@ -168,6 +168,7 @@ export default function App() {
             }
           }}
           globalProvider={s.llm.provider}
+          onClearLLM={() => activeAgent && s.send('agent.clearLLM', { id: activeAgent.id })}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
           onQuickCreate={async (name, role) => {
@@ -205,6 +206,7 @@ export default function App() {
       <SettingsModal
         open={settingsOpen}
         llm={s.llm}
+        version={s.version}
         onClose={() => setSettingsOpen(false)}
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
       />

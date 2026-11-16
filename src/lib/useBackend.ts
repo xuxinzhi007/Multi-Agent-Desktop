@@ -39,6 +39,8 @@ type State = {
   tokenUsage: Record<string, { in: number; out: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
+  /** 已经乐观插入消息、但后端还没回执的 agent */
+  pending: Record<string, boolean>
 }
 
 const EMPTY: State = {
@@ -58,6 +60,7 @@ const EMPTY: State = {
   tools: [],
   tokenUsage: {},
   focusAgentId: null,
+  pending: {},
 }
 
 export function useBackend() {
@@ -112,9 +115,20 @@ export function useBackend() {
         }
         return {
           ...s,
-          agents: s.agents.map((a) => (a.id === id ? { ...a, messages: [...a.messages, message] } : a)),
+          agents: s.agents.map((a) => {
+            if (a.id !== id) return a
+            const list = a.messages ?? []
+            // 乐观插入过同一条 user 消息时不要再追加一份
+            const last = list[list.length - 1]
+            if (message.role === 'user' && last?.role === 'user' && last.content === message.content) {
+              return a
+            }
+            return { ...a, messages: [...list, message] }
+          }),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
           tokenUsage: newTokenUsage,
+          // 后端回推了消息说明确实在处理，清掉 pending
+          pending: omit(s.pending, id),
         }
       }),
     )
@@ -229,6 +243,28 @@ export function useBackend() {
   }, [])
 
   /** send 返回按 action 变化的类型；用泛型让调用处拿到精确结果。 */
+  /**
+   * 乐观插入用户消息。
+   *
+   * 之前消息完全依赖后端的 agent.message 事件回推 —— 后端一慢、一卡、
+   * 或者事件丢了，用户敲完字屏幕上什么都不出现，看起来就是「发出去没反应」。
+   * 现在先在本地插入，让用户立刻看到自己的话；后端回推时按内容去重。
+   */
+  const optimisticMessage = useCallback(
+    (agentId: string, text: string, role: 'user' | 'assistant' = 'user') => {
+      const msg = { role, content: text, timestamp: Math.floor(Date.now() / 1000) }
+      setState((s) => ({
+        ...s,
+        agents: s.agents.map((a) =>
+          a.id === agentId ? { ...a, messages: [...(a.messages ?? []), msg] } : a,
+        ),
+        // 立刻进入「处理中」，否则用户不知道有没有发出去
+        pending: { ...s.pending, [agentId]: true },
+      }))
+    },
+    [],
+  )
+
   const sendImpl = useCallback((action: string, data?: unknown): Promise<unknown> => {
     switch (action) {
       case 'agent.create':
@@ -243,8 +279,15 @@ export function useBackend() {
         return API.deleteAgent((data as { id: string }).id)
       case 'agent.stop':
         return API.stopAgent((data as { id: string }).id)
-      case 'agent.prompt':
-        return API.promptAgent(data as { agentId: string; text: string })
+      case 'agent.prompt': {
+        const { agentId, text } = data as { agentId: string; text: string }
+        optimisticMessage(agentId, text)
+        return API.promptAgent({ agentId, text }).catch((e) => {
+          // 失败要把乐观插入的消息标出来，不能假装成功
+          setState((s) => ({ ...s, pending: omit(s.pending, agentId) }))
+          throw e
+        })
+      }
       case 'agent.route':
         return API.routeAgent(
           (data as { fromId: string }).fromId,
@@ -264,6 +307,11 @@ export function useBackend() {
           return null
         })
       }
+      case 'agent.clearLLM':
+        return API.clearAgentLLM((data as { id: string }).id).catch((e) => {
+          console.error('clearAgentLLM failed', e)
+          return null
+        })
       case 'agent.llm': {
         const { id, cfg } = data as { id: string; cfg: Config }
         return API.setAgentLLM(id, cfg).catch((e) => {

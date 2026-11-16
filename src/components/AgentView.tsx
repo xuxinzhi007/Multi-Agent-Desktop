@@ -9,7 +9,7 @@ import { API, type AgentView as Agent, type Config, type Message } from '../mygo
 import { PROVIDERS } from '../lib/presets'
 import type { ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
-import DropZone from './DropZone'
+import DirectoryPicker from './DirectoryPicker'
 
 type Props = {
   agent: Agent | null
@@ -36,6 +36,8 @@ type Props = {
   onCreateRequest?: () => void
   /** 全局配置的 provider，会话级未设置时用它 */
   globalProvider?: string
+  /** 清掉会话级模型设置，回到跟随全局 */
+  onClearLLM?: () => void
 }
 
 // 空状态的一键角色。只保留 3 个 —— 选择过多反而增加决策成本。
@@ -451,6 +453,7 @@ export default function AgentView(p: Props) {
                 fallbackWorkDir={p.workDir}
                 globalProvider={p.globalProvider}
                 onConfig={p.onConfig}
+                onClearLLM={p.onClearLLM}
                 direction="up"
               />
             </div>
@@ -567,6 +570,7 @@ function SessionConfigChips({
   fallbackWorkDir,
   globalProvider,
   onConfig,
+  onClearLLM,
   direction = 'down',
 }: {
   agent: Agent
@@ -574,9 +578,12 @@ function SessionConfigChips({
   /** 全局配置的 provider，用于在弹层里提示「跟随全局」的实际去向 */
   globalProvider?: string
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
+  /** 清掉会话级模型设置，回到跟随全局 */
+  onClearLLM?: () => void
   /** 弹层方向。放在输入框底栏时用 'up'，否则会被输入区挡住。 */
   direction?: 'down' | 'up'
 }) {
+  const onFollowGlobal = onClearLLM
   const [open, setOpen] = useState<'none' | 'dir' | 'model'>('none')
   const [dirDraft, setDirDraft] = useState('')
 
@@ -653,34 +660,7 @@ function SessionConfigChips({
               <>
                 <div style={popoverLabel}>本会话工作目录</div>
 
-                {/* 已有「浏览」和「拖入」两种方式，再让人手敲绝对路径是多余的。
-                    路径本身只展示，不出现在可编辑输入框里。 */}
-                <DropZone
-                  onPath={(p) => setDirDraft(p)}
-                  style={{ padding: '10px 12px', marginBottom: 6, textAlign: 'center' }}
-                >
-                  <div
-                    className="mono"
-                    style={{
-                      fontSize: 'var(--text-xs)',
-                      color: dirDraft ? 'var(--text-secondary)' : 'var(--text-disabled)',
-                      wordBreak: 'break-all',
-                      lineHeight: 1.6,
-                      marginBottom: 6,
-                    }}
-                  >
-                    {dirDraft || '把项目文件夹拖到这里'}
-                  </div>
-                  <button
-                    className="c-btn c-btn--secondary c-btn--sm"
-                    onClick={async () => {
-                      const picked = await API.pickDirectory()
-                      if (picked) setDirDraft(picked)
-                    }}
-                  >
-                    浏览…
-                  </button>
-                </DropZone>
+                <DirectoryPicker value={dirDraft} onChange={setDirDraft} />
 
                 <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
@@ -717,7 +697,7 @@ function SessionConfigChips({
                   setOpen('none')
                 }}
                 onFollowGlobal={() => {
-                  onConfig({ llm: { provider: 'mock', baseUrl: '', apiKey: '', model: '' } })
+                  onFollowGlobal?.()
                   setOpen('none')
                 }}
                 onClose={() => setOpen('none')}
