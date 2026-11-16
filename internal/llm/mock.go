@@ -91,12 +91,10 @@ func mockReply(system, user string) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s] 收到：%s\n\n", role, task)
-	b.WriteString("这是 mock 模式的占位回复，不是真实分析。\n")
-	b.WriteString("在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n")
-	b.WriteString("现在这个 mock 只用来验证三件事：\n")
-	b.WriteString("1. 多个 agent 能否并行流式输出\n")
-	b.WriteString("2. 会话之间是否隔离\n")
-	b.WriteString("3. 停止按钮能否中断\n")
+	b.WriteString("当前是内置示例模型，回复由本地规则生成，不含真实推理。")
+	b.WriteString("它能帮你验证的是：多 agent 并行、流式输出、会话隔离、随时中断。\n\n")
+	b.WriteString("**接上真模型**：右上角 ⚙ → 选择 Ollama（本地免费）或填 OpenAI / DeepSeek / Claude 的 Base URL 与 Key。")
+	b.WriteString("配置只作用于当前会话，不影响其他 agent。\n")
 
 	return b.String()
 }

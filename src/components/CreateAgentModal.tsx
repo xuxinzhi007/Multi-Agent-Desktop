@@ -7,6 +7,8 @@ type Props = {
   open: boolean
   onClose: () => void
   onCreate: (name: string, role: string, backend: string, workDir?: string) => void
+  /** 已有 agent 数量，用来预填一个合理的默认名，避免用户卡在起名 */
+  existingCount?: number
 }
 
 const FIELD_STYLE = {
@@ -26,26 +28,40 @@ const LABEL_STYLE = {
   marginBottom: 6,
 } as const
 
+/** suggestName 生成一个不重复的默认名：前端 / 前端 2 / 前端 3 … */
+function suggestName(base: string, existingCount: number): string {
+  return existingCount === 0 ? base : `${base} ${existingCount + 1}`
+}
+
 const BACKENDS = [
   { id: 'mock', label: 'Mock', desc: '内置' },
   { id: 'claude', label: 'Claude', desc: 'Code' },
   { id: 'codex', label: 'Codex', desc: 'Exec' },
 ] as const
 
-export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
+export default function CreateAgentModal({ open, onClose, onCreate, existingCount = 0 }: Props) {
   const [name, setName] = useState('')
   const [role, setRole] = useState(ROLE_PRESETS[0].role)
   const [backend, setBackend] = useState('mock')
   const [workDir, setWorkDir] = useState('')
+  // 用户是否手动改过名称。没改过时，切换角色会同步更新默认名。
+  const [nameTouched, setNameTouched] = useState(false)
 
   useEffect(() => {
     if (open) {
-      setName('')
-      setRole(ROLE_PRESETS[0].role)
+      const preset = ROLE_PRESETS[0]
+      setName(suggestName(preset.name, existingCount))
+      setRole(preset.role)
       setBackend('mock')
       setWorkDir('')
+      setNameTouched(false)
     }
-  }, [open])
+  }, [open, existingCount])
+
+  const pickPreset = (preset: (typeof ROLE_PRESETS)[number]) => {
+    setRole(preset.role)
+    if (!nameTouched) setName(suggestName(preset.name, existingCount))
+  }
 
   const submit = () => {
     const n = name.trim()
@@ -105,7 +121,10 @@ export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
           <input
             autoFocus
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value)
+              setNameTouched(true)
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') submit()
             }}
@@ -116,13 +135,31 @@ export default function CreateAgentModal({ open, onClose, onCreate }: Props) {
 
         <div>
           <label style={LABEL_STYLE}>角色</label>
-          <select value={role} onChange={(e) => setRole(e.target.value)} style={FIELD_STYLE}>
-            {ROLE_PRESETS.map((r) => (
-              <option key={r.name} value={r.role}>
-                {r.name}
-              </option>
-            ))}
-          </select>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} role="group" aria-label="角色">
+            {ROLE_PRESETS.map((r) => {
+              const active = r.role === role
+              return (
+                <button
+                  key={r.name}
+                  type="button"
+                  onClick={() => pickPreset(r)}
+                  aria-pressed={active}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 'var(--radius-full)',
+                    border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-default)'}`,
+                    background: active ? 'var(--accent-dim)' : 'var(--bg-surface)',
+                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    fontFamily: 'inherit',
+                    fontSize: 'var(--text-sm)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {r.name}
+                </button>
+              )
+            })}
+          </div>
         </div>
 
         <div>

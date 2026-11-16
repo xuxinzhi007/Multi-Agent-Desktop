@@ -27,8 +27,11 @@ test('新建 Agent 弹窗能打开且表单字段可见', async ({ page }) => {
 
   // 三个字段必须可见 —— 上一次回归成「只剩标题和按钮」
   await expect(dialog.getByPlaceholder('例如：后端开发')).toBeVisible()
-  await expect(dialog.locator('select').first()).toBeVisible()
-  await expect(dialog.locator('label', { hasText: '后端' })).toBeVisible()
+  // 角色改为一键点选的预设按钮组（不再藏在下拉里）
+  const roleGroup = dialog.getByRole('group', { name: '角色' })
+  await expect(roleGroup).toBeVisible()
+  await expect(roleGroup.getByRole('button', { name: '后端' })).toBeVisible()
+  await expect(dialog.locator('label', { hasText: '工作目录' })).toBeVisible()
 
   // 弹窗必须在视口内（transform 被动画覆盖时会被推出屏幕）
   const box = await dialog.boundingBox()
@@ -41,9 +44,9 @@ test('新建 Agent 弹窗能打开且表单字段可见', async ({ page }) => {
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1)
   }
 
-  // 名称填了之后「创建」按钮才可用
+  // 名称已被预填，创建按钮直接可用（用户不必先想一个名字）
   const createBtn = dialog.getByRole('button', { name: '创建' })
-  await expect(createBtn).toBeDisabled()
+  await expect(createBtn).toBeEnabled()
   await dialog.getByPlaceholder('例如：后端开发').fill('测试 agent')
   await expect(createBtn).toBeEnabled()
 })

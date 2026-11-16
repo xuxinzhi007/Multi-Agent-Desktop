@@ -19,6 +19,7 @@ export default function App() {
   useTheme() // 应用主题到 document.documentElement
   const [active, setActive] = useState<ActiveRef>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
   const [shellOpen, setShellOpen] = useState(false)
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [tab, setTab] = useState<InspectorTab>('changes')
@@ -86,6 +87,8 @@ export default function App() {
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
         onOpenSettings={() => setSettingsOpen(true)}
+        createOpen={createOpen}
+        onCreateOpenChange={setCreateOpen}
       />
 
       {activeChannel ? (
@@ -136,6 +139,11 @@ export default function App() {
           }}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
+          onQuickCreate={async (name, role) => {
+            const created = await s.send('agent.create', { name, role })
+            if (created) setActive({ kind: 'agent', id: created.id })
+          }}
+          onCreateRequest={() => setCreateOpen(true)}
         />
       )}
 

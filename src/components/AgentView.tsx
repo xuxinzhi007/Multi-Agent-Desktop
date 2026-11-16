@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
 import { ContextMenu } from 'radix-ui'
@@ -24,7 +24,18 @@ type Props = {
   agents?: Agent[]
   /** 会话级配置变更（工作目录 / 模型），只影响当前会话 */
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
+  /** 空状态下的一键创建：传角色预设，直接建出可用 agent */
+  onQuickCreate?: (presetName: string, role: string) => void
+  /** 空状态下打开「新建 Agent」弹窗 */
+  onCreateRequest?: () => void
 }
+
+// 空状态的一键角色。只保留 3 个 —— 选择过多反而增加决策成本。
+const quickRoles = [
+  { emoji: '🧩', label: '前端', name: '前端', role: 'React / TypeScript 专家，关注组件拆分、状态管理与渲染性能' },
+  { emoji: '⚙️', label: '后端', name: '后端', role: 'Go 专家，关注 API 设计、并发安全与查询效率' },
+  { emoji: '🔍', label: '审查', name: 'Reviewer', role: '代码审查者，指出风险、代码异味与不符合规范的地方' },
+] as const
 
 export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
@@ -107,14 +118,32 @@ export default function AgentView(p: Props) {
           <div style={{ fontSize: 'var(--text-md)', fontWeight: 600, marginBottom: 8 }}>
             开始你的多 Agent 协作
           </div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 16 }}>
-            创建多个 Agent，让它们并行工作、互相协作
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', marginBottom: 20 }}>
+            选一个角色，立刻开始。之后可以随时加更多 agent 并行工作。
           </div>
-          <div style={{ display: 'flex', gap: 16, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-            <span>💬 流式对话</span>
-            <span>🔧 工具调用</span>
-            <span>✉️ Agent 协作</span>
+
+          {/* 一键创建：不用填表，点一下就有一个能对话的 agent */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 18 }}>
+            {quickRoles.map((r) => (
+              <button
+                key={r.name}
+                type="button"
+                className="c-empty-cta"
+                onClick={() => p.onQuickCreate?.(r.name, r.role)}
+              >
+                <span aria-hidden>{r.emoji}</span>
+                {r.label}
+              </button>
+            ))}
           </div>
+
+          <button
+            type="button"
+            className="c-hint-chip"
+            onClick={() => p.onCreateRequest?.()}
+          >
+            自定义名称与角色 →
+          </button>
         </div>
       </div>
     )
@@ -268,7 +297,14 @@ export default function AgentView(p: Props) {
         style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-2)' }}
       >
         {visible.length === 0 && !p.streaming && (
-          <EmptyChat color={p.agent.color} name={p.agent.name} />
+          <EmptyChat
+            color={p.agent.color}
+            name={p.agent.name}
+            onPick={(text) => {
+              setInput(text)
+              requestAnimationFrame(() => taRef.current?.focus())
+            }}
+          />
         )}
 
         {visible.map((m, i) => (
@@ -858,7 +894,7 @@ function StatusBadge({ status, queueLen }: { status: string; queueLen?: number }
   return <span className={`c-badge ${s.cls}`}>{s.t}</span>
 }
 
-function EmptyChat({ color, name }: { color: string; name: string }) {
+function EmptyChat({ color, name, onPick }: { color: string; name: string; onPick: (text: string) => void }) {
   const hints = [
     '这个模块有什么风险？',
     '给我一个最小可行实现',
@@ -893,30 +929,44 @@ function EmptyChat({ color, name }: { color: string; name: string }) {
           marginBottom: 'var(--space-5)',
         }}
       >
-        这个会话是独立的，不影响其他 agent。
+        这个会话是独立的，不影响其他 agent。点下面的例子直接开始：
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {hints.map((h) => (
-          <span
+          <button
             key={h}
-            style={{
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-tertiary)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-full)',
-              padding: '5px 11px',
-              background: 'var(--bg-surface)',
-            }}
+            type="button"
+            onClick={() => onPick(h)}
+            className="c-hint-chip"
           >
             {h}
-          </span>
+          </button>
         ))}
       </div>
     </div>
   )
 }
 
-function Bubble({ m, color, live, tokens, onContextMenu }: { m: Message; color: string; live?: boolean; tokens?: { in: number; out: number }; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
+/**
+ * Bubble 是单条消息的展示。
+ *
+ * 用 memo 包起来的原因：历史消息内容不会变，但流式输出期间父组件每秒
+ * 重渲染几十次。不 memo 的话每次都要重新解析一遍所有历史消息的 Markdown，
+ * 长对话下会明显卡顿。比较只看真正影响渲染的字段。
+ */
+const Bubble = memo(
+  BubbleImpl,
+  (a, b) =>
+    a.m.role === b.m.role &&
+    a.m.content === b.m.content &&
+    a.m.timestamp === b.m.timestamp &&
+    a.color === b.color &&
+    a.live === b.live &&
+    a.tokens?.in === b.tokens?.in &&
+    a.tokens?.out === b.tokens?.out,
+)
+
+function BubbleImpl({ m, color, live, tokens, onContextMenu }: { m: Message; color: string; live?: boolean; tokens?: { in: number; out: number }; onContextMenu?: (e: React.MouseEvent, msg: Message) => void }) {
   const isUser = m.role === 'user'
 
   // 检测路由消息：[from xxx] 或 [to xxx]

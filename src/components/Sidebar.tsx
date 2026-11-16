@@ -16,10 +16,12 @@ type Props = {
   onDelete: (id: string) => void
   onCreateChannel: (name: string, members: string[]) => void
   onOpenSettings: () => void
+  /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
+  createOpen: boolean
+  onCreateOpenChange: (open: boolean) => void
 }
 
 export default function Sidebar(p: Props) {
-  const [showCreateModal, setShowCreateModal] = useState(false)
   const [showChannelModal, setShowChannelModal] = useState(false)
 
   const running = p.agents.filter((a) => a.status === 'running').length
@@ -189,7 +191,7 @@ export default function Sidebar(p: Props) {
           </div>
         )}
 
-        {p.agents.length === 0 && !showCreateModal && (
+        {p.agents.length === 0 && !p.createOpen && (
           <div className="c-empty" style={{ padding: 'var(--space-6) var(--space-3)' }}>
             还没有 agent
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
@@ -327,7 +329,7 @@ export default function Sidebar(p: Props) {
       <div style={{ padding: 'var(--space-2)', borderTop: '1px solid var(--border-subtle)', display: 'grid', gap: 6 }}>
         <button
           className="c-btn c-btn--secondary c-btn--full"
-          onClick={() => setShowCreateModal(true)}
+          onClick={() => p.onCreateOpenChange(true)}
         >
           <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
         </button>
@@ -342,9 +344,10 @@ export default function Sidebar(p: Props) {
 
       {/* 新建 Agent 弹窗 */}
       <CreateAgentModal
-        open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
+        open={p.createOpen}
+        onClose={() => p.onCreateOpenChange(false)}
         onCreate={p.onCreate}
+        existingCount={p.agents.length}
       />
 
       <CreateChannelModal
