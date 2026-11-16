@@ -70,10 +70,11 @@ button {
     inset 0 1px 0 rgba(255, 255, 255, 0.07),
     inset 0 -1px 0 rgba(0, 0, 0, 0.4),
     0 12px 40px -12px rgba(0, 0, 0, 0.72);
+  /* 与 Go 侧逐帧 resize 用同一时长和曲线 —— 容器和内容是同一个动作 */
   transition:
-    width 420ms var(--spring),
-    height 420ms var(--spring),
-    border-radius 420ms var(--spring);
+    width 380ms var(--spring),
+    height 380ms var(--spring),
+    border-radius 380ms var(--spring);
 }
 
 /* 细网格底：给深色面一点材质，几乎看不见但去掉就变平 */
@@ -140,10 +141,14 @@ button {
   background: transparent;
   color: inherit;
   text-align: left;
-  transition: opacity 200ms ease;
+  /* 退场不立刻消失：跟随容器一起收，否则看起来是「内容先被抽掉」 */
+  transition:
+    opacity 240ms ease,
+    transform 380ms var(--spring);
 }
 .island--expanded .island__pill {
   opacity: 0;
+  transform: scale(0.96);
   pointer-events: none;
 }
 
@@ -273,15 +278,18 @@ button {
   display: flex;
   flex-direction: column;
   opacity: 0;
-  transform: translateY(6px);
+  /* 入场：从下方稍微淡入，等容器张开到一定程度才开始，避免挤在一起 */
+  transform: translateY(10px) scale(0.99);
   transition:
-    opacity 260ms ease 60ms,
-    transform 380ms var(--spring) 60ms;
+    opacity 260ms ease 90ms,
+    transform 420ms var(--spring) 70ms;
   pointer-events: none;
+  /* 内容超出时裁掉，收起到一半不会看到内容溢出容器 */
+  overflow: hidden;
 }
 .island--expanded .island__panel {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
   pointer-events: auto;
 }
 
@@ -652,6 +660,68 @@ button {
 }
 
 /* ---------- 无障碍 ---------- */
+/* ---------- 收起过程：内容先「收上去」，容器再合上 ----------
+   直接把 panel 的 opacity 归零会让内容像被抽走。
+   这里让它整体向上位移 + 轻微缩小 + 淡出，配合容器同步变小，
+   视觉上是「内容缩回胶囊里」，而不是「内容被裁掉」。 */
+.island--phase-closing .island__panel {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.985);
+  transition:
+    opacity 260ms ease,
+    transform 400ms var(--spring);
+  pointer-events: none;
+}
+
+/* 收起时卡片依次退场（与入场相反的顺序），有「一层层收进去」的层次。
+   注意：入场用的是 animation，会锁住 opacity；退场要先把 animation 清掉，
+   否则 transition 根本不生效 —— 上一版就是这样，卡片瞬间消失。 */
+.island--phase-closing .card {
+  /* 关键：入场用的是 `animation: forwards`，它把 opacity 维持在 1。
+     如果这里只写 `animation: none`，卡片会立刻回落到基础值 opacity:0
+     —— 看起来就是「内容被抽走」。
+     所以退场必须用另一条 animation 接管，而不是靠 transition。 */
+  animation: card-out 260ms ease forwards;
+  animation-delay: calc(var(--i, 0) * 26ms + 40ms);
+}
+
+@keyframes card-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+/* 收起时折叠态内容还不能出现，等窗口合上再说 */
+.island--phase-closing .island__pill {
+  opacity: 0;
+  transform: scale(0.97);
+  transition:
+    opacity 160ms ease 220ms,
+    transform 300ms var(--spring) 200ms;
+  pointer-events: none;
+}
+
+/* 完全折叠时的胶囊态 */
+.island--collapsed .island__pill {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* 收起过程中胶囊最后才出现：内容和容器收完了，胶囊才「浮出来」。
+   选择器带上 .island--phase-closing 组合，压过 .island--collapsed 的单类规则。 */
+.island--collapsed.island--phase-closing .island__pill {
+  opacity: 0;
+  transform: scale(0.97);
+  transition:
+    opacity 160ms ease 240ms,
+    transform 300ms var(--spring) 220ms;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .island,
   .island__panel,

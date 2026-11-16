@@ -73,13 +73,44 @@ function ringColor(list: MiniAgentStatus[]): string {
 
 function MiniApp() {
   const [status, setStatus] = useState<MiniStatus>({ agents: [], paused: false })
-  const [expanded, setExpanded] = useState(false)
+  /**
+   * 三阶段，而不是一个布尔值。
+   *
+   * 之前 expanded 直接翻转，内容和容器同帧改样式 —— 收起时容器瞬间变小，
+   * 内容还没开始动就被裁掉，看起来是「压缩后弹回」。
+   *
+   * 现在拆成：
+   *   collapsed  折叠
+   *   opening    正在展开（容器长大 + 内容淡入）
+   *   open       完全展开
+   *   closing    正在收起（内容先淡出 + 容器缩小）
+   * 收起的最后一刻才真正落回 collapsed。
+   */
+  type Phase = 'collapsed' | 'opening' | 'open' | 'closing'
+  const [phase, setPhase] = useState<Phase>('collapsed')
+  const expanded = phase === 'opening' || phase === 'open'
+  const timerRef = useRef<number | null>(null)
+
+  const open = () => {
+    if (timerRef.current) window.clearTimeout(timerRef.current)
+    setPhase('opening')
+    timerRef.current = window.setTimeout(() => setPhase('open'), 420)
+  }
+
+  const close = () => {
+    if (timerRef.current) window.clearTimeout(timerRef.current)
+    setPhase('closing')
+    // 等容器和内容都收完再落到 collapsed，避免内容被瞬间抽走
+    timerRef.current = window.setTimeout(() => setPhase('collapsed'), 400)
+  }
   const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({})
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
   const toastSeq = useRef(0)
 
-  // 展开/收起时同步调整原生窗口尺寸，让岛真的「长大」而不是被裁
+  // 展开/收起时驱动原生窗口逐帧变化。
+  // opened 是「目标态」：opening/open → 目标展开；closing/collapsed → 目标折叠。
+  // 注意 closing 时窗口已经开始缩小，但内容还在退场 —— 这正是我们要的同步感。
   useEffect(() => {
     API.islandResize(expanded).catch(() => {})
   }, [expanded])
@@ -112,7 +143,7 @@ function MiniApp() {
   useEffect(() => {
     if (!expanded) return
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setExpanded(false)
+      if (!rootRef.current?.contains(e.target as Node)) close()
     }
     window.addEventListener('mousedown', onDown)
     return () => window.removeEventListener('mousedown', onDown)
@@ -121,7 +152,7 @@ function MiniApp() {
   // Esc 收起
   useEffect(() => {
     if (!expanded) return
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setExpanded(false)
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close()
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded])
@@ -169,7 +200,7 @@ function MiniApp() {
   return (
     <div
       ref={rootRef}
-      className={`island ${expanded ? 'island--expanded' : 'island--collapsed'}`}
+      className={`island island--${phase === 'opening' || phase === 'open' ? 'expanded' : 'collapsed'} island--phase-${phase}`}
     >
       <div className="island__seam" />
 
@@ -177,7 +208,7 @@ function MiniApp() {
       <button
         type="button"
         className="island__pill"
-        onClick={() => setExpanded(true)}
+        onClick={open}
         aria-label="展开 Agent 协作面板"
       >
         <AvatarStack agents={agents} />
@@ -215,7 +246,7 @@ function MiniApp() {
           <button
             type="button"
             className="panel__close"
-            onClick={() => setExpanded(false)}
+            onClick={close}
             aria-label="收起"
           >
             ✕

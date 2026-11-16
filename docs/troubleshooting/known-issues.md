@@ -267,6 +267,33 @@
 
 ---
 
+## 14. 灵动岛展开/收起「压缩后弹回」，内容被瞬间抽走
+
+- **现象**：点击展开或收起时，窗口「啪」地一步跳到目标尺寸，CSS 过渡被打断；收起时内容还没开始动就被裁掉，看起来像「里面内容没来得及变化就直接切换了」。
+- **根因**（三层叠加）：
+  1. Go 侧 `Window.SetSize` 是**瞬时跳变**（mygo 只提供这一种），而 CSS 在跑 380ms 过渡 → 容器瞬间变小，内容被裁。
+  2. 前端用单个布尔 `expanded` 控制，state 一翻转，内容和容器**同帧**改样式，没有「先退场再落位」的中间态。
+  3. 卡片入场用的是 `animation: ... forwards`，它把 `opacity` 锁在 1。收起时只写 `animation: none` 会让它**立刻回落到基础值 `opacity: 0`** —— 于是内容被抽走而不是淡出。
+- **为什么没被及早发现**：e2e 只断言「展开后能看到面板」「Esc 后回到折叠」，都是**终态**断言，测不出过程中间帧。手感问题必须采样中间帧才能量。
+- **解决方案**：
+  - Go 侧 `IslandResize` 改为逐帧推进（10ms 一帧，380ms），用 `easeSpring()` 复刻前端的 `cubic-bezier(.3,.9,.28,1.06)`，让容器和内容是同一个动作。
+  - 前端引入四阶段状态机 `collapsed / opening / open / closing`，收起时先让内容退场，400ms 后才真正落回 `collapsed`。
+  - 卡片退场改用独立的 `card-out` animation 接管（而不是 `animation: none`），并带 `calc(var(--i) * 26ms)` 的错峰延迟，形成「一层层收进去」。
+  - 胶囊最后才出现：`.island--collapsed.island--phase-closing .island__pill` 组合选择器压过单类规则。
+- **预防措施与护栏**：**终态断言不够，要采样中间帧**。
+  ```ts
+  // 每 20ms 采样宽度，断言出现 ≥3 个不同中间值
+  const unique = [...new Set(widths)]
+  expect(unique.length).toBeGreaterThanOrEqual(3)
+  // 收起 80ms 后：胶囊还没出现、面板还在退场
+  expect(Number(pillOpacity)).toBeLessThan(1)
+  expect(Number(panelOpacity)).toBeGreaterThan(0)
+  ```
+
+护栏：`e2e/island.spec.ts` 三条（宽度渐变、卡片退场、「胶囊最后才出现」）
+
+---
+
 ## 待办：已知的护栏缺口
 
 按「补起来最划算」排序。补完把对应条目从这一节删掉。
@@ -275,4 +302,5 @@
 2. **Hooks 顺序护栏未接线**（第 12 条）。两次白屏都是这个原因。`.oxlintrc.json` 已经写了 `react/rules-of-hooks: error`，但仓库里没有 `oxlint` 依赖、没有 `lint` 脚本、`verify` 也不跑它。最省的修法：把 oxlint 加进 devDependencies，加 `"lint": "oxlint src"` 并串进 `verify`。
 3. **事件契约护栏是静态子串匹配**（第 1 条）。防不住「订阅了但 payload 字段接错」。可在 `main_contract_test.go` 里再断言 `NewEvent[X]("...")` 的结构体字段与前端读取的 key 有一致性，或在 e2e 里用真实事件往返。
 4. **乐观更新的 pending 收尾**（第 7 条）。成功路径依赖后端事件清 pending；需要一条「后端不回推时 UI 也不能永远 pending」的用例。
-5. **`e2e/mock-runtime.ts` 与真实后端行为漂移**。mock 是手写的（`API.ListAgents` 等都返回空数据），真实接口签名变了 mock 不会报错。建议定期用真实后端跑一遍关键路径。
+5. **动画时序只在 Web 环境验证**（第 14 条）。真机上 `Window.SetSize` 逐帧调用的平滑度、与 CSS 的帧同步没法在浏览器里复现，需要人工在 `npm run dev` 下确认。
+6. **`e2e/mock-runtime.ts` 与真实后端行为漂移**。mock 是手写的（`API.ListAgents` 等都返回空数据），真实接口签名变了 mock 不会报错。建议定期用真实后端跑一遍关键路径。

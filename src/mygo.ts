@@ -320,11 +320,12 @@ export const API = {
     return call("API.IsAlwaysOnTop");
   },
   /**
-   * IslandResize 由灵动岛在展开/收起时调用，让原生窗口跟着内容变尺寸。
+   * IslandResize 由灵动岛在展开/收起时调用。
    *
-   * 为什么不用 FitContent 自动撑：折叠 252px、展开 392px，宽度差异大，
-   * FitContent 只跟内容高度走。展开面板本身有固定的 504px 高度设计，
-   * 显式设定尺寸更可控，也不会因为内容短暂为空而闪一下。
+   * 关键：mygo 的 SetSize 是瞬时跳变。直接设目标尺寸会让窗口「啪」地变大变小，
+   * 而 CSS 过渡还在跑 —— 用户看到的就是「内容被压缩后弹回」。
+   * 所以这里逐帧推进窗口尺寸，用和前端相同的时长与缓动，
+   * 让「容器」和「内容」是同一个动作。
    */
   islandResize(expanded: boolean): Promise<boolean> {
     return call("API.IslandResize", expanded);

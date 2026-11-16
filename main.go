@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -996,22 +997,85 @@ func (s *API) ToggleMiniWindow(show bool) bool {
 	return show
 }
 
-// IslandResize 由灵动岛在展开/收起时调用，让原生窗口跟着内容变尺寸。
+// 灵动岛两态的尺寸。
+const (
+	islandWCollapsed = 252
+	islandHCollapsed = 44
+	islandWExpanded  = 392
+	islandHExpanded  = 468
+)
+
+// islandAnim 串行化尺寸动画，避免连续点击时两个 goroutine 抢着改窗口。
+var islandAnim atomic.Pointer[chan struct{}]
+
+// IslandResize 由灵动岛在展开/收起时调用。
 //
-// 为什么不用 FitContent 自动撑：折叠 252px、展开 392px，宽度差异大，
-// FitContent 只跟内容高度走。展开面板本身有固定的 504px 高度设计，
-// 显式设定尺寸更可控，也不会因为内容短暂为空而闪一下。
+// 关键：mygo 的 SetSize 是瞬时跳变。直接设目标尺寸会让窗口「啪」地变大变小，
+// 而 CSS 过渡还在跑 —— 用户看到的就是「内容被压缩后弹回」。
+// 所以这里逐帧推进窗口尺寸，用和前端相同的时长与缓动，
+// 让「容器」和「内容」是同一个动作。
 func (s *API) IslandResize(expanded bool) bool {
 	w := miniWindowRef
 	if w == nil || w.IsDestroyed() {
 		return false
 	}
-	if expanded {
-		w.SetSize(392, 468)
-	} else {
-		w.SetSize(252, 44)
+
+	// 取消上一次动画
+	if prev := islandAnim.Swap(nil); prev != nil {
+		close(*prev)
 	}
+	done := make(chan struct{})
+	islandAnim.Store(&done)
+
+	tw, th := islandWCollapsed, islandHCollapsed
+	if expanded {
+		tw, th = islandWExpanded, islandHExpanded
+	}
+	fw, fh := w.Size()
+
+	go func() {
+		const dur = 380 * time.Millisecond
+		start := time.Now()
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				if w.IsDestroyed() {
+					return
+				}
+				t := time.Since(start)
+				if t >= dur {
+					w.SetSize(tw, th)
+					return
+				}
+				// 与前端 island.css 用同一条 spring 曲线
+				k := easeSpring(float64(t) / float64(dur))
+				w.SetSize(
+					fw+int(float64(tw-fw)*k),
+					fh+int(float64(th-fh)*k),
+				)
+			}
+		}
+	}()
 	return true
+}
+
+// easeSpring 近似 cubic-bezier(.3,.9,.28,1.06)：先快后慢，末端轻微过冲。
+func easeSpring(t float64) float64 {
+	if t <= 0 {
+		return 0
+	}
+	if t >= 1 {
+		return 1
+	}
+	// 1 - (1-t)^3 是 ease-out 主体，再叠加一点过冲让它有「弹」的手感
+	base := 1 - math.Pow(1-t, 3)
+	bump := math.Sin(t*math.Pi) * 0.045
+	return base + bump
 }
 
 // FocusAgent 聚焦主窗口并切换到指定 agent。

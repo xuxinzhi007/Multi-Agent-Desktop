@@ -180,3 +180,84 @@ test('全局操作会调后端并给出 toast 反馈', async ({ page }) => {
   expect(calls.some((c) => c === 'API.PauseAll')).toBe(true)
   await expect(page.locator('.toast')).toBeVisible()
 })
+
+/**
+ * 动画时序护栏。
+ *
+ * 之前的 bug：Go 侧 SetSize 瞬时跳变，而 CSS 还在过渡，
+ * 结果是「内容被压缩后弹回」。这里直接采样宽度曲线的中间帧，
+ * 断言它确实经过了若干中间值，而不是一步到位。
+ */
+test('展开时容器宽度是渐变的，不是瞬间跳变', async ({ page }) => {
+  await openIsland(page)
+
+  const widths: number[] = []
+  await page.exposeFunction('__recordWidth', (w: number) => widths.push(w))
+
+  // 每 20ms 采样一次岛体宽度
+  await page.evaluate(() => {
+    const el = document.querySelector('.island')!
+    const id = setInterval(() => {
+      const w = Math.round(el.getBoundingClientRect().width)
+      void (window as unknown as { __recordWidth: (w: number) => void }).__recordWidth(w)
+    }, 20)
+    setTimeout(() => clearInterval(id), 700)
+  })
+
+  await page.locator('.island__pill').click()
+  await page.waitForTimeout(800)
+
+  // 必须出现多个不同的中间宽度
+  const unique = [...new Set(widths)]
+  expect(
+    unique.length,
+    `宽度采样只有 ${unique.length} 个不同值: ${unique.join(',')} —— 说明是瞬间跳变`,
+  ).toBeGreaterThanOrEqual(3)
+
+  // 最终落到展开宽度
+  expect(widths[widths.length - 1]).toBeGreaterThan(widths[0])
+})
+
+test('收起时内容先退场，不是立刻消失', async ({ page }) => {
+  await openIsland(page)
+  await page.locator('.island__pill').click()
+  await page.waitForTimeout(700)
+
+  const card = page.locator('.card').first()
+  await expect(card).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  // 收起刚开始的瞬间，卡片不应立刻消失（它正在退场）
+  await page.waitForTimeout(120)
+  const opacity = await card.evaluate((el) => getComputedStyle(el).opacity)
+  expect(
+    Number(opacity),
+    `收起 120ms 后卡片 opacity=${opacity}，如果已经是 0 说明内容被瞬间抽走`,
+  ).toBeGreaterThan(0)
+})
+
+test('收起过程中胶囊最后才出现，不是立刻替换内容', async ({ page }) => {
+  await openIsland(page)
+  await page.locator('.island__pill').click()
+  await page.waitForTimeout(700)
+
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(80)
+
+  // 收起刚开始：胶囊应仍在淡入前的状态（不可见），panel 还在退场
+  const pillOpacity = await page
+    .locator('.island__pill')
+    .evaluate((el) => getComputedStyle(el).opacity)
+  const panelOpacity = await page
+    .locator('.island__panel')
+    .evaluate((el) => getComputedStyle(el).opacity)
+
+  expect(
+    Number(pillOpacity),
+    `收起 80ms 后胶囊 opacity=${pillOpacity}，太早出现会显得内容被突然替换`,
+  ).toBeLessThan(1)
+  expect(
+    Number(panelOpacity),
+    `收起 80ms 后面板 opacity=${panelOpacity}，应该还在退场`,
+  ).toBeGreaterThan(0)
+})
