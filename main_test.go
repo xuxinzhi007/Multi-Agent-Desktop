@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,8 +274,8 @@ func TestSendToChannelNoMembers(t *testing.T) {
 	s := newTestSidecar(t)
 	defer stopAll(t, s)
 
-	ch := s.CreateChannel("空频道", nil)
-	if err := s.SendToChannel(ch.ID, "user", "你", "hello"); err != nil {
+	ch := s.CreateChannel("空频道", nil, "")
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hello"); err != nil {
 		t.Fatalf("SendToChannel(%q) with 0 members: %v", ch.ID, err)
 	}
 	got, ok := s.channels.Get(ch.ID)
@@ -301,14 +302,14 @@ func TestSendToChannelPartialFailureKeepsOthers(t *testing.T) {
 	gone := s.CreateAgent(CreateAgentRequest{Name: "Gone", Role: "r"})
 	healthy := s.CreateAgent(CreateAgentRequest{Name: "Healthy", Role: "r"})
 
-	ch := s.CreateChannel("g", []string{gone.ID, healthy.ID})
+	ch := s.CreateChannel("g", []string{gone.ID, healthy.ID}, "")
 	// 直接删 manager 里的 agent，但保留频道成员（模拟"成员表与 agent 表不一致"），
 	// 这样 SendToChannel 的 Prompt 会稳定返回 "agent ... not found"。
 	if ok := s.mgr.Delete(gone.ID); !ok {
 		t.Fatalf("mgr.Delete(%q) = false, want true", gone.ID)
 	}
 
-	err := s.SendToChannel(ch.ID, "user", "你", "hi")
+	err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hi")
 	if err == nil {
 		t.Fatalf("SendToChannel(%q) with a missing recipient: err = nil, want merged error", ch.ID)
 	}
@@ -350,7 +351,7 @@ func TestDeleteAgentRemovesChannelMember(t *testing.T) {
 
 	a1 := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
 	a2 := s.CreateAgent(CreateAgentRequest{Name: "A2", Role: "r"})
-	ch := s.CreateChannel("g", []string{a1.ID, a2.ID})
+	ch := s.CreateChannel("g", []string{a1.ID, a2.ID}, "")
 
 	if ok := s.DeleteAgent(a1.ID); !ok {
 		t.Fatalf("DeleteAgent(%q) = false, want true", a1.ID)
@@ -500,12 +501,12 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
-	ch := s.CreateChannel("g", []string{a.ID})
+	ch := s.CreateChannel("g", []string{a.ID}, "")
 
 	if got := len(s.ListChannels()); got != 1 {
 		t.Fatalf("CreateChannel: len(ListChannels()) = %d, want 1", got)
 	}
-	if err := s.SendToChannel(ch.ID, "user", "你", "hi"); err != nil {
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hi"); err != nil {
 		t.Fatalf("SendToChannel(%q): %v", ch.ID, err)
 	}
 	if got := len(s.ListChannels()); got != 1 {
@@ -541,9 +542,9 @@ func TestChannelReplyLandsInChannel(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
-	ch := s.CreateChannel("测试群", []string{a.ID})
+	ch := s.CreateChannel("测试群", []string{a.ID}, "")
 
-	if err := s.SendToChannel(ch.ID, "user", "你", "hello"); err != nil {
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hello"); err != nil {
 		t.Fatalf("SendToChannel: %v", err)
 	}
 
@@ -578,9 +579,9 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
-	ch := s.CreateChannel("测试群", []string{a.ID})
+	ch := s.CreateChannel("测试群", []string{a.ID}, "")
 
-	if err := s.SendToChannel(ch.ID, "user", "你", "第一句"); err != nil {
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "第一句"); err != nil {
 		t.Fatalf("SendToChannel: %v", err)
 	}
 	// 等第一条回复落库
@@ -594,7 +595,7 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 	}
 
 	// 发第二条，检查 agent 的 user message 里「第二句」只出现一次
-	if err := s.SendToChannel(ch.ID, "user", "你", "第二句"); err != nil {
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "第二句"); err != nil {
 		t.Fatalf("SendToChannel #2: %v", err)
 	}
 	deadline = time.Now().Add(10 * time.Second)
@@ -624,4 +625,37 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 	if n := strings.Count(found, "第二句"); n != 1 {
 		t.Errorf("「第二句」在 prompt 里出现 %d 次, want 1（transcript 应排除本轮消息）", n)
 	}
+}
+
+// TC-040 —— mock 对话结束后 agent 必须回到 idle，不能卡在 blocked。
+//
+// 曾经 demoTrail 在每轮 mock 对话里伪造 tool.start 事件，前端收到后调
+// blockAgent 把 agent 标成「在等人」，而真实审批流不存在，永远无人解除。
+// demoTrail 删除后这个假状态不应再出现。
+func TestMockPromptDoesNotLeaveAgentBlocked(t *testing.T) {
+	s := newWiredTestSidecar(t)
+	defer stopAll(t, s)
+
+	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "后端"})
+	if err := s.PromptAgent(context.Background(), PromptRequest{AgentID: a.ID, Text: "你好"}); err != nil {
+		t.Fatalf("PromptAgent: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, ok := s.mgr.Get(a.ID)
+		if !ok {
+			t.Fatal("agent 消失")
+		}
+		sn := got.Snapshot()
+		if sn.Status == agent.StatusBlocked {
+			t.Fatalf("agent 卡在 blocked（reason=%q）：mock 路径不应产生假审批状态", sn.BlockedReason)
+		}
+		if sn.Status == agent.StatusIdle && len(sn.Messages) >= 3 {
+			return // 正常收尾
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	got, _ := s.mgr.Get(a.ID)
+	t.Fatalf("等待 mock 对话完成超时，最终状态 = %s", got.Snapshot().Status)
 }

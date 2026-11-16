@@ -7,9 +7,9 @@ import (
 
 // Request 是 CLI agent 的完整请求。
 type Request struct {
-	System  string // system prompt（知识库注入等）
+	System  string    // system prompt（知识库注入等）
 	History []Message // 历史消息
-	Prompt  string // 本轮用户输入
+	Prompt  string    // 本轮用户输入
 }
 
 // Message 是历史消息。

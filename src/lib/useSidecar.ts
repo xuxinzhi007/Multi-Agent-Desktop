@@ -37,6 +37,8 @@ type State = {
   tools: ToolCall[]
   activities: Activity[]
   tokenUsage: Record<string, { in: number; out: number }>
+  /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
+  focusAgentId: string | null
 }
 
 const EMPTY: State = {
@@ -55,6 +57,7 @@ const EMPTY: State = {
   tools: [],
   activities: [],
   tokenUsage: {},
+  focusAgentId: null,
 }
 
 export function useSidecar() {
@@ -105,6 +108,12 @@ export function useSidecar() {
         streaming: omit(s.streaming, id),
       })),
     )
+    // token 级流式片段：累积到 streaming[agentId]，assistant 完整消息到达时清掉。
+    sub(events.agentFocused, ({ agentId }) => setState((s) => ({ ...s, focusAgentId: agentId })))
+    sub(events.agentDelta, ({ id, delta }) => {
+      if (!delta) return
+      setState((s) => ({ ...s, streaming: { ...s.streaming, [id]: (s.streaming[id] ?? '') + delta } }))
+    })
     sub(events.agentStatus, ({ id, status }) =>
       setState((s) => ({
         ...s,
@@ -156,8 +165,9 @@ export function useSidecar() {
       }),
     )
     sub(events.toolStart, (e) => {
-      // 工具调用进入待审批 —— 把 agent 标为「在等人」，悬浮条会红色提示
-      Sidecar.blockAgent(e.agentId, `等待审批 ${e.tool}`).catch(() => {})
+      // 工具已开始执行 —— 这是信息事件，不是审批请求。
+      // 真正的「等你审批」要等后端接入工具审批流程后由后端发状态，
+      // 前端不能在这里把 agent 标成 blocked（会永久锁在等人状态）。
       setState((s) => {
         const agent = s.agents.find((a) => a.id === e.agentId)
         const activity: Activity = {
@@ -170,7 +180,7 @@ export function useSidecar() {
         }
         return {
           ...s,
-          tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'waiting', at: Date.now() }],
+          tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
           activities: [...s.activities, activity].slice(-50),
         }
       })
@@ -284,7 +294,7 @@ export function useSidecar() {
       }
       case 'channel.create': {
         const { name, members } = data as { name: string; members: string[] }
-        return Sidecar.createChannel(name, members)
+        return Sidecar.createChannel(name, members, 'discuss')
       }
       case 'channel.send': {
         const { channelId, fromId, fromName, text } = data as {
@@ -309,31 +319,23 @@ export function useSidecar() {
     }
   }, [])
 
-  // 批准/拒绝工具调用
+  // 批准/拒绝工具调用。
+  // 当前后端还没有审批流（工具直接执行），所以这里只更新本地展示状态，
+  // 不去调 unblockAgent —— 那会把真正在等人的 agent 错误解除。
   const approveTool = useCallback((id: string) => {
-    setState((s) => {
-      const t = s.tools.find((x) => x.id === id)
-      // 工具 ID 形如 "<agentId>-<n>"，取前缀还原 agentId
-      if (t) {
-        const agentId = id.replace(/-\d+$/, '')
-        Sidecar.unblockAgent(agentId).catch(() => {})
-      }
-      return { ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'ok' } : t)) }
-    })
+    setState((s) => ({ ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'ok' } : t)) }))
   }, [])
 
   const rejectTool = useCallback((id: string) => {
-    setState((s) => {
-      const t = s.tools.find((x) => x.id === id)
-      if (t) {
-        const agentId = id.replace(/-\d+$/, '')
-        Sidecar.unblockAgent(agentId).catch(() => {})
-      }
-      return { ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'error' } : t)) }
-    })
+    setState((s) => ({ ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'error' } : t)) }))
   }, [])
 
-  return { ...state, send, approveTool, rejectTool }
+  const clearFocus = useCallback(
+    () => setState((s) => (s.focusAgentId === null ? s : { ...s, focusAgentId: null })),
+    [],
+  )
+
+  return { ...state, send, approveTool, rejectTool, clearFocus }
 }
 
 function omit<T extends Record<string, unknown>>(obj: T, key: string): T {

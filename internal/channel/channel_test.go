@@ -63,19 +63,19 @@ func TestBroadcastExcludesSenderAndKeepsOrder(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestManager(t)
-			m.Create("ch1", "general", tc.members)
+			m.Create("ch1", "general", tc.members, PolicyDiscuss)
 
 			msg, recipients, err := m.Broadcast("ch1", tc.fromID, "发起人", "hi")
 			if err != nil {
 				t.Fatalf("Broadcast(%q, %q): %v", "ch1", tc.fromID, err)
 			}
-			if msg == nil {
-				t.Fatalf("Broadcast(%q, %q) = nil message, want stored message even with 0 recipients",
+			if msg.ID == "" {
+				t.Fatalf("Broadcast(%q, %q) = empty message, want stored message even with 0 recipients",
 					"ch1", tc.fromID)
 			}
 			if msg.FromID != tc.fromID || msg.Text != "hi" || msg.ChannelID != "ch1" || msg.FromName != "发起人" {
 				t.Errorf("Broadcast(%q, %q): message = %+v, want fromID=%q text=%q channelID=%q fromName=%q",
-					"ch1", tc.fromID, *msg, tc.fromID, "hi", "ch1", "发起人")
+					"ch1", tc.fromID, msg, tc.fromID, "hi", "ch1", "发起人")
 			}
 			if len(recipients) != len(tc.want) {
 				t.Fatalf("Broadcast(%q, %q): recipients = %v, want %v", "ch1", tc.fromID, recipients, tc.want)
@@ -114,8 +114,8 @@ func TestBroadcastMissingChannel(t *testing.T) {
 	if !strings.Contains(err.Error(), "channel chX not found") {
 		t.Errorf("Broadcast(\"chX\") error = %q, want containing %q", err, "channel chX not found")
 	}
-	if msg != nil || recipients != nil {
-		t.Errorf("Broadcast(\"chX\") = (%v, %v, %v), want (nil, nil, err)", msg, recipients, err)
+	if msg.ID != "" || recipients != nil {
+		t.Errorf("Broadcast(\"chX\") = (%v, %v, %v), want (zero, nil, err)", msg, recipients, err)
 	}
 	if got := len(m.List()); got != 0 {
 		t.Errorf("Broadcast(\"chX\") created channels: got %d, want 0", got)
@@ -125,9 +125,9 @@ func TestBroadcastMissingChannel(t *testing.T) {
 // TC-028 的 manager 层 —— RemoveMember 从所有频道剔除，且不误伤其他成员。
 func TestRemoveMember(t *testing.T) {
 	m := newTestManager(t)
-	m.Create("ch1", "a", []string{"a1", "a2"})
-	m.Create("ch2", "b", []string{"a1"})
-	m.Create("ch3", "c", nil)
+	m.Create("ch1", "a", []string{"a1", "a2"}, PolicyDiscuss)
+	m.Create("ch2", "b", []string{"a1"}, PolicyDiscuss)
+	m.Create("ch3", "c", nil, PolicyDiscuss)
 
 	m.RemoveMember("a1")
 
@@ -160,7 +160,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 
 	m := newTestManager(t)
 	mustSetStore(t, m, path)
-	m.Create("ch1", "general", []string{"a1", "a2"})
+	m.Create("ch1", "general", []string{"a1", "a2"}, PolicyDiscuss)
 	if _, _, err := m.Broadcast("ch1", "user", "你", "hello"); err != nil {
 		t.Fatalf("Broadcast: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestSaveWritesValidJSONWithoutTempFile(t *testing.T) {
 
 	m := newTestManager(t)
 	mustSetStore(t, m, path)
-	m.Create("ch1", "general", []string{"a1"})
+	m.Create("ch1", "general", []string{"a1"}, PolicyDiscuss)
 	m.AddMessage("ch1", "user", "你", "hi")
 	m.waitSaves()
 	if err := m.Save(); err != nil {
@@ -224,8 +224,8 @@ func TestChannelConcurrentSaveKeepsFileValid(t *testing.T) {
 
 	m := newTestManager(t)
 	mustSetStore(t, m, path)
-	m.Create("ch1", "general", []string{"a1", "a2"})
-	m.Create("ch2", "other", []string{"a2"})
+	m.Create("ch1", "general", []string{"a1", "a2"}, PolicyDiscuss)
+	m.Create("ch2", "other", []string{"a2"}, PolicyDiscuss)
 	for i := 0; i < 20; i++ {
 		if _, err := m.AddMessage("ch1", "user", "你", "hi"); err != nil {
 			t.Fatalf("AddMessage #%d: %v", i, err)
@@ -250,5 +250,230 @@ func TestChannelConcurrentSaveKeepsFileValid(t *testing.T) {
 	var raw []map[string]any
 	if err := json.Unmarshal(buf, &raw); err != nil {
 		t.Fatalf("concurrent Save(%q) produced invalid JSON: %v (content=%q)", path, err, buf)
+	}
+}
+
+// TC-030 —— 对外接口不得泄漏内部可变状态。
+//
+// 曾经 Broadcast/AddMessage 返回 *Message，Get 返回 *Channel，调用方在锁外
+// 读取这些指针指向的字段，而另一 goroutine 的 append 会让底层数组 realloc，
+// 构成数据竞争（go test -race 可复现）。这里用并发读写压出问题：
+// 返回的 msg 字段被反复读，同时持续 append 新消息触发扩容。
+func TestReturnedMessageIsDetachedFromStore(t *testing.T) {
+	m := newTestManager(t)
+	m.Create("ch1", "general", []string{"a1"}, PolicyDiscuss)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 写者：不断追加消息，触发 ch.Messages 扩容
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if _, err := m.AddMessage("ch1", "user", "你", "hi"); err != nil {
+				t.Errorf("AddMessage #%d: %v", i, err)
+				return
+			}
+		}
+		close(stop)
+	}()
+
+	// 读者：持续读第一次 Broadcast 拿到的 msg 副本
+	msg, _, err := m.Broadcast("ch1", "user", "你", "hello")
+	if err != nil {
+		t.Fatalf("Broadcast: %v", err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if msg.Text != "hello" {
+					t.Errorf("msg.Text = %q, want hello（返回值必须与存储解耦）", msg.Text)
+					return
+				}
+				_ = msg.Deliveries
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+// TC-031 —— Get 返回副本：修改它不影响存储。
+func TestGetReturnsCopy(t *testing.T) {
+	m := newTestManager(t)
+	m.Create("ch1", "general", []string{"a1"}, PolicyDiscuss)
+	if _, err := m.AddMessage("ch1", "user", "你", "hi"); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	got, ok := m.Get("ch1")
+	if !ok {
+		t.Fatal("Get(ch1) not found")
+	}
+	got.Name = "被外部篡改"
+	got.Members = append(got.Members, "ghost")
+	got.Messages[0].Text = "被外部篡改"
+
+	again, _ := m.Get("ch1")
+	if again.Name != "general" {
+		t.Errorf("Name = %q, want general（Get 必须返回副本）", again.Name)
+	}
+	if len(again.Members) != 1 {
+		t.Errorf("Members = %v, want 只有 a1（Get 必须返回副本）", again.Members)
+	}
+	if again.Messages[0].Text != "hi" {
+		t.Errorf("Messages[0].Text = %q, want hi（Get 必须深拷贝 Messages）", again.Messages[0].Text)
+	}
+}
+
+// TC-032 —— Broadcast 的返回值在锁外被并发读、同时被 UpdateMessage 写。
+// 这就是 main.go SendToChannel 的真实形态：拿到 msg 后投递给 N 个 agent，
+// 每个 agent 的回复 goroutine 又会 AddMessage，最后回填 Deliveries。
+func TestBroadcastMessageSurvivesConcurrentUpdateAndAppend(t *testing.T) {
+	m := newTestManager(t)
+	m.Create("ch1", "general", []string{"a1", "a2"}, PolicyDiscuss)
+
+	msg, _, err := m.Broadcast("ch1", "user", "你", "hello")
+	if err != nil {
+		t.Fatalf("Broadcast: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			// 模拟 agent 回复写回频道
+			if _, err := m.AddMessage("ch1", "a1", "A1", "reply"); err != nil {
+				t.Errorf("AddMessage: %v", err)
+			}
+			// 模拟另一方读 Broadcast 返回值
+			if msg.FromName != "你" {
+				t.Errorf("msg.FromName = %q, want 你", msg.FromName)
+			}
+		}(i)
+	}
+	// 回填 deliveries（main.go 第 483 行的形态）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := m.SetDeliveries("ch1", msg.ID, []Delivery{{AgentID: "a1", Status: "delivered"}}); err != nil {
+			t.Errorf("SetDeliveries: %v", err)
+		}
+	}()
+	wg.Wait()
+}
+
+// TC-033 —— Policy 必须落盘并在重启后恢复。
+// 曾经 Save 的 struct 字面量漏了 Policy 字段，导致 direct/roundrobin 永远回落 discuss。
+func TestPolicySurvivesSaveLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channels.json")
+
+	m := newTestManager(t)
+	mustSetStore(t, m, path)
+	m.Create("ch1", "单聊", []string{"a1"}, PolicyDirect)
+	m.Create("ch2", "评审", []string{"a1", "a2"}, PolicyRoundRobin)
+	m.waitSaves()
+
+	reloaded := newTestManager(t)
+	mustSetStore(t, reloaded, path)
+
+	for id, want := range map[string]TurnPolicy{"ch1": PolicyDirect, "ch2": PolicyRoundRobin} {
+		got, ok := reloaded.Get(id)
+		if !ok {
+			t.Fatalf("Get(%q) not found after reload", id)
+		}
+		if got.Policy != want {
+			t.Errorf("%s Policy = %q after reload, want %q", id, got.Policy, want)
+		}
+	}
+}
+
+// TC-034 —— Create 未指定 policy 时回落 discuss。
+func TestCreateDefaultsToDiscuss(t *testing.T) {
+	m := newTestManager(t)
+	ch := m.Create("ch1", "general", []string{"a1"}, "")
+	if ch.Policy != PolicyDiscuss {
+		t.Errorf("Policy = %q, want %q", ch.Policy, PolicyDiscuss)
+	}
+}
+
+// TC-035 —— direct 模式：未 @ 也要回（单聊语义）。
+func TestShouldReplyDirectRepliesWithoutMention(t *testing.T) {
+	msg := Message{Text: "帮我看下这个"}
+	reply, reason := ShouldReply(PolicyDirect, msg, "a1", "后端", "后端")
+	if !reply {
+		t.Fatalf("direct 模式未 @ 时 reply = false（%s），want true", reason)
+	}
+}
+
+// TC-036 —— DecideReplies 在 discuss 模式下只让 1 个成员回复。
+func TestDecideRepliesDiscussPicksSingleMember(t *testing.T) {
+	msg := Message{Text: "登录接口报错了"}
+	members := []Member{
+		{ID: "a1", Name: "前端", Role: "前端开发"},
+		{ID: "a2", Name: "后端", Role: "后端开发"},
+		{ID: "a3", Name: "测试", Role: "测试工程师"},
+	}
+	decisions := DecideReplies(PolicyDiscuss, msg, members)
+
+	var replied []string
+	for _, d := range decisions {
+		if d.Reply {
+			replied = append(replied, d.Member.ID)
+		}
+	}
+	if len(replied) != 1 {
+		t.Fatalf("discuss 模式回复人数 = %d (%v), want 1", len(replied), replied)
+	}
+	if replied[0] != "a2" {
+		t.Errorf("discuss 模式选中 %q, want a2（「@接口报错」最匹配后端）", replied[0])
+	}
+}
+
+// TC-037 —— 被 @ 的必须回，其余成员跳过。
+func TestDecideRepliesMentionWins(t *testing.T) {
+	msg := Message{Text: "@前端 看下这个按钮"}
+	members := []Member{
+		{ID: "a1", Name: "前端", Role: "前端开发"},
+		{ID: "a2", Name: "后端", Role: "后端开发"},
+	}
+	decisions := DecideReplies(PolicyDiscuss, msg, members)
+
+	byID := map[string]Decision{}
+	for _, d := range decisions {
+		byID[d.Member.ID] = d
+	}
+	if !byID["a1"].Reply {
+		t.Errorf("被 @ 的前端 reply = false, want true")
+	}
+	if byID["a2"].Reply {
+		t.Errorf("未被 @ 的后端 reply = true, want false（reason=%s）", byID["a2"].Reason)
+	}
+}
+
+// TC-038 —— direct 模式全员回复。
+func TestDecideRepliesDirectRepliesAll(t *testing.T) {
+	msg := Message{Text: "开始吧"}
+	members := []Member{
+		{ID: "a1", Name: "前端", Role: "前端开发"},
+		{ID: "a2", Name: "后端", Role: "后端开发"},
+	}
+	for _, d := range DecideReplies(PolicyDirect, msg, members) {
+		if !d.Reply {
+			t.Errorf("direct 模式 %s reply = false, want true", d.Member.ID)
+		}
+	}
+}
+
+// TC-039 —— 空成员列表不产生判定。
+func TestDecideRepliesEmptyMembers(t *testing.T) {
+	if got := DecideReplies(PolicyDiscuss, Message{Text: "hi"}, nil); len(got) != 0 {
+		t.Errorf("DecideReplies(nil) = %v, want empty", got)
 	}
 }

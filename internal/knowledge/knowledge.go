@@ -17,9 +17,9 @@ type Scope = string
 
 // Scope 常量。
 const (
-	ScopeGlobal  = ""           // 全局（兼容现状）
-	ScopeAgent   = "agent:"     // agent 私有前缀
-	ScopeChannel = "channel:"   // 频道私有前缀
+	ScopeGlobal  = ""         // 全局（兼容现状）
+	ScopeAgent   = "agent:"   // agent 私有前缀
+	ScopeChannel = "channel:" // 频道私有前缀
 )
 
 // Note 是一条知识笔记。
@@ -29,8 +29,8 @@ type Note struct {
 	Body      string   `json:"body"`
 	Tags      []string `json:"tags,omitempty"`
 	Scope     Scope    `json:"scope,omitempty"`
-	Source    string   `json:"source,omitempty"`    // manual / auto / imported
-	Related   []string `json:"related,omitempty"`   // 关联笔记 ID
+	Source    string   `json:"source,omitempty"`  // manual / auto / imported
+	Related   []string `json:"related,omitempty"` // 关联笔记 ID
 	At        int64    `json:"at"`
 	UpdatedAt int64    `json:"updatedAt,omitempty"`
 }

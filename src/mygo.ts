@@ -224,9 +224,9 @@ export const Sidecar = {
   createCLIAgent(name: string, role: string, backend: string): Promise<AgentView> {
     return call("Sidecar.CreateCLIAgent", name, role, backend);
   },
-  /** CreateChannel 新建频道。 */
-  createChannel(name: string, members: string[]): Promise<Channel> {
-    return call("Sidecar.CreateChannel", name, members);
+  /** CreateChannel 新建频道。policy 为空时由 channel 包回落 discuss。 */
+  createChannel(name: string, members: string[], policy: string): Promise<Channel> {
+    return call("Sidecar.CreateChannel", name, members, policy);
   },
   /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
@@ -271,7 +271,7 @@ export const Sidecar = {
   listAgents(): Promise<AgentView[]> {
     return call("Sidecar.ListAgents");
   },
-  /** ListChannels 返回所有频道。 */
+  /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
     return call("Sidecar.ListChannels");
   },
@@ -310,7 +310,7 @@ export const Sidecar = {
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
     return call("Sidecar.RouteAgent", fromId, toId, text);
   },
-  /** RunShell 执行 shell 命令。 */
+  /** RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("Sidecar.RunShell", req);
   },
@@ -320,8 +320,7 @@ export const Sidecar = {
   },
   /**
    * SendToChannel 发消息到频道，并触发相关成员 agent。
-   * @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
-   * 成员回复通过 PromptRequest.ChannelID 路由回频道。
+   * 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
    */
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("Sidecar.SendToChannel", channelId, fromId, fromName, text);

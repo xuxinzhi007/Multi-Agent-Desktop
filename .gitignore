@@ -19,3 +19,7 @@ build/
 
 # 日志
 *.log
+
+# Playwright
+test-results/
+playwright-report/

@@ -35,10 +35,10 @@ type Agent struct {
 	Status    Status        `json:"status"`
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
-	QueueLen  int           `json:"queueLen"`          // 排队中的消息数
-	Backend   string        `json:"backend"`           // mock / claude / codex
-	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
-	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`  // 会话级模型配置，nil 则回落 Manager.llmCfg
+	QueueLen  int           `json:"queueLen"`            // 排队中的消息数
+	Backend   string        `json:"backend"`             // mock / claude / codex
+	WorkDir   string        `json:"workDir,omitempty"`   // 会话级工作目录，空则回落 Manager.workDir
+	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`    // 会话级模型配置，nil 则回落 Manager.llmCfg
 	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
 	// BlockedReason 是「在等人」的原因，仅 Status == blocked 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
@@ -230,20 +230,20 @@ func (m *Manager) Load() error {
 	defer m.mu.Unlock()
 	for _, saved := range data {
 		a := &Agent{
-			ID:        saved.ID,
-			Name:      saved.Name,
-			Role:      saved.Role,
-			Color:     saved.Color,
-			Status:    StatusIdle,
-			CreatedAt: saved.CreatedAt,
-			Messages:  saved.Messages,
-			Backend:   saved.Backend,
-			WorkDir:   saved.WorkDir,
-			LLMCfg:    saved.LLMCfg,
+			ID:            saved.ID,
+			Name:          saved.Name,
+			Role:          saved.Role,
+			Color:         saved.Color,
+			Status:        StatusIdle,
+			CreatedAt:     saved.CreatedAt,
+			Messages:      saved.Messages,
+			Backend:       saved.Backend,
+			WorkDir:       saved.WorkDir,
+			LLMCfg:        saved.LLMCfg,
 			Knowledge:     append([]string(nil), saved.Knowledge...),
 			BlockedReason: saved.BlockedReason,
 			queue:         make(chan PromptRequest, 32),
-			done:      make(chan struct{}),
+			done:          make(chan struct{}),
 		}
 		m.agents[a.ID] = a
 		m.order = append(m.order, a.ID)
@@ -603,11 +603,6 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID 
 	history := append([]llm.Message(nil), a.Messages...)
 	a.mu.Unlock()
 
-	// mock provider 下推一组检查器事件
-	if cfg.Provider == "" || cfg.Provider == "mock" {
-		m.demoTrail(a.ID, a.Name)
-	}
-
 	stream, err := client.Stream(runCtx, history)
 	if err != nil {
 		m.finish(a, StatusError, "调用模型失败："+err.Error())
@@ -877,17 +872,17 @@ func (a *Agent) Snapshot() *Agent {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &Agent{
-		ID:        a.ID,
-		Name:      a.Name,
-		Role:      a.Role,
-		Color:     a.Color,
-		Status:    a.Status,
-		CreatedAt: a.CreatedAt,
-		Messages:  append([]llm.Message(nil), a.Messages...),
-		QueueLen:  a.QueueLen,
-		Backend:   a.Backend,
-		WorkDir:   a.WorkDir,
-		LLMCfg:    a.LLMCfg,
+		ID:            a.ID,
+		Name:          a.Name,
+		Role:          a.Role,
+		Color:         a.Color,
+		Status:        a.Status,
+		CreatedAt:     a.CreatedAt,
+		Messages:      append([]llm.Message(nil), a.Messages...),
+		QueueLen:      a.QueueLen,
+		Backend:       a.Backend,
+		WorkDir:       a.WorkDir,
+		LLMCfg:        a.LLMCfg,
 		Knowledge:     append([]string(nil), a.Knowledge...),
 		BlockedReason: a.BlockedReason,
 		StartedAt:     a.StartedAt,
@@ -902,19 +897,18 @@ func (a *Agent) viewMap() map[string]any {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return map[string]any{
-		"id":        a.ID,
-		"name":      a.Name,
-		"role":      a.Role,
-		"color":     a.Color,
-		"status":    string(a.Status),
-		"createdAt": a.CreatedAt,
-		"messages":  append([]llm.Message(nil), a.Messages...),
-		"queueLen":  a.QueueLen,
-		"backend":   a.Backend,
-		"workDir":   a.WorkDir,
-		"llmCfg":    a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
+		"id":            a.ID,
+		"name":          a.Name,
+		"role":          a.Role,
+		"color":         a.Color,
+		"status":        string(a.Status),
+		"createdAt":     a.CreatedAt,
+		"messages":      append([]llm.Message(nil), a.Messages...),
+		"queueLen":      a.QueueLen,
+		"backend":       a.Backend,
+		"workDir":       a.WorkDir,
+		"llmCfg":        a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,
 	}
 }
-

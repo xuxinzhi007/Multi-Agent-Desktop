@@ -326,37 +326,31 @@ func (s *Sidecar) RouteAgent(fromId, toId, text string) error {
 	return s.mgr.Route(fromId, toId, text)
 }
 
-// CreateChannel 新建频道。
-func (s *Sidecar) CreateChannel(name string, members []string) channel.Channel {
-	ch := s.channels.Create("", name, members)
-	ChannelCreated.Emit(s.win, *ch)
-	return *ch
+// CreateChannel 新建频道。policy 为空时由 channel 包回落 discuss。
+func (s *Sidecar) CreateChannel(name string, members []string, policy string) channel.Channel {
+	ch := s.channels.Create("", name, members, channel.TurnPolicy(policy))
+	ChannelCreated.Emit(s.win, ch)
+	return ch
 }
 
-// ListChannels 返回所有频道。
+// ListChannels 返回所有频道快照。
 func (s *Sidecar) ListChannels() []channel.Channel {
-	list := s.channels.List()
-	out := make([]channel.Channel, len(list))
-	for i, ch := range list {
-		out[i] = *ch
-	}
-	return out
+	return s.channels.List()
 }
 
 // SendToChannel 发消息到频道，并触发相关成员 agent。
-// @提及优先：被 @ 的成员必须回复，其他成员根据角色相关性判断。
-// 成员回复通过 PromptRequest.ChannelID 路由回频道。
-func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error {
-	// 1. 广播消息到频道
+// 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
+func (s *Sidecar) SendToChannel(ctx context.Context, channelId, fromId, fromName, text string) error {
+	// 1. 广播消息到频道（返回副本，不持有内部状态）
 	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
 	if err != nil {
 		return err
 	}
 
 	// 2. 推消息到前端
-	ChannelMessage.Emit(s.win, *msg)
+	ChannelMessage.Emit(s.win, msg)
 
-	// 3. 获取频道和策略
+	// 3. 取频道快照
 	ch, ok := s.channels.Get(channelId)
 	if !ok {
 		return fmt.Errorf("channel %s not found", channelId)
@@ -374,117 +368,71 @@ func (s *Sidecar) SendToChannel(channelId, fromId, fromName, text string) error 
 	}
 	transcript := channel.BuildTranscript(prior, 2000) // 2000 字符预算
 
-	// 5. 决定谁回复
-	// 规则：被 @ 的必须回；没人被 @ 时（discuss）选 1 个最相关的成员，
-	// 避免「10 成员 = 10 倍成本」和「没人回」两个极端。
-	var deliveries []channel.Delivery
-	var errs []string
-
-	// 先看有没有人本文件被点名
-	mentions := channel.ParseMentions(text)
-	addressed := make(map[string]bool)
-	for _, agentId := range recipients {
-		if a, ok := s.mgr.Get(agentId); ok {
-			for _, m := range mentions {
-				if m == a.Name || m == agentId || m == "all" {
-					addressed[agentId] = true
-					break
-				}
-			}
-		}
-	}
-
-	// 没人被点名且在 discuss 模式：挑一个角色最相关的
-	var runnerUp string
-	if len(addressed) == 0 && policy != channel.PolicyDirect {
-		bestScore := -1
-		for _, agentId := range recipients {
-			a, ok := s.mgr.Get(agentId)
-			if !ok {
-				continue
-			}
-			score := 0
-			if channel.RoleRelevant(text, a.Role) {
-				score = 2
-			}
-			if strings.Contains(strings.ToLower(text), strings.ToLower(a.Name)) {
-				score += 3
-			}
-			if score > bestScore {
-				bestScore = score
-				runnerUp = agentId
-			}
-		}
-		// 全都不相关时，也让第一个成员兜底，避免消息石沉大海
-		if runnerUp == "" && len(recipients) > 0 {
-			runnerUp = recipients[0]
-		}
-	}
-
+	// 5. 把接收者投影成 Member，交判定给 channel 包
+	members := make([]channel.Member, 0, len(recipients))
+	byID := make(map[string]channel.Member, len(recipients))
+	missing := make(map[string]bool, len(recipients))
 	for _, agentId := range recipients {
 		a, ok := s.mgr.Get(agentId)
 		if !ok {
+			missing[agentId] = true
+			continue
+		}
+		sn := a.Snapshot()
+		m := channel.Member{ID: sn.ID, Name: sn.Name, Role: sn.Role}
+		members = append(members, m)
+		byID[m.ID] = m
+	}
+
+	decisions := channel.DecideReplies(policy, msg, members)
+	byDecision := make(map[string]channel.Decision, len(decisions))
+	for _, d := range decisions {
+		byDecision[d.Member.ID] = d
+	}
+
+	// 6. 按原 recipients 顺序投递，保证 deliveries 顺序稳定
+	prompt := fmt.Sprintf("%s\n[user] %s: %s", transcript.Render(), fromName, text)
+	deliveries := make([]channel.Delivery, 0, len(recipients))
+	var errs []string
+
+	for _, agentId := range recipients {
+		if missing[agentId] {
 			reason := fmt.Sprintf("agent %s not found", agentId)
 			errs = append(errs, reason)
-			deliveries = append(deliveries, channel.Delivery{
-				AgentID: agentId,
-				Status:  "failed",
-				Reason:  reason,
-			})
+			deliveries = append(deliveries, channel.Delivery{AgentID: agentId, Status: "failed", Reason: reason})
 			continue
 		}
 
-		// 判断是否应该回复
-		shouldReply, reason := channel.ShouldReply(policy, *msg, agentId, a.Name, a.Role)
-		if !shouldReply && agentId == runnerUp {
-			shouldReply = true
-			reason = "discuss 模式 · 最优匹配"
-		}
-		if !shouldReply && len(addressed) > 0 && !addressed[agentId] {
-			reason = "未被点名"
-		}
-
-		if !shouldReply {
-			deliveries = append(deliveries, channel.Delivery{
-				AgentID: agentId,
-				Status:  "skipped",
-				Reason:  reason,
-			})
-			fmt.Printf("[channel] %s 跳过: %s\n", a.Name, reason)
+		d, ok := byDecision[agentId]
+		if !ok || !d.Reply {
+			reason := "未参与判定"
+			if ok {
+				reason = d.Reason
+			}
+			deliveries = append(deliveries, channel.Delivery{AgentID: agentId, Status: "skipped", Reason: reason})
 			continue
 		}
 
-		// 组装 prompt：transcript + 本轮消息
-		prompt := fmt.Sprintf("%s\n[user] %s: %s", transcript.Render(), fromName, text)
-
-		err := s.mgr.Prompt(context.Background(), agent.PromptRequest{
+		err := s.mgr.Prompt(ctx, agent.PromptRequest{
 			AgentID:   agentId,
 			Text:      prompt,
 			ChannelID: channelId, // 回复写回频道，不再靠字符串标记
 		})
 		if err != nil {
 			errs = append(errs, err.Error())
-			deliveries = append(deliveries, channel.Delivery{
-				AgentID: agentId,
-				Status:  "failed",
-				Reason:  err.Error(),
-			})
-		} else {
-			deliveries = append(deliveries, channel.Delivery{
-				AgentID: agentId,
-				Status:  "delivered",
-			})
-			fmt.Printf("[channel] %s 已投递\n", a.Name)
+			deliveries = append(deliveries, channel.Delivery{AgentID: agentId, Status: "failed", Reason: err.Error()})
+			continue
 		}
+		deliveries = append(deliveries, channel.Delivery{AgentID: agentId, Status: "delivered"})
 	}
 
-	// 6. 更新消息的投递记录，并重发一次事件让前端拿到
+	// 7. 回填 deliveries：只写这个字段，不整体覆盖消息
 	msg.Deliveries = deliveries
-	if err := s.channels.UpdateMessage(*msg); err != nil {
-		log.Printf("update message deliveries: %v", err)
+	if err := s.channels.SetDeliveries(channelId, msg.ID, deliveries); err != nil {
+		log.Printf("set deliveries: %v", err)
 	} else {
 		// 重发同一 ID 的事件；前端按 ID 去重并覆盖旧记录
-		ChannelMessage.Emit(s.win, *msg)
+		ChannelMessage.Emit(s.win, msg)
 	}
 
 	if len(errs) > 0 {
@@ -501,15 +449,15 @@ func (s *Sidecar) CreateCLIAgent(name, role, backend string) AgentView {
 }
 
 // PromptAgent 发消息并流式回流。
-func (s *Sidecar) PromptAgent(req PromptRequest) error {
-	return s.mgr.Prompt(context.Background(), req)
+func (s *Sidecar) PromptAgent(ctx context.Context, req PromptRequest) error {
+	return s.mgr.Prompt(ctx, req)
 }
 
-// RunShell 执行 shell 命令。
-func (s *Sidecar) RunShell(req ShellRequest) {
+// RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。
+func (s *Sidecar) RunShell(ctx context.Context, req ShellRequest) {
 	go func() {
 		ShellStart.Emit(s.win, ShellEvent{AgentID: req.AgentID, Command: req.Command})
-		res := s.runner.Run(context.Background(), req.Command)
+		res := s.runner.Run(ctx, req.Command)
 		ShellResult_.Emit(s.win, ShellResultEvent{
 			AgentID: req.AgentID,
 			Command: req.Command,
@@ -990,7 +938,7 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 				// 把 agent 回复写入频道历史
 				if chMgr != nil {
 					if msg, err := chMgr.AddMessage(v.ChannelID, v.AgentID, v.AgentName, v.Text); err == nil {
-						ChannelMessage.Emit(win, *msg)
+						ChannelMessage.Emit(win, msg)
 					}
 				}
 			}

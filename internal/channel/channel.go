@@ -18,7 +18,7 @@ type Message struct {
 	Text      string `json:"text"`
 	At        int64  `json:"at"`
 	Kind      string `json:"kind,omitempty"` // user / agent / system
-	
+
 	// Deliveries 记录投递结果：谁收到了、谁跳过了
 	Deliveries []Delivery `json:"deliveries,omitempty"`
 }
@@ -26,7 +26,7 @@ type Message struct {
 // Delivery 是消息的投递记录。
 type Delivery struct {
 	AgentID string `json:"agentId"`
-	Status  string `json:"status"` // delivered / skipped / failed
+	Status  string `json:"status"`           // delivered / skipped / failed
 	Reason  string `json:"reason,omitempty"` // 跳过原因
 }
 
@@ -44,10 +44,10 @@ const (
 
 // Channel 是一个共享消息频道。
 type Channel struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Members  []string  `json:"members"` // agent IDs
-	Messages []Message `json:"messages"`
+	ID       string     `json:"id"`
+	Name     string     `json:"name"`
+	Members  []string   `json:"members"` // agent IDs
+	Messages []Message  `json:"messages"`
 	Policy   TurnPolicy `json:"policy,omitempty"` // 回合策略，默认 discuss
 }
 
@@ -112,6 +112,7 @@ func (m *Manager) Save() error {
 				Name:     ch.Name,
 				Members:  append([]string(nil), ch.Members...),
 				Messages: append([]Message(nil), ch.Messages...),
+				Policy:   ch.Policy,
 			})
 		}
 	}
@@ -170,11 +171,44 @@ func (m *Manager) Load() error {
 	return nil
 }
 
-// Create 新建频道。
-func (m *Manager) Create(id, name string, members []string) *Channel {
+// clone 深拷贝一个频道，返回与存储完全解耦的值。
+// Manager 的所有对外接口都必须返回副本：调用方会在锁外读取，
+// 而写路径的 append 会让底层数组 realloc，返回指针即构成数据竞争。
+func (c *Channel) clone() Channel {
+	out := Channel{
+		ID:      c.ID,
+		Name:    c.Name,
+		Members: append([]string(nil), c.Members...),
+		Policy:  c.Policy,
+	}
+	if c.Messages == nil {
+		out.Messages = []Message{}
+		return out
+	}
+	out.Messages = make([]Message, len(c.Messages))
+	for i := range c.Messages {
+		out.Messages[i] = c.Messages[i].clone()
+	}
+	return out
+}
+
+// clone 深拷贝一条消息（Deliveries 也要断开，否则回填会写到别人的切片上）。
+func (msg Message) clone() Message {
+	out := msg
+	if msg.Deliveries != nil {
+		out.Deliveries = append([]Delivery(nil), msg.Deliveries...)
+	}
+	return out
+}
+
+// Create 新建频道，返回快照副本。
+func (m *Manager) Create(id, name string, members []string, policy TurnPolicy) Channel {
 	m.mu.Lock()
 	if id == "" {
 		id = fmt.Sprintf("ch-%d", time.Now().UnixNano())
+	}
+	if policy == "" {
+		policy = PolicyDiscuss
 	}
 
 	ch := &Channel{
@@ -182,31 +216,36 @@ func (m *Manager) Create(id, name string, members []string) *Channel {
 		Name:     name,
 		Members:  append([]string(nil), members...),
 		Messages: []Message{},
+		Policy:   policy,
 	}
 	m.channels[id] = ch
 	m.order = append(m.order, id)
+	snapshot := ch.clone()
 	m.mu.Unlock()
 
 	m.goSave()
-	return ch
+	return snapshot
 }
 
-// Get 返回频道。
-func (m *Manager) Get(id string) (*Channel, bool) {
+// Get 返回频道快照副本。
+func (m *Manager) Get(id string) (Channel, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	ch, ok := m.channels[id]
-	return ch, ok
+	if !ok {
+		return Channel{}, false
+	}
+	return ch.clone(), true
 }
 
-// List 返回所有频道。
-func (m *Manager) List() []*Channel {
+// List 返回所有频道的快照副本。
+func (m *Manager) List() []Channel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]*Channel, 0, len(m.order))
+	out := make([]Channel, 0, len(m.order))
 	for _, id := range m.order {
 		if ch, ok := m.channels[id]; ok {
-			out = append(out, ch)
+			out = append(out, ch.clone())
 		}
 	}
 	return out
@@ -229,14 +268,14 @@ func (m *Manager) RemoveMember(agentId string) {
 	m.goSave()
 }
 
-// AddMessage 添加消息到频道，返回创建的消息。
-func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (*Message, error) {
+// AddMessage 添加消息到频道，返回创建的消息副本。
+func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (Message, error) {
 	m.mu.Lock()
 
 	ch, ok := m.channels[channelId]
 	if !ok {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("channel %s not found", channelId)
+		return Message{}, fmt.Errorf("channel %s not found", channelId)
 	}
 
 	msg := Message{
@@ -250,39 +289,40 @@ func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (*Message
 	ch.Messages = append(ch.Messages, msg)
 	m.mu.Unlock()
 	m.goSave()
-	return &msg, nil
+	return msg, nil
 }
 
-// UpdateMessage 按 ID 覆盖已有消息（用于回填投递记录），并落盘。
-func (m *Manager) UpdateMessage(msg Message) error {
+// SetDeliveries 按 ID 回填投递记录，并落盘。
+// 只接受 ID + deliveries，避免调用方拿着旧快照整体覆盖（会丢掉并发写入的新字段）。
+func (m *Manager) SetDeliveries(channelId, msgID string, deliveries []Delivery) error {
 	m.mu.Lock()
-	ch, ok := m.channels[msg.ChannelID]
+	ch, ok := m.channels[channelId]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("channel %s not found", msg.ChannelID)
+		return fmt.Errorf("channel %s not found", channelId)
 	}
 	found := false
 	for i := range ch.Messages {
-		if ch.Messages[i].ID == msg.ID {
-			ch.Messages[i] = msg
+		if ch.Messages[i].ID == msgID {
+			ch.Messages[i].Deliveries = append([]Delivery(nil), deliveries...)
 			found = true
 			break
 		}
 	}
 	m.mu.Unlock()
 	if !found {
-		return fmt.Errorf("message %s not found", msg.ID)
+		return fmt.Errorf("message %s not found", msgID)
 	}
 	m.goSave()
 	return nil
 }
 
-// Broadcast 发消息到频道，返回创建的消息与所有成员的 agent ID（用于触发执行）。
+// Broadcast 发消息到频道，返回创建的消息副本与所有成员 agent ID。
 // 消息总会被记录，即使用户是唯一发送者；接收者排除发送者自身。
-func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message, []string, error) {
+func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (Message, []string, error) {
 	msg, err := m.AddMessage(channelId, fromId, fromName, text)
 	if err != nil {
-		return nil, nil, err
+		return Message{}, nil, err
 	}
 
 	m.mu.RLock()
@@ -345,9 +385,7 @@ func (t Transcript) Render() string {
 }
 
 // ShouldReply 判断 agent 是否应该回复这条消息。
-// 按 TurnPolicy 和 @提及决定。
-// ShouldReply 判断 agent 是否应该回复这条消息。
-// role 用于 discuss 模式下的相关性判断（空则不判断）。
+// 按 TurnPolicy 和 @提及决定；role 供 discuss 模式判定相关性（空则不判）。
 func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string) (bool, string) {
 	// 解析 @提及
 	mentions := ParseMentions(msg.Text)
@@ -367,10 +405,11 @@ func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string
 	// 按策略判断
 	switch policy {
 	case PolicyDirect:
-		return false, "direct 模式未被 @"
+		// 单聊：成员就该回，不靠 @ 触发（之前这里返回 false，导致 direct 频道永不回复）
+		return true, "direct 模式 · 全员回复"
 
 	case PolicyDiscuss:
-		// 讨论模式：没被 @ 时由 SendToChannel 统一选 1 个最相关的成员，
+		// 讨论模式：没被 @ 时由 DecideReplies 统一选 1 个最相关的成员，
 		// 这里返回 false，避免 N 成员 = N 倍成本。
 		return false, "discuss 模式 · 未被点名"
 
@@ -378,7 +417,7 @@ func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string
 		return true, "roundrobin 模式"
 
 	default:
-		return true, "默认 discuss 模式"
+		return false, "未识别的策略"
 	}
 }
 
@@ -428,4 +467,96 @@ func ParseMentions(text string) []string {
 		}
 	}
 	return mentions
+}
+
+// Member 是参与回合判定的成员最小信息。
+// channel 包不依赖 agent 包，由调用方把 Agent 投影成这个结构。
+type Member struct {
+	ID   string
+	Name string
+	Role string
+}
+
+// Decision 是一个成员的回合判定结果。
+type Decision struct {
+	Member Member
+	Reply  bool
+	Reason string
+}
+
+// DecideReplies 决定一条消息该由哪些成员回复，是「谁该回」的唯一实现。
+// 规则：
+//   - 被 @ 的必须回（@all 命中全员）
+//   - 有人被 @ 时，没被点名的成员不打扰
+//   - discuss 模式下没人被 @，选 1 个最相关的成员（避免 N 成员 = N 倍成本）
+//   - direct / roundrobin 由 ShouldReply 直接给出结论
+//
+// 返回值按 recipients 顺序排列，便于上层稳定地产生 deliveries。
+func DecideReplies(policy TurnPolicy, msg Message, recipients []Member) []Decision {
+	if len(recipients) == 0 {
+		return nil
+	}
+	if policy == "" {
+		policy = PolicyDiscuss
+	}
+
+	mentions := ParseMentions(msg.Text)
+	addressed := make(map[string]bool)
+	for _, m := range recipients {
+		if isAddressed(mentions, m) {
+			addressed[m.ID] = true
+		}
+	}
+
+	// discuss 模式下没人被点名：挑一个最优匹配，全不相关则第一个兜底
+	runnerUp := ""
+	if policy == PolicyDiscuss && len(addressed) == 0 {
+		bestScore := -1
+		for _, m := range recipients {
+			score := relevanceScore(msg.Text, m)
+			if score > bestScore {
+				bestScore = score
+				runnerUp = m.ID
+			}
+		}
+		if runnerUp == "" {
+			runnerUp = recipients[0].ID
+		}
+	}
+
+	out := make([]Decision, 0, len(recipients))
+	for _, m := range recipients {
+		reply, reason := ShouldReply(policy, msg, m.ID, m.Name, m.Role)
+		if !reply && runnerUp != "" && m.ID == runnerUp {
+			reply = true
+			reason = "discuss 模式 · 最优匹配"
+		}
+		if !reply && len(addressed) > 0 && !addressed[m.ID] {
+			reason = "未被点名"
+		}
+		out = append(out, Decision{Member: m, Reply: reply, Reason: reason})
+	}
+	return out
+}
+
+// isAddressed 判断某成员是否被这条消息点名。
+func isAddressed(mentions []string, m Member) bool {
+	for _, mention := range mentions {
+		if mention == m.Name || mention == m.ID || mention == "all" {
+			return true
+		}
+	}
+	return false
+}
+
+// relevanceScore 给 discuss 模式的成员排序打分：角色相关 +2，名字出现 +3。
+func relevanceScore(text string, m Member) int {
+	score := 0
+	if RoleRelevant(text, m.Role) {
+		score += 2
+	}
+	if m.Name != "" && strings.Contains(strings.ToLower(text), strings.ToLower(m.Name)) {
+		score += 3
+	}
+	return score
 }
