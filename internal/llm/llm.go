@@ -44,7 +44,7 @@ type Client interface {
 
 // Config 描述一个 provider 的接入参数。
 type Config struct {
-	Provider string `json:"provider"` // mock | ollama | openai
+	Provider string `json:"provider"` // llamacpp | openai | deepseek | claude
 	BaseURL  string `json:"baseUrl"`
 	APIKey   string `json:"apiKey"`
 	Model    string `json:"model"`
@@ -64,17 +64,35 @@ var ErrMissingAPIKey = errors.New("llm: API Key 未填写")
 // 队列里所有消息就一直停在「排队中」——用户完全没法自救。
 const StreamTimeout = 120 * time.Second
 
+// DefaultLlamaCppBaseURL 是 llama-server 的默认监听地址。
+const DefaultLlamaCppBaseURL = "http://127.0.0.1:8080"
+
+// IsLocalProvider 表示服务跑在本机、不需要 API Key。
+// 鉴权检查靠它短路，否则本地服务会被误判成「Key 未填写」而直接拒绝。
+func IsLocalProvider(name string) bool {
+	return name == "llamacpp"
+}
+
+// ApplyDefaults 补齐 provider 的默认 BaseURL / Model / Provider 本身。
+//
+// 单独导出：New 与 NewChatModel 是两条独立路径，默认值只写一份，
+// 免得改了一处忘了另一处（loop 走 ChatModel，聊天走 Client）。
+func ApplyDefaults(cfg Config) Config {
+	switch cfg.Provider {
+	case "llamacpp":
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = DefaultLlamaCppBaseURL
+		}
+	}
+	return cfg
+}
+
 // New 按配置造 client。provider 为空时回落到 mock，保证永远可用。
 func New(cfg Config) Client {
 	switch cfg.Provider {
-	case "ollama":
-		if cfg.BaseURL == "" {
-			cfg.BaseURL = "http://127.0.0.1:11434"
-		}
-		if cfg.Model == "" {
-			cfg.Model = "qwen2.5-coder:7b"
-		}
-		return &openAICompat{name: "ollama", cfg: cfg}
+	case "llamacpp":
+		cfg = ApplyDefaults(cfg)
+		return &openAICompat{name: cfg.Provider, cfg: cfg}
 	case "openai", "deepseek", "claude":
 		return &openAICompat{name: cfg.Provider, cfg: cfg}
 	default:

@@ -3,6 +3,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -67,6 +70,11 @@ var (
 	AgentMessage = mygo.NewEvent[MessageEvent]("agent.message")
 	AgentError   = mygo.NewEvent[ErrorEvent]("agent.error")
 	ToolStart    = mygo.NewEvent[ToolStartEvent]("tool.start")
+	// loop 内工具调用与运行结局。循环真的在跑，界面必须能看到，
+	// 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
+	AgentTool    = mygo.NewEvent[AgentToolEvent]("agent.tool")
+	AgentLoop    = mygo.NewEvent[AgentLoopEvent]("agent.loop")
+	AgentStopped = mygo.NewEvent[AgentStoppedEvent]("agent.stopped")
 	ShellStart   = mygo.NewEvent[ShellEvent]("shell.start")
 	ShellResult_ = mygo.NewEvent[ShellResultEvent]("shell.result")
 	LLMConfigEvt = mygo.NewEvent[LLMConfig]("llm.config")
@@ -94,6 +102,32 @@ type ToolStartEvent struct {
 	AgentID string `json:"agentId"`
 	Tool    string `json:"tool"`
 	Target  string `json:"target"`
+}
+
+// AgentToolEvent 是一次 loop 内工具调用的开始或结束。
+type AgentToolEvent struct {
+	ID      string `json:"id"`
+	Tool    string `json:"tool"`
+	Phase   string `json:"phase"` // start | end
+	Status  string `json:"status,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// AgentLoopEvent 是循环的一次结局（done / failed）。
+type AgentLoopEvent struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Iter   int    `json:"iter"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// AgentStoppedEvent 记录「为什么停」。用户按停止和预算用尽是两回事，
+// 界面要能说清是哪一种，否则用户不知道为什么没跑完。
+type AgentStoppedEvent struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+	Iter   int    `json:"iter"`
+	Used   int    `json:"used"`
 }
 
 // DeltaEvent 是流式输出片段。
@@ -654,6 +688,114 @@ func (s *API) ListModels(ctx context.Context, cfg LLMConfig) ([]string, error) {
 	return s.listModelsWithSavedCreds(ctx, cfg)
 }
 
+// ModelChoice 是模型列表里的一项。
+//
+// 只给模型名和一个可点击的完整配置：用户不需要理解「provider / baseUrl /
+// apiKey / model」这四层结构，他只想「换个模型」。
+type ModelChoice struct {
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	BaseURL  string `json:"baseUrl,omitempty"`
+	// Local 表示本地服务，不需要 Key
+	Local bool `json:"local"`
+	// Current 标记当前正在用的那个
+	Current bool `json:"current"`
+	// Ready 表示这一项现在就能用（凭据齐 / 本地服务）
+	Ready bool   `json:"ready"`
+	Note  string `json:"note,omitempty"`
+}
+
+// ListAllModels 返回一个扁平的可用模型列表。
+//
+// 存在的理由：原来的设置页要用户先选 provider、再填 BaseURL、再填 Key、
+// 再选模型 —— 四步里任何一步不懂就卡住。而用户真正要做的事只有一件：
+// 「我现在想用哪个模型」。这里把它压成一次点击。
+func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
+	base := s.mgr.LLMConfig()
+	var out []ModelChoice
+
+	// add 探测一个 provider，把它的模型摊平进列表。
+	// 连不上时也保留一项占位：用户需要知道「这个能力存在但当前不可用」，
+	// 直接隐藏会让人以为应用根本不支持。
+	add := func(provider string) {
+		cfg := llm.ApplyDefaults(llm.Config{Provider: provider})
+		// 只有当前正在用的那个 provider 才有可信凭据；
+		// 其它 provider 没有 Key，探测必然失败，占位显示即可。
+		configured := provider == base.Provider
+		if configured {
+			cfg.BaseURL = cmp.Or(base.BaseURL, cfg.BaseURL)
+			cfg.APIKey = base.APIKey
+		}
+		local := llm.IsLocalProvider(provider)
+
+		if !local && (!configured || cfg.APIKey == "") {
+			out = append(out, ModelChoice{
+				Model:    providerName(provider),
+				Provider: provider,
+				Ready:    false,
+				Note:     "未配置 Key",
+			})
+			return
+		}
+
+		listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		models, err := llm.ListModels(listCtx, cfg)
+		if err != nil {
+			out = append(out, ModelChoice{
+				Model:    providerName(provider),
+				Provider: provider,
+				BaseURL:  cfg.BaseURL,
+				Local:    local,
+				Ready:    false,
+				Note:     reasonOf(err),
+			})
+			return
+		}
+		for _, m := range models {
+			out = append(out, ModelChoice{
+				Model:    m,
+				Provider: provider,
+				BaseURL:  cfg.BaseURL,
+				Local:    local,
+				Current:  configured && base.Model == m,
+				Ready:    true,
+			})
+		}
+	}
+
+	add("llamacpp")
+	add("deepseek")
+	add("openai")
+	return out
+}
+
+func providerName(p string) string {
+	switch p {
+	case "llamacpp":
+		return "本地模型（未启动）"
+	case "deepseek":
+		return "DeepSeek（未配置 Key）"
+	case "openai":
+		return "OpenAI（未配置 Key）"
+	}
+	return p
+}
+
+func reasonOf(err error) string {
+	if errors.Is(err, llm.ErrNotConfigured) {
+		return "未配置"
+	}
+	return "连不上服务，先启动它"
+}
+
+func ifStr(cond bool, s string) string {
+	if cond {
+		return s
+	}
+	return ""
+}
+
 // GetWorkDir 返回工作目录。
 func (s *API) GetWorkDir() string {
 	return s.runner.Dir()
@@ -750,12 +892,16 @@ func (s *API) ListModelsFor(ctx context.Context, agentId, provider string) ([]st
 // listModelsWithSavedCreds 用已保存的凭据调 /models。
 // 凭据缺失时就地短路并给出可操作的错误，不发无意义请求。
 func (s *API) listModelsWithSavedCreds(ctx context.Context, cfg llm.Config) ([]string, error) {
+	// 本地 provider 的默认 BaseURL 在这里补齐，
+	// 否则「没填 BaseURL」会被误判成未配置 —— 用户明明只要起了服务就能用。
+	cfg = llm.ApplyDefaults(cfg)
+
 	switch {
 	case cfg.Provider == "" || cfg.Provider == "mock":
 		return []string{"mock"}, nil
 	case cfg.BaseURL == "":
 		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 Base URL", llm.ErrNotConfigured, cfg.Provider)
-	case cfg.APIKey == "" && cfg.Provider != "ollama":
+	case cfg.APIKey == "" && !llm.IsLocalProvider(cfg.Provider):
 		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 API Key", llm.ErrNotConfigured, cfg.Provider)
 	}
 	return llm.ListModels(ctx, cfg)
@@ -778,11 +924,12 @@ func (s *API) ProvidersStatus() []ProviderStatus {
 	base := s.mgr.LLMConfig()
 	out := []ProviderStatus{
 		{ID: "mock", Ready: true, Reason: "内置示例模型"},
+		// 本地服务不需要 Key，默认就绪 —— 只要服务在跑就能用。
 		{
-			ID:      "ollama",
+			ID:      "llamacpp",
 			Ready:   true,
-			BaseURL: cmp.Or(base.BaseURL, "http://127.0.0.1:11434"),
-			Reason:  "本地服务，不需要 Key",
+			BaseURL: cmp.Or(base.BaseURL, llm.DefaultLlamaCppBaseURL),
+			Reason:  "本地 llama.cpp，不需要 Key",
 		},
 	}
 	cloud := []string{"openai", "deepseek", "claude"}
@@ -807,20 +954,148 @@ func (s *API) ProvidersStatus() []ProviderStatus {
 
 // SystemInfo 描述运行环境。
 type SystemInfo struct {
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	GoVersion string `json:"goVersion"`
-	MyGo      bool   `json:"mygo"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	GoVersion  string `json:"goVersion"`
+	MyGo       bool   `json:"mygo"`
+	BuildStamp string `json:"buildStamp"`
 }
+
+var processStartedAt = time.Now().Unix()
+
+// BuildStamp 在编译时注入，用来确认「界面跑的是哪一版后端」。
+//
+// 反复出现「代码改了但现象没变」的排查困境：mygo dev 只热重载前端，
+// Go 改动必须重启进程才会重新编译。没有指纹时，无法区分
+// 「修复无效」和「跑的是旧二进制」，只能靠猜。
+// 用 `mygo build -ldflags "-X main.BuildStamp=$(date +%s)"` 注入；
+// 开发时默认取进程启动时间也算一个可比较的参照。
+var BuildStamp = "dev"
 
 // Info 返回系统信息。
 func (s *API) Info() SystemInfo {
-	return SystemInfo{
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		GoVersion: runtime.Version(),
-		MyGo:      true,
+	stamp := BuildStamp
+	if stamp == "dev" {
+		stamp = fmt.Sprintf("dev@%d", processStartedAt)
 	}
+	return SystemInfo{
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		GoVersion:  runtime.Version(),
+		MyGo:       true,
+		BuildStamp: stamp,
+	}
+}
+
+// Diagnostics 是一次链路自检的结果。
+//
+// 为什么要这个：用户反馈「发出去一直排队」时，可能的原因有五六种
+// （backend 配错、模型连不上、worker 死了、事件没派发、跑的是旧二进制）。
+// 光看界面分不出是哪一种，只能靠猜和反复重启。
+// 这里把每一项直接测出来摆在一起。
+type Diagnostics struct {
+	BuildStamp string      `json:"buildStamp"`
+	Provider   string      `json:"provider"`
+	Model      string      `json:"model"`
+	HasKey     bool        `json:"hasKey"`
+	ModelOK    bool        `json:"modelOk"`
+	ModelErr   string      `json:"modelErr,omitempty"`
+	ModelReply string      `json:"modelReply,omitempty"`
+	Agents     []AgentDiag `json:"agents"`
+	Loops      []LoopDiag  `json:"loops"`
+	CheckedAt  int64       `json:"checkedAt"`
+}
+
+// AgentDiag 是单个 agent 的运行状态摘要。
+type AgentDiag struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Backend      string `json:"backend"`
+	Status       string `json:"status"`
+	QueueLen     int    `json:"queueLen"`
+	MessageCount int    `json:"messageCount"`
+	LastError    string `json:"lastError,omitempty"`
+}
+
+// LoopDiag 是某个 agent 的循环检查点状态，用于判断「停在哪一轮、为什么停」。
+type LoopDiag struct {
+	AgentID    string `json:"agentId"`
+	Phase      string `json:"phase"`
+	Iteration  int    `json:"iteration"`
+	UsedIter   int    `json:"usedIter"`
+	UsedTools  int    `json:"usedTools"`
+	StopReason string `json:"stopReason,omitempty"`
+	Checkpoint int64  `json:"checkpointAt"`
+}
+
+// Diagnose 跑一次链路自检：真调一次模型，确认能拿到回复。
+// 不改任何状态，可以随时点。
+func (s *API) Diagnose(ctx context.Context) Diagnostics {
+	cfg := s.mgr.LLMConfig()
+	out := Diagnostics{
+		Provider:  cfg.Provider,
+		Model:     cfg.Model,
+		HasKey:    cfg.APIKey != "",
+		CheckedAt: time.Now().Unix(),
+	}
+	out.BuildStamp = s.Info().BuildStamp
+
+	// 用一个极短的真实调用确认模型可用。
+	// 这是唯一能区分「配置看着对但实际连不上」的办法。
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	turn, err := llm.NewChatModel(cfg).Turn(probeCtx, []llm.Message{
+		{Role: "user", Content: "只说两个字：通了"},
+	}, nil)
+	if err != nil {
+		out.ModelErr = err.Error()
+	} else {
+		out.ModelOK = true
+		out.ModelReply = strings.TrimSpace(turn.Text)
+	}
+
+	for _, a := range s.mgr.List() {
+		snap := a.Snapshot()
+		out.Agents = append(out.Agents, AgentDiag{
+			ID: snap.ID, Name: snap.Name, Backend: snap.Backend,
+			Status: string(snap.Status), QueueLen: snap.QueueLen,
+			MessageCount: len(snap.Messages), LastError: snap.LastError,
+		})
+	}
+
+	// 读检查点目录，判断有没有卡在某一轮的运行
+	root := filepath.Join(mustDataDir(), "loop", "runs")
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			buf, rerr := os.ReadFile(filepath.Join(root, e.Name()))
+			if rerr != nil {
+				continue
+			}
+			var st struct {
+				AgentID    string `json:"agentId"`
+				Phase      string `json:"phase"`
+				Iteration  int    `json:"iteration"`
+				StopReason string `json:"stopReason"`
+				Checkpoint int64  `json:"checkpointAt"`
+				Budget     struct {
+					UsedIterations int `json:"usedIterations"`
+					UsedToolCalls  int `json:"usedToolCalls"`
+				} `json:"budget"`
+			}
+			if json.Unmarshal(buf, &st) != nil {
+				continue
+			}
+			out.Loops = append(out.Loops, LoopDiag{
+				AgentID: st.AgentID, Phase: st.Phase, Iteration: st.Iteration,
+				UsedIter: st.Budget.UsedIterations, UsedTools: st.Budget.UsedToolCalls,
+				StopReason: st.StopReason, Checkpoint: st.Checkpoint,
+			})
+		}
+	}
+	return out
 }
 
 // ---- 知识库 ----
@@ -1185,6 +1460,52 @@ func toAgentDelta(data any) (DeltaEvent, bool) {
 	return DeltaEvent{ID: id, Delta: delta}, true
 }
 
+func toAgentTool(data any) (AgentToolEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return AgentToolEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	tool, _ := m["tool"].(string)
+	phase, _ := m["phase"].(string)
+	if id == "" || tool == "" || phase == "" {
+		return AgentToolEvent{}, false
+	}
+	status, _ := m["status"].(string)
+	content, _ := m["content"].(string)
+	return AgentToolEvent{ID: id, Tool: tool, Phase: phase, Status: status, Content: content}, true
+}
+
+func toAgentLoop(data any) (AgentLoopEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return AgentLoopEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	kind, _ := m["kind"].(string)
+	if id == "" || kind == "" {
+		return AgentLoopEvent{}, false
+	}
+	iter, _ := m["iter"].(int)
+	reason, _ := m["reason"].(string)
+	return AgentLoopEvent{ID: id, Kind: kind, Iter: iter, Reason: reason}, true
+}
+
+func toAgentStopped(data any) (AgentStoppedEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return AgentStoppedEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		return AgentStoppedEvent{}, false
+	}
+	reason, _ := m["reason"].(string)
+	iter, _ := m["iter"].(int)
+	used, _ := m["used"].(int)
+	return AgentStoppedEvent{ID: id, Reason: reason, Iter: iter, Used: used}, true
+}
+
 func toAgentMessage(data any) (MessageEvent, bool) {
 	m, ok := data.(map[string]any)
 	if !ok {
@@ -1299,8 +1620,28 @@ func notifyError(agentName, msg string) {
 	}
 }
 
+// emitSpyHook 仅测试用：拿到每条派发往前端的事件名与负载，
+// 用来断言「发消息真的产生并派发了回复事件」。
+var emitSpyHook func(event string, data any)
+
+// emitSpyMu 保护 emitSpyHook：worker goroutine 读取的同时测试会写入，裸包级变量会被 -race 判为数据竞争。
+var emitSpyMu sync.RWMutex
+
+func setEmitSpyHook(fn func(event string, data any)) {
+	emitSpyMu.Lock()
+	emitSpyHook = fn
+	emitSpyMu.Unlock()
+}
+
 // emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
 func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, event string, data any) {
+	emitSpyMu.RLock()
+	hook := emitSpyHook
+	emitSpyMu.RUnlock()
+	if hook != nil {
+		hook(event, data)
+	}
+
 	if win != nil && !win.IsDestroyed() {
 		switch event {
 		case "agent.created":
@@ -1343,6 +1684,18 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "tool.start":
 			if v, ok := toToolStart(data); ok {
 				ToolStart.Emit(win, v)
+			}
+		case "agent.tool":
+			if v, ok := toAgentTool(data); ok {
+				AgentTool.Emit(win, v)
+			}
+		case "agent.loop":
+			if v, ok := toAgentLoop(data); ok {
+				AgentLoop.Emit(win, v)
+			}
+		case "agent.stopped":
+			if v, ok := toAgentStopped(data); ok {
+				AgentStopped.Emit(win, v)
 			}
 		case "agent.channel.reply":
 			if v, ok := toAgentChannelReply(data); ok {

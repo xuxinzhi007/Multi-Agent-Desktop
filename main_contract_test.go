@@ -122,3 +122,71 @@ func TestCamelCaseMatchesGeneratedNames(t *testing.T) {
 		}
 	}
 }
+
+// emitRe 匹配 m.emit("...") / emit("...") 之类的事件名参数。
+var emitRe = regexp.MustCompile(`\.emit\("([a-z][a-z0-9._]*)"`)
+
+// routeCaseRe 匹配 emitToWindow 里 switch 的 `case "xxx":`。
+var routeCaseRe = regexp.MustCompile(`case "([a-z][a-z0-9._]*)":`)
+
+// TestEveryEmittedEventIsRouted 断言「后端 emit 的事件」真的会被派发到前端。
+//
+// 这是上一版缺失的一环：只检查了「声明的事件有没有前端订阅」，
+// 没检查「实际 emit 的事件有没有被 emitToWindow 处理」。
+// 结果是 loop backend emit 的 agent.loop / agent.stopped 两个事件
+// 悄悄进了黑洞 —— 循环真的在跑，界面完全不知道。
+func TestEveryEmittedEventIsRouted(t *testing.T) {
+	emitted := scanGoSources(t, emitRe)
+	routed := scanGoSources(t, routeCaseRe)
+
+	if len(emitted) == 0 {
+		t.Fatal("没有解析出任何 emit 调用：正则可能已过时")
+	}
+
+	var missing []string
+	for ev := range emitted {
+		if !routed[ev] {
+			missing = append(missing, ev)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf(
+			"以下事件被 emit 了，但 emitToWindow 里没有对应的 case，前端永远收不到：\n  %s",
+			strings.Join(missing, "\n  "),
+		)
+	}
+}
+
+// scanGoSources 递归扫描根目录与 internal/ 下所有非测试 Go 文件，
+// 收集正则第一捕获组。
+//
+// 必须递归：emit 调用分布在 internal/agent、internal/loop 等子包里，
+// 只扫根目录会得到空集，测试就变成了「永远通过」。
+func scanGoSources(t *testing.T, re *regexp.Regexp) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	roots := []string{".", "internal"}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") ||
+				strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			buf, rerr := os.ReadFile(filepath.Clean(path))
+			if rerr != nil {
+				return rerr
+			}
+			for _, m := range re.FindAllStringSubmatch(string(buf), -1) {
+				out[m[1]] = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	return out
+}

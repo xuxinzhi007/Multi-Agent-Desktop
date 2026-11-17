@@ -11,7 +11,8 @@
     "build:web": "npm run typecheck && vite build",
     "typecheck": "tsc -p tsconfig.app.json --noEmit",
     "verify": "npm run typecheck && go vet ./... && go test -race ./... && npm run test:e2e",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "dev:llama": "${LLAMA_CPP_DIR:-$HOME/Documents/gowork/llama.cpp}/build/bin/llama-server -m ${LLAMA_MODEL:-$HOME/Documents/gowork/llama.cpp/models/qwen2.5-0.5b-instruct-q4_k_m.gguf} --host 127.0.0.1 --port 8080 -c 4096"
   },
   "dependencies": {
     "cmdk": "^1.1.1",

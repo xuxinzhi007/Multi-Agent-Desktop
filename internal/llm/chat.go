@@ -37,6 +37,8 @@ type ChatModel struct {
 
 // NewChatModel 造一个支持 function calling 的调用器。
 func NewChatModel(cfg Config) *ChatModel {
+	// 与 New 共用同一套默认值：llamacpp 之类不填 BaseURL 也要能跑通
+	cfg = ApplyDefaults(cfg)
 	return &ChatModel{
 		cfg: cfg,
 		// 有超时是硬要求：没有超时的 http.Client 会让循环永久挂住，

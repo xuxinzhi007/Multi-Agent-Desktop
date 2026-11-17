@@ -96,13 +96,6 @@ func TestListModelsForUsesSavedCredentials(t *testing.T) {
 			wantErr:   llm.ErrNotConfigured,
 			wantInErr: "API Key",
 		},
-		{
-			name:      "ollama 不需要 Key",
-			globalCfg: llm.Config{Provider: "mock"},
-			provider:  "ollama",
-			wantErr:   llm.ErrNotConfigured, // 未配置 BaseURL 时仍要求填，但原因不是 Key
-			wantInErr: "Base URL",
-		},
 	}
 
 	for _, tc := range tests {
@@ -134,6 +127,26 @@ func TestListModelsForUsesSavedCredentials(t *testing.T) {
 	}
 }
 
+// 本地 provider（ollama / llamacpp）不需要用户填任何东西：
+// 默认地址由 llm.ApplyDefaults 补齐，Key 也免。
+// 这里只断言「没有以配置缺失为由拒绝」，连不上服务不算错 ——
+// 那是运行时问题，该由真实调用时的报错呈现。
+func TestLocalProvidersNeedNoCredentials(t *testing.T) {
+	// ollama 已下线：本地模型只有 llamacpp 一个入口。
+	for _, provider := range []string{"llamacpp"} {
+		t.Run(provider, func(t *testing.T) {
+			mgr := agent.NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+			mgr.Create("a1", "A1", "r")
+			s := &API{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
+
+			_, err := s.ListModelsFor(context.Background(), "a1", provider)
+			if errors.Is(err, llm.ErrNotConfigured) {
+				t.Fatalf("本地 provider 不该要求填配置，实际: %v", err)
+			}
+		})
+	}
+}
+
 // ProvidersStatus 要如实反映「配好了没有」。
 func TestProvidersStatus(t *testing.T) {
 	mgr := agent.NewManager(llm.Config{
@@ -152,8 +165,13 @@ func TestProvidersStatus(t *testing.T) {
 	if !byID["mock"].Ready {
 		t.Error("mock 应当始终可用")
 	}
-	if !byID["ollama"].Ready {
-		t.Error("ollama 是本地服务，不需要 Key，应当可用")
+	// 本地模型的就绪状态取决于服务有没有起，这里只断言条目存在，
+	// 不能断言 Ready —— 那会让测试依赖本机环境。
+	if _, ok := byID["llamacpp"]; !ok {
+		t.Error("列表里必须有本地模型这一项，否则界面上看不到它")
+	}
+	if byID["ollama"].ID != "" {
+		t.Error("ollama 已下线，不该再出现在列表里")
 	}
 	ds := byID["deepseek"]
 	if !ds.Ready || !ds.HasKey || ds.Model != "deepseek-chat" {

@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { PROVIDERS, DEFAULT_BASE, DEFAULT_MODEL } from '../lib/presets'
+import { useEffect, useMemo, useState } from 'react'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import Select from './Select'
 import { API } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
 
@@ -15,16 +13,24 @@ type Props = {
   onSave: (cfg: LLMConfig) => void
 }
 
-type TabId = 'appearance' | 'model' | 'about'
+import DiagnosePanel from './DiagnosePanel'
+import ModelList from './ModelList'
+
+type TabId = 'appearance' | 'model' | 'diagnose' | 'about'
 
 const TABS: { id: TabId; icon: string; label: string }[] = [
   { id: 'appearance', icon: '◐', label: '外观' },
   { id: 'model', icon: '✦', label: '模型' },
+  { id: 'diagnose', icon: '⚕', label: '诊断' },
   { id: 'about', icon: 'ⓘ', label: '关于' },
 ]
 
 /** 每个分区的标题与一句话说明，让内容自解释 */
 const TAB_HEAD: Record<TabId, { title: string; desc: string }> = {
+  diagnose: {
+    title: '诊断',
+    desc: '发消息没反应时先看这里。会真的调一次模型，并列出每个 agent 的真实状态。',
+  },
   appearance: {
     title: '外观',
     desc: '选择界面的明暗风格。跟随系统时，会随 macOS / Windows 的深浅色设置自动切换。',
@@ -40,14 +46,6 @@ const TAB_HEAD: Record<TabId, { title: string; desc: string }> = {
 }
 
 /** 每个 provider 的卡片图标，让「选谁」比读文字更快 */
-const PROVIDER_ICON: Record<string, string> = {
-  mock: '◈',
-  ollama: '🦙',
-  openai: '◎',
-  deepseek: '🐋',
-  claude: '✳',
-}
-
 const THEME_OPTIONS: { id: Theme; icon: string; label: string; desc: string }[] = [
   { id: 'dark', icon: '🌙', label: '暗色', desc: '深色背景，长时间阅读更省眼' },
   { id: 'light', icon: '☀️', label: '亮色', desc: '明亮背景，适合白天或强光环境' },
@@ -68,12 +66,8 @@ export default function SettingsModal(p: Props) {
   const { theme, setTheme } = useTheme()
   const [tab, setTab] = useState<TabId>('appearance')
   const [settingsPath, setSettingsPath] = useState('')
-  const [showKey, setShowKey] = useState(false)
-  const [models, setModels] = useState<string[]>([])
-  const [loadingModels, setLoadingModels] = useState(false)
-  const [modelError, setModelError] = useState('')
-  /** 模型列表加载完毕但结果为空 —— 与「还没加载过」是两种状态 */
-  const [modelsLoaded, setModelsLoaded] = useState(false)
+
+  const head = TAB_HEAD[tab]
 
   useEffect(() => {
     if (!open) return
@@ -82,28 +76,12 @@ export default function SettingsModal(p: Props) {
       .catch(() => {})
   }, [open])
 
-  /** 回到初始状态：换 provider / 关闭再打开都要把临时 UI 状态清干净 */
-  const resetTransient = useCallback(() => {
-    setShowKey(false)
-    setModels([])
-    setModelsLoaded(false)
-    setModelError('')
-  }, [])
-
   useEffect(() => {
     if (!open) return
     setCfg(llm)
     setTab('appearance')
-    resetTransient()
-  }, [open, llm, resetTransient])
+  }, [open, llm])
 
-  const provider = useMemo(
-    () => PROVIDERS.find((x) => x.id === cfg.provider) ?? PROVIDERS[0],
-    [cfg.provider],
-  )
-
-  const needsCredentials = cfg.provider !== 'mock'
-  const keyOptional = cfg.provider === 'ollama'
   const dirty = useMemo(
     () =>
       cfg.provider !== llm.provider ||
@@ -112,38 +90,6 @@ export default function SettingsModal(p: Props) {
       cfg.model !== llm.model,
     [cfg, llm],
   )
-
-  const loadModels = useCallback(async () => {
-    setLoadingModels(true)
-    setModelError('')
-    try {
-      const list = await API.listModels(cfg)
-      setModels(list)
-      setModelsLoaded(true)
-      if (list.length === 0) setModelError('未获取到模型列表')
-    } catch (e) {
-      setModels([])
-      setModelsLoaded(true)
-      setModelError(e instanceof Error ? e.message : '加载失败')
-    } finally {
-      setLoadingModels(false)
-    }
-  }, [cfg])
-
-  const pick = (id: string) => {
-    if (id === cfg.provider) return
-    setCfg({
-      provider: id,
-      baseUrl: DEFAULT_BASE[id] ?? '',
-      apiKey: '',
-      model: DEFAULT_MODEL[id] ?? '',
-    })
-    resetTransient()
-  }
-
-  if (!open) return null
-
-  const head = TAB_HEAD[tab]
 
   return (
     <Modal
@@ -192,8 +138,12 @@ export default function SettingsModal(p: Props) {
                   {t.icon}
                 </span>
                 <span>{t.label}</span>
-                {t.id === 'model' && (
-                  <span className="c-settings__nav-hint">{provider.label.split('（')[0]}</span>
+                {t.id === 'model' && llm.model && (
+                  // 显示「当前实际在用」的模型，而不是正在编辑的草稿。
+                  // 编辑中的值还没保存，显示它会让用户以为已经切过去了。
+                  <span className="c-settings__nav-hint" title={llm.model}>
+                    {llm.model.length > 14 ? `${llm.model.slice(0, 13)}…` : llm.model}
+                  </span>
                 )}
               </button>
             )
@@ -243,241 +193,18 @@ export default function SettingsModal(p: Props) {
             )}
 
             {tab === 'model' && (
-              <>
-                <section className="c-settings__card">
-                  <div className="c-settings__card-head">
-                    <div>
-                      <div className="c-settings__card-title">提供方</div>
-                      <div className="c-settings__card-sub">
-                        当前：{provider.label} · 切换后需要重新填写凭据
-                      </div>
-                    </div>
-                    <span className="c-settings__pill">{provider.label.split('（')[0]}</span>
-                  </div>
-                  <div className="c-settings__card-body" role="radiogroup" aria-label="模型提供方">
-                    {PROVIDERS.map((x) => {
-                      const on = cfg.provider === x.id
-                      return (
-                        <button
-                          key={x.id}
-                          type="button"
-                          role="radio"
-                          aria-checked={on}
-                          className={`c-settings__option ${on ? 'c-settings__option--active' : ''}`}
-                          onClick={() => pick(x.id)}
-                        >
-                          <span className="c-settings__option-icon" aria-hidden>
-                            {PROVIDER_ICON[x.id] ?? '◆'}
-                          </span>
-                          <span className="c-settings__option-body">
-                            <span className="c-settings__option-name">
-                              {x.label}
-                              {x.id === 'mock' && <span className="c-badge">无需配置</span>}
-                            </span>
-                            <span className="c-settings__option-desc">{x.hint}</span>
-                          </span>
-                          <span className={`c-settings__check ${on ? 'c-settings__check--on' : ''}`}>
-                            {on ? '✓' : ''}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </section>
-
-                {needsCredentials && (
-                  <section className="c-settings__card">
-                    <div className="c-settings__card-head">
-                      <div>
-                        <div className="c-settings__card-title">连接与凭据</div>
-                        <div className="c-settings__card-sub">
-                          填好 Base URL 与 API Key 后即可加载可用模型
-                        </div>
-                      </div>
-                    </div>
-                    <div className="c-settings__card-body">
-                      <div className="c-settings__field">
-                        <label className="c-settings__field-label" htmlFor="settings-base-url">
-                          Base URL
-                        </label>
-                        <input
-                          id="settings-base-url"
-                          value={cfg.baseUrl}
-                          onChange={(e) => setCfg({ ...cfg, baseUrl: e.target.value })}
-                          placeholder={DEFAULT_BASE[cfg.provider] ?? ''}
-                          className="mono c-settings__input"
-                          spellCheck={false}
-                        />
-                        <div className="c-settings__hint">
-                          留空则使用默认地址{' '}
-                          <code className="c-settings__code">
-                            {DEFAULT_BASE[cfg.provider] ?? '—'}
-                          </code>
-                        </div>
-                      </div>
-
-                      <div className="c-settings__field">
-                        <label className="c-settings__field-label" htmlFor="settings-api-key">
-                          API Key
-                        </label>
-                        <div className="c-settings__input-row">
-                          <input
-                            id="settings-api-key"
-                            type={showKey ? 'text' : 'password'}
-                            value={cfg.apiKey}
-                            onChange={(e) => setCfg({ ...cfg, apiKey: e.target.value })}
-                            placeholder={keyOptional ? '本地服务可留空' : 'sk-...'}
-                            className="mono c-settings__input"
-                            autoComplete="off"
-                            spellCheck={false}
-                          />
-                          <button
-                            type="button"
-                            className="c-btn c-btn--secondary c-btn--sm"
-                            aria-pressed={showKey}
-                            aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
-                            onClick={() => setShowKey((v) => !v)}
-                          >
-                            {showKey ? '隐藏' : '显示'}
-                          </button>
-                        </div>
-                        <div className="c-settings__hint">
-                          {keyOptional
-                            ? 'Ollama 跑在本机，通常不需要 Key，留空即可。'
-                            : '仅存于进程内存，不写入磁盘；重启后需重新填写。'}
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                {needsCredentials && (
-                  <section className="c-settings__card">
-                    <div className="c-settings__card-head">
-                      <div>
-                        <div className="c-settings__card-title">模型</div>
-                        <div className="c-settings__card-sub">
-                          可以直接手填，也可以从服务端拉取可用列表
-                        </div>
-                      </div>
-                    </div>
-                    <div className="c-settings__card-body">
-                      <div className="c-settings__field">
-                        <label className="c-settings__field-label" htmlFor="settings-model">
-                          模型名
-                        </label>
-                        <div className="c-settings__input-row">
-                          <input
-                            id="settings-model"
-                            value={cfg.model}
-                            onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
-                            placeholder={DEFAULT_MODEL[cfg.provider] ?? ''}
-                            className="mono c-settings__input"
-                            spellCheck={false}
-                          />
-                          <button
-                            type="button"
-                            className="c-btn c-btn--secondary c-btn--sm c-settings__load-btn"
-                            onClick={loadModels}
-                            disabled={loadingModels}
-                          >
-                            {loadingModels
-                              ? '加载中…'
-                              : models.length > 0
-                                ? '刷新列表'
-                                : '加载列表'}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* 加载中 / 错误 / 空 / 成功，四种状态各自说人话 */}
-                      {loadingModels && (
-                        <div className="c-settings__status" role="status">
-                          <span className="c-settings__spinner" aria-hidden />
-                          正在加载 {provider.label} 的模型列表…
-                        </div>
-                      )}
-
-                      {!loadingModels && modelError && (
-                        <div className="c-settings__status c-settings__status--error" role="alert">
-                          <span aria-hidden>⚠</span>
-                          <span className="c-settings__status-text">{modelError}</span>
-                          <button
-                            type="button"
-                            className="c-btn c-btn--ghost c-btn--sm"
-                            onClick={loadModels}
-                          >
-                            重试
-                          </button>
-                        </div>
-                      )}
-
-                      {!loadingModels && !modelError && modelsLoaded && models.length === 0 && (
-                        <div className="c-settings__status">
-                          <span aria-hidden>∅</span>
-                          <span className="c-settings__status-text">
-                            这个提供方没有返回任何模型，请确认 Base URL 与 API Key 后重试。
-                          </span>
-                        </div>
-                      )}
-
-                      {!loadingModels && models.length > 0 && (
-                        <div className="c-settings__field">
-                          <div className="c-settings__status c-settings__status--success">
-                            <span aria-hidden>✓</span>
-                            <span className="c-settings__status-text">
-                              已获取 {models.length} 个模型，点下面选择
-                            </span>
-                          </div>
-                          <Select
-                            value={cfg.model}
-                            placeholder="选择模型…"
-                            options={models.map((m) => ({ value: m, label: m }))}
-                            onChange={(m) => setCfg({ ...cfg, model: m })}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </section>
-                )}
-
-                {cfg.provider === 'mock' && (
-                  <section className="c-settings__card">
-                    <div className="c-settings__card-head">
-                      <div>
-                        <div className="c-settings__card-title">Mock 模式</div>
-                        <div className="c-settings__card-sub">无需网络与凭据</div>
-                      </div>
-                    </div>
-                    <div className="c-settings__card-body">
-                      <div className="c-settings__status c-settings__status--warning">
-                        <span aria-hidden>⚠</span>
-                        <span className="c-settings__status-text">
-                          Mock 模式的回复是本地占位内容，不是真实分析。想接入真实模型请在「提供方」里切换。
-                        </span>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                {cfg.provider === 'ollama' && (
-                  <section className="c-settings__card">
-                    <div className="c-settings__card-head">
-                      <div>
-                        <div className="c-settings__card-title">本地 Ollama</div>
-                        <div className="c-settings__card-sub">还没装？先跑这两条命令</div>
-                      </div>
-                    </div>
-                    <div className="c-settings__card-body">
-                      <div className="c-settings__cmds">
-                        <code className="c-settings__cmd">ollama serve</code>
-                        <code className="c-settings__cmd">ollama pull qwen2.5-coder:7b</code>
-                      </div>
-                    </div>
-                  </section>
-                )}
-              </>
+              <ModelList
+                current={llm}
+                // 点一下立刻生效并落盘：用户不需要再按「保存」。
+                // 多一次确认只会让人担心「我到底选上没有」。
+                onPick={(next) => {
+                  setCfg(next)
+                  onSave(next)
+                }}
+              />
             )}
+
+            {tab === 'diagnose' && <DiagnosePanel />}
 
             {tab === 'about' && (
               <>
@@ -514,7 +241,7 @@ export default function SettingsModal(p: Props) {
                       </div>
                       <div className="c-settings__kv-row">
                         <dt className="c-settings__kv-key">当前提供方</dt>
-                        <dd className="c-settings__kv-val">{provider.label}</dd>
+                        <dd className="c-settings__kv-val">{cfg.provider || '未设置'}</dd>
                       </div>
                       <div className="c-settings__kv-row">
                         <dt className="c-settings__kv-key">当前模型</dt>

@@ -105,6 +105,7 @@ export default function Sidebar(p: Props) {
           style={{ marginLeft: 'auto' }}
           onClick={p.onOpenSettings}
           title="设置"
+          aria-label="设置"
         >
           ⚙
         </button>

@@ -1,12 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
+import ModelPicker from './ModelPicker'
 import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
-import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
-import { PROVIDERS } from '../lib/presets'
+import { type AgentView as Agent, type Config, type Message } from '../mygo'
 import type { ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
 import DirectoryPicker from './DirectoryPicker'
@@ -36,6 +36,8 @@ type Props = {
   onCreateRequest?: () => void
   /** 全局配置的 provider，会话级未设置时用它 */
   globalProvider?: string
+  /** 全局配置的模型，会话级未设置时显示它 */
+  globalModel?: string
   /** 清掉会话级模型设置，回到跟随全局 */
   onClearLLM?: () => void
 }
@@ -431,11 +433,15 @@ export default function AgentView(p: Props) {
           )}
 
           <div
+            className="composer-bar"
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: 4,
               padding: '5px 8px 7px',
+              // 底栏元素不允许被压扁换行：模式按钮变成竖排文字
+              // 是宽度不够时最难看的一种失败方式。
+              flexWrap: 'nowrap',
             }}
           >
             <ModeBtn active={mode === 'chat'} onClick={() => setMode('chat')}>
@@ -447,15 +453,37 @@ export default function AgentView(p: Props) {
 
             {/* 会话级配置：工作目录 + 模型。放在输入框里，
                 跟它影响的「这一轮对话」在同一个视觉区，用户不必去头部找。 */}
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <SessionConfigChips
-                agent={p.agent}
-                fallbackWorkDir={p.workDir}
-                globalProvider={p.globalProvider}
-                onConfig={p.onConfig}
-                onClearLLM={p.onClearLLM}
-                direction="up"
+            <div
+              style={{
+                marginLeft: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                // 窄窗口下这一组可以收缩，但按钮本身不许被压
+                minWidth: 0,
+                flexShrink: 1,
+              }}
+            >
+              {/* 模型选择直接长在输入框底栏：用户换模型时不用离开对话。
+                  工作目录仍然走弹层（它不常改，且需要输入路径）。 */}
+              <ModelPicker
+                current={p.agent.llm?.model || p.globalModel || ''}
+                onPick={(m) =>
+                  p.onConfig({
+                    llm: {
+                      provider: m.provider,
+                      baseUrl: m.baseUrl ?? '',
+                      // 同一 provider 内换模型要保留原 Key，
+                      // 否则用户切个模型就被要求重新填一遍凭据
+                      apiKey: p.agent!.llm?.provider === m.provider ? (p.agent!.llm?.apiKey ?? '') : '',
+                      model: m.model,
+                    },
+                  })
+                }
               />
+              <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
+                <WorkDirChip agent={p.agent} fallbackWorkDir={p.workDir} onConfig={p.onConfig} />
+              </div>
             </div>
 
             <button
@@ -565,87 +593,65 @@ export default function AgentView(p: Props) {
   )
 }
 
-function SessionConfigChips({
+/**
+ * WorkDirChip —— 会话级工作目录。
+ *
+ * 模型选择已经从弹层里搬出去了（它变成输入框底栏的 ModelPicker），
+ * 这里只留工作目录：它不常改，且需要输入路径，适合用弹层。
+ *
+ * 关键区别：改动只影响当前会话，不动其他 agent。所以标题里写明
+ * 「仅影响本会话」，避免用户以为改了全局。
+ */
+function WorkDirChip({
   agent,
   fallbackWorkDir,
-  globalProvider,
   onConfig,
-  onClearLLM,
-  direction = 'down',
 }: {
   agent: Agent
   fallbackWorkDir: string
-  /** 全局配置的 provider，用于在弹层里提示「跟随全局」的实际去向 */
-  globalProvider?: string
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
-  /** 清掉会话级模型设置，回到跟随全局 */
-  onClearLLM?: () => void
-  /** 弹层方向。放在输入框底栏时用 'up'，否则会被输入区挡住。 */
-  direction?: 'down' | 'up'
 }) {
-  const onFollowGlobal = onClearLLM
-  const [open, setOpen] = useState<'none' | 'dir' | 'model'>('none')
-  const [dirDraft, setDirDraft] = useState('')
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState('')
+  const effective = agent.workDir || fallbackWorkDir
 
-  const effectiveDir = agent.workDir || fallbackWorkDir
-  const effectiveProvider = agent.llm?.provider || 'mock'
-  const effectiveModel = agent.llm?.model || ''
-
-  // 切换会话时收起弹层
+  // 切换会话时收起，避免弹层残留在新会话上
   useEffect(() => {
-    setOpen('none')
-  }, [agent.id, agent.llm])
+    setOpen(false)
+  }, [agent.id])
 
-  // Esc 关闭弹层：之前只有点击遮罩能关，键盘用户被卡住
   useEffect(() => {
-    if (open === 'none') return
+    if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen('none')
+      if (e.key === 'Escape') setOpen(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
   return (
-    <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4 }}>
-      {/* 工作目录 chip */}
+    <div style={{ position: 'relative' }}>
       <button
         className="mono"
         onClick={() => {
-          setOpen(open === 'dir' ? 'none' : 'dir')
-          setDirDraft(effectiveDir)
+          setOpen((v) => !v)
+          setDraft(effective)
         }}
-        title={`工作目录：${effectiveDir || '未设置'}（点击修改，仅影响本会话）`}
-        style={chipStyle(open === 'dir')}
+        title={`工作目录：${effective || '未设置'}（点击修改，仅影响本会话）`}
+        style={chipStyle(open)}
       >
-        📁 {shortPath(effectiveDir)}
+        📁 {shortPath(effective)}
         <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
       </button>
 
-      {/* 模型 chip */}
-      <button
-        className="mono"
-        onClick={() => setOpen(open === 'model' ? 'none' : 'model')}
-        title={`模型：${effectiveProvider}${effectiveModel ? ' / ' + effectiveModel : ''}（点击修改，仅影响本会话）`}
-        style={chipStyle(open === 'model')}
-      >
-        ✦ {effectiveModel || effectiveProvider}
-        <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
-      </button>
-
-      {open !== 'none' && (
+      {open && (
         <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 900 }}
-            onClick={() => setOpen('none')}
-          />
+          <div style={{ position: 'fixed', inset: 0, zIndex: 900 }} onClick={() => setOpen(false)} />
           <div
             className="fade-up"
             style={{
               position: 'absolute',
-              ...(direction === 'up'
-                ? { bottom: 'calc(100% + 6px)' }
-                : { top: 'calc(100% + 6px)' }),
+              bottom: 'calc(100% + 6px)',
               right: 0,
               width: 320,
               zIndex: 901,
@@ -656,53 +662,32 @@ function SessionConfigChips({
               padding: 12,
             }}
           >
-            {open === 'dir' ? (
-              <>
-                <div style={popoverLabel}>本会话工作目录</div>
-
-                <DirectoryPicker value={dirDraft} onChange={setDirDraft} />
-
-                <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
-                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                  <button
-                    className="c-btn c-btn--primary c-btn--sm"
-                    style={{ flex: 1 }}
-                    disabled={!dirDraft}
-                    onClick={() => {
-                      onConfig({ workDir: dirDraft })
-                      setOpen('none')
-                    }}
-                  >
-                    应用
-                  </button>
-                  <button
-                    className="c-btn c-btn--ghost c-btn--sm"
-                    onClick={() => {
-                      onConfig({ workDir: '' })
-                      setOpen('none')
-                    }}
-                    title="回落到全局默认目录"
-                  >
-                    跟随全局
-                  </button>
-                </div>
-              </>
-            ) : (
-              <ModelPicker
-                agentId={agent.id}
-                current={agent.llm}
-                globalProvider={globalProvider}
-                onApply={(cfg) => {
-                  onConfig({ llm: cfg })
-                  setOpen('none')
+            <div style={popoverLabel}>本会话工作目录</div>
+            <DirectoryPicker value={draft} onChange={setDraft} />
+            <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+              <button
+                className="c-btn c-btn--primary c-btn--sm"
+                style={{ flex: 1 }}
+                disabled={!draft}
+                onClick={() => {
+                  onConfig({ workDir: draft })
+                  setOpen(false)
                 }}
-                onFollowGlobal={() => {
-                  onFollowGlobal?.()
-                  setOpen('none')
+              >
+                应用
+              </button>
+              <button
+                className="c-btn c-btn--ghost c-btn--sm"
+                onClick={() => {
+                  onConfig({ workDir: '' })
+                  setOpen(false)
                 }}
-                onClose={() => setOpen('none')}
-              />
-            )}
+                title="回落到全局默认目录"
+              >
+                跟随全局
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -710,198 +695,6 @@ function SessionConfigChips({
   )
 }
 
-/**
- * ModelPicker —— 会话级模型选择。
- *
- * 设计原则：凭据只在「设置」里配一次，会话里只选模型。
- * 之前的实现让用户在会话弹层里重新填 Base URL 和 API Key，
- * 还把草稿传给后端拉列表 —— 结果设置里配好的 Key 完全用不上，
- * 用户被要求「再配置一遍」。
- *
- * 现在的行为：
- *   - 打开即用已保存的凭据自动拉取模型列表，不需要额外点击
- *   - provider 没配好时明确告诉他缺什么（Base URL / API Key），
- *     并给一个直接去设置的入口，而不是让他在这里填
- *   - 只列当前 provider 的模型，选中即生效
- */
-function ModelPicker({
-  agentId,
-  current,
-  globalProvider,
-  onApply,
-  onFollowGlobal,
-  onClose,
-}: {
-  agentId: string
-  current?: Config | null
-  globalProvider?: string
-  onApply: (cfg: Config) => void
-  onFollowGlobal: () => void
-  onClose: () => void
-}) {
-  // 会话级未设置时，实际生效的是全局 provider
-  const effectiveProvider = current?.provider || globalProvider || 'mock'
-  const [provider, setProvider] = useState(effectiveProvider)
-  const [models, setModels] = useState<string[]>([])
-  const [model, setModel] = useState(current?.model ?? '')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  // 切换 provider 就自动拉列表——用户不该为了「看到有哪些模型」多点击一次
-  useEffect(() => {
-    let alive = true
-    setLoading(true)
-    setError('')
-    setModels([])
-    API.listModelsFor(agentId, provider)
-      .then((list) => {
-        if (!alive) return
-        setModels(list ?? [])
-        // 没选过模型时自动选第一个，省掉一次操作
-        setModel((m) => m || (list?.[0] ?? ''))
-      })
-      .catch((e) => {
-        if (!alive) return
-        setError(e instanceof Error ? e.message : String(e))
-      })
-      .finally(() => alive && setLoading(false))
-    return () => {
-      alive = false
-    }
-  }, [agentId, provider])
-
-  const apply = () => {
-    onApply({
-      provider,
-      baseUrl: current?.baseUrl ?? '',
-      apiKey: current?.apiKey ?? '',
-      model,
-    })
-  }
-
-  return (
-    <>
-      <div style={popoverLabel}>本会话模型</div>
-
-      {/* provider 选择：只用文字按钮，凭据在设置里管 */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-        {PROVIDERS.map((x) => {
-          const on = provider === x.id
-          return (
-            <button
-              key={x.id}
-              type="button"
-              onClick={() => {
-                setProvider(x.id)
-                setModel('')
-              }}
-              style={{
-                padding: '3px 9px',
-                borderRadius: 'var(--radius-full)',
-                border: `1px solid ${on ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
-                background: on ? 'var(--accent-dim)' : 'var(--bg-surface)',
-                color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
-                fontSize: 'var(--text-xs)',
-                fontFamily: 'inherit',
-                cursor: 'pointer',
-              }}
-            >
-              {x.label.replace('（内置）', '')}
-            </button>
-          )
-        })}
-      </div>
-
-      {/* 模型列表：自动加载，直接点选 */}
-      {loading && <div style={hintStyle}>正在加载 {provider} 的模型列表…</div>}
-
-      {!loading && error && (
-        <div
-          style={{
-            fontSize: 'var(--text-xs)',
-            color: 'var(--warning)',
-            background: 'var(--warning-dim)',
-            border: '1px solid var(--warning-border)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '6px 8px',
-            lineHeight: 1.6,
-            marginBottom: 8,
-          }}
-        >
-          {error}
-          <div style={{ marginTop: 4, color: 'var(--text-tertiary)' }}>
-            凭据在右上角 ⚙ 设置里统一配置，配好后这里会自动列出模型。
-          </div>
-        </div>
-      )}
-
-      {!loading && !error && models.length > 0 && (
-        <div
-          style={{
-            maxHeight: 190,
-            overflowY: 'auto',
-            display: 'grid',
-            gap: 2,
-            marginBottom: 8,
-          }}
-        >
-          {models.map((m) => {
-            const on = m === model
-            return (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setModel(m)}
-                className="mono"
-                style={{
-                  textAlign: 'left',
-                  padding: '5px 9px',
-                  borderRadius: 'var(--radius-sm)',
-                  border: `1px solid ${on ? 'var(--accent-border)' : 'transparent'}`,
-                  background: on ? 'var(--accent-dim)' : 'transparent',
-                  color: on ? 'var(--accent-bright)' : 'var(--text-secondary)',
-                  fontSize: 'var(--text-xs)',
-                  fontFamily: 'inherit',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={(e) => {
-                  if (!on) e.currentTarget.style.background = 'var(--bg-surface-hover)'
-                }}
-                onMouseLeave={(e) => {
-                  if (!on) e.currentTarget.style.background = 'transparent'
-                }}
-              >
-                {on ? '✓ ' : ''}
-                {m}
-              </button>
-            )
-          })}
-        </div>
-      )}
-
-      {!loading && !error && models.length === 0 && (
-        <div style={hintStyle}>这个 provider 没有返回可用模型</div>
-      )}
-
-      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
-        <button
-          className="c-btn c-btn--primary c-btn--sm"
-          style={{ flex: 1 }}
-          onClick={apply}
-          disabled={!model}
-        >
-          应用
-        </button>
-        <button className="c-btn c-btn--ghost c-btn--sm" onClick={onFollowGlobal} title="清掉会话级设置，跟随全局">
-          跟随全局{globalProvider ? `（${globalProvider}）` : ''}
-        </button>
-        <button className="c-btn c-btn--ghost c-btn--sm" onClick={onClose}>
-          取消
-        </button>
-      </div>
-    </>
-  )
-}
 
 function chipStyle(active: boolean): React.CSSProperties {
   return {
@@ -965,6 +758,9 @@ function ModeBtn({
         color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
         background: active ? 'var(--bg-surface-active)' : 'transparent',
         transition: 'all var(--dur-fast) var(--ease)',
+        // 不许被压成竖排：「对话」两个字竖着排是纯视觉故障
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
       }}
     >
       {children}

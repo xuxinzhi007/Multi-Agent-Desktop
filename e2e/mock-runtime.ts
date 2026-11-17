@@ -38,6 +38,22 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       }),
       'API.GetWorkDir': () => '',
       'API.IsAlwaysOnTop': () => false,
+      'API.ListAllModels': () => [
+        { model: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', provider: 'llamacpp', local: true, ready: true, current: true },
+        { model: 'deepseek-chat', provider: 'deepseek', local: false, ready: true, current: false },
+        { model: 'OpenAI（未配置 Key）', provider: 'openai', local: false, ready: false, note: '未配置 Key' },
+      ],
+      'API.Diagnose': () => ({
+        buildStamp: 'test-build',
+        provider: 'mock',
+        model: 'mock',
+        hasKey: true,
+        modelOk: true,
+        modelReply: '通了',
+        agents: [],
+        loops: [],
+        checkedAt: Math.floor(Date.now() / 1000),
+      }),
       'API.CreateAgent': (req) => ({
         id: 'agent-test-1',
         name: (req as { name?: string })?.name ?? 'test',

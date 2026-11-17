@@ -4,9 +4,49 @@ import { call, event } from "mygo-runtime";
 
 // ---- Types ----
 
+/** AgentDiag 是单个 agent 的运行状态摘要。 */
+export interface AgentDiag {
+  id: string;
+  name: string;
+  backend: string;
+  status: string;
+  queueLen: number;
+  messageCount: number;
+  lastError?: string;
+}
+
 /** AgentFocusedEvent 是聚焦 agent 事件。 */
 export interface AgentFocusedEvent {
   agentId: string;
+}
+
+/** AgentLoopEvent 是循环的一次结局（done / failed）。 */
+export interface AgentLoopEvent {
+  id: string;
+  kind: string;
+  iter: number;
+  reason?: string;
+}
+
+/**
+ * AgentStoppedEvent 记录「为什么停」。用户按停止和预算用尽是两回事，
+ * 界面要能说清是哪一种，否则用户不知道为什么没跑完。
+ */
+export interface AgentStoppedEvent {
+  id: string;
+  reason: string;
+  iter: number;
+  used: number;
+}
+
+/** AgentToolEvent 是一次 loop 内工具调用的开始或结束。 */
+export interface AgentToolEvent {
+  id: string;
+  tool: string;
+  /** start | end */
+  phase: string;
+  status?: string;
+  content?: string;
 }
 
 /**
@@ -78,10 +118,42 @@ export interface DeltaEvent {
   delta: string;
 }
 
+/**
+ * Diagnostics 是一次链路自检的结果。
+ *
+ * 为什么要这个：用户反馈「发出去一直排队」时，可能的原因有五六种
+ * （backend 配错、模型连不上、worker 死了、事件没派发、跑的是旧二进制）。
+ * 光看界面分不出是哪一种，只能靠猜和反复重启。
+ * 这里把每一项直接测出来摆在一起。
+ */
+export interface Diagnostics {
+  buildStamp: string;
+  provider: string;
+  model: string;
+  hasKey: boolean;
+  modelOk: boolean;
+  modelErr?: string;
+  modelReply?: string;
+  agents: AgentDiag[];
+  loops: LoopDiag[];
+  checkedAt: number;
+}
+
 /** ErrorEvent 是错误。 */
 export interface ErrorEvent {
   id: string;
   error: string;
+}
+
+/** LoopDiag 是某个 agent 的循环检查点状态，用于判断「停在哪一轮、为什么停」。 */
+export interface LoopDiag {
+  agentId: string;
+  phase: string;
+  iteration: number;
+  usedIter: number;
+  usedTools: number;
+  stopReason?: string;
+  checkpointAt: number;
 }
 
 export interface Message {
@@ -143,6 +215,25 @@ export interface MiniStatus {
   agents: MiniAgentStatus[];
   /** Paused 表示全局已被用户暂停（不再自动推进任务） */
   paused: boolean;
+}
+
+/**
+ * ModelChoice 是模型列表里的一项。
+ *
+ * 只给模型名和一个可点击的完整配置：用户不需要理解「provider / baseUrl /
+ * apiKey / model」这四层结构，他只想「换个模型」。
+ */
+export interface ModelChoice {
+  model: string;
+  provider: string;
+  baseUrl?: string;
+  /** Local 表示本地服务，不需要 Key */
+  local: boolean;
+  /** Current 标记当前正在用的那个 */
+  current: boolean;
+  /** Ready 表示这一项现在就能用（凭据齐 / 本地服务） */
+  ready: boolean;
+  note?: string;
 }
 
 export interface Note {
@@ -221,6 +312,7 @@ export interface SystemInfo {
   arch: string;
   goVersion: string;
   mygo: boolean;
+  buildStamp: string;
 }
 
 export interface ToolCall {
@@ -299,6 +391,13 @@ export const API = {
   detachNoteFromAgent(noteId: string, agentId: string): Promise<AgentView> {
     return call("API.DetachNoteFromAgent", noteId, agentId);
   },
+  /**
+   * Diagnose 跑一次链路自检：真调一次模型，确认能拿到回复。
+   * 不改任何状态，可以随时点。
+   */
+  diagnose(): Promise<Diagnostics> {
+    return call("API.Diagnose");
+  },
   /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
   focusAgent(agentId: string): Promise<void> {
     return call("API.FocusAgent", agentId);
@@ -340,6 +439,16 @@ export const API = {
   },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");
+  },
+  /**
+   * ListAllModels 返回一个扁平的可用模型列表。
+   *
+   * 存在的理由：原来的设置页要用户先选 provider、再填 BaseURL、再填 Key、
+   * 再选模型 —— 四步里任何一步不懂就卡住。而用户真正要做的事只有一件：
+   * 「我现在想用哪个模型」。这里把它压成一次点击。
+   */
+  listAllModels(): Promise<ModelChoice[]> {
+    return call("API.ListAllModels");
   },
   /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
@@ -489,6 +598,13 @@ export const events = {
   agentMessage: event<MessageEvent>("agent.message"),
   agentError: event<ErrorEvent>("agent.error"),
   toolStart: event<ToolStartEvent>("tool.start"),
+  /**
+   * loop 内工具调用与运行结局。循环真的在跑，界面必须能看到，
+   * 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
+   */
+  agentTool: event<AgentToolEvent>("agent.tool"),
+  agentLoop: event<AgentLoopEvent>("agent.loop"),
+  agentStopped: event<AgentStoppedEvent>("agent.stopped"),
   shellStart: event<ShellEvent>("shell.start"),
   shellResult: event<ShellResultEvent>("shell.result"),
   llmConfig: event<Config>("llm.config"),

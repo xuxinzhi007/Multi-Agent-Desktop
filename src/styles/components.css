@@ -1261,3 +1261,278 @@
     animation: none;
   }
 }
+
+/* ---------- 模型列表 ----------
+   只有一个目的：看到模型名，点一下就切。
+   不在这里展示 provider / baseUrl / key —— 那些用户不需要每次看到。 */
+.c-modellist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.c-modellist__item {
+  display: grid;
+  grid-template-columns: 1fr auto 20px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  text-align: left;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.c-modellist__item:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-strong);
+}
+
+.c-modellist__item--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.c-modellist__name {
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-modellist__meta {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.c-modellist__check {
+  text-align: center;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.c-modellist__disabled {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 不可用的项仍然列出来，但明显是灰的：
+   直接隐藏会让用户以为应用不支持它 */
+.c-modellist__item.is-off {
+  opacity: 0.45;
+  cursor: default;
+  border-style: dashed;
+}
+
+.c-modellist__item.is-off:hover {
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+
+.c-modellist__divider {
+  margin: 4px 0 2px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-disabled);
+}
+
+/* ---------- 模型选择器 ----------
+   长在输入框底栏，向上弹出。
+   视觉目标是「轻」：不要卡片网格，不要终端感，
+   就是一份能一眼扫完的名单。 */
+.mp {
+  position: relative;
+}
+
+/* 输入框底栏太窄时，模型选择器整块隐藏 ——
+   留一个被裁掉一半的按钮比没有更糟。
+   设置页里仍可切换模型，功能不丢。 */
+.composer-bar {
+  container-type: inline-size;
+}
+
+/* 空间不足时按「次要程度」依次让位：
+   模型 → 工作目录 → 最后才轮到模式按钮和发送。
+   被裁掉一半的控件比不显示更糟。 */
+@container (max-width: 460px) {
+  .mp {
+    display: none;
+  }
+}
+
+@container (max-width: 380px) {
+  .composer-bar__dir {
+    display: none;
+  }
+}
+
+.mp__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 底栏空间有限：模型名再长也不该把「发送」挤走。
+     必须允许收缩到很小 —— 窄窗口下先牺牲它，而不是牺牲操作按钮。 */
+  max-width: 160px;
+  min-width: 0;
+  flex-shrink: 1;
+  padding: 3px 8px 3px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.mp__trigger:hover,
+.mp__trigger.is-open {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.mp__icon {
+  color: var(--accent-bright);
+  font-size: 10px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.mp__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mp__caret {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  transition: transform 180ms var(--ease);
+}
+
+.mp__trigger.is-open .mp__caret {
+  transform: rotate(180deg);
+}
+
+/* 向上弹出：bottom-full + 8px 间隙，避免遮挡下方内容 */
+.mp__pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  /* 右对齐触发按钮：它贴着底栏右端，
+     左对齐会让浮层向右溢出窗口 */
+  right: 0;
+  z-index: 60;
+  min-width: 240px;
+  max-width: 340px;
+  padding: 5px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  animation: mp-in 160ms var(--ease);
+}
+
+@keyframes mp-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mp__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.mp__item:hover {
+  background: var(--bg-surface-hover);
+}
+
+/* 当前项：浅色高亮 + 加粗 + 勾 */
+.mp__item.is-on {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.mp__item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mp__check {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--accent-bright);
+}
+
+.mp__tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-active);
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.mp__tag--off {
+  background: var(--bg-surface-active);
+  color: var(--text-disabled);
+}
+
+/* 未配置项：整行置灰，但仍然可点 ——
+   点了要给用户一句解释，而不是让按钮变成死的没人知道为什么 */
+.mp__item.is-off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 悬浮时给一点点反馈：说明它确实接收到了指针，
+   只是点了不会切换 */
+.mp__item.is-off:hover {
+  background: var(--bg-surface-active);
+  opacity: 0.65;
+}
+
+.mp__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-subtle);
+}
+
+.mp__empty {
+  padding: 10px 9px;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}

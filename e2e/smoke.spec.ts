@@ -111,3 +111,49 @@ test('设置面板告知用户密钥保存在哪', async ({ page }) => {
     .click()
   await expect(dialog.getByText(/config\.json/)).toBeVisible()
 })
+
+test('设置里有诊断页，能自己看出为什么不动', async ({ page }) => {
+  await page.getByRole('button', { name: '设置' }).first().click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+
+  // 「发出去一直排队」时，用户需要一个能自查的地方，
+  // 而不是反复重启碰运气。
+  await dialog.getByRole('button', { name: /诊断/ }).click()
+  await expect(dialog.getByText('链路自检')).toBeVisible()
+  // 必须显示后端版本 —— 区分「修复无效」和「跑的是旧二进制」
+  await expect(dialog.getByText('test-build')).toBeVisible()
+})
+
+test('模型列表：点一下就切换，不需要先选 provider 再填凭据', async ({ page }) => {
+  await page.getByRole('button', { name: '设置' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: /模型/ }).first().click()
+
+  const list = dialog.getByRole('listbox', { name: '可用模型' })
+  await expect(list).toBeVisible()
+
+  // 每一项只显示模型名，不夹带 BaseURL / Key 之类的配置项
+  const item = list.getByRole('option').filter({ hasText: 'deepseek-chat' })
+  await expect(item).toBeVisible()
+
+  const calls: string[] = []
+  await page.exposeFunction('__rec', (m: string) => calls.push(m))
+  await page.evaluate(() => {
+    const w = window as unknown as { mygo: { call: (m: string, ...a: unknown[]) => Promise<unknown> } }
+    const orig = w.mygo.call
+    w.mygo.call = (method: string, ...args: unknown[]) => {
+      void (window as unknown as { __rec: (m: string) => void }).__rec(method)
+      return orig(method, ...args)
+    }
+  })
+
+  await item.click()
+  await page.waitForTimeout(300)
+
+  // 点一下必须直接落盘，不能再要用户按一次「保存」
+  expect(
+    calls.some((c) => c === 'API.SetLLMConfig'),
+    `点选模型后没有保存，实际调用: ${calls.join(',')}`,
+  ).toBe(true)
+})

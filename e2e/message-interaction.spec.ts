@@ -91,9 +91,9 @@ test('工作目录与模型选择在输入框里，而不是页面头部', async
   await page.waitForSelector('.c-shell')
   await openChatView(page)
 
-  // 输入框区域应当能直接点到目录 chip 和模型 chip
+  // 输入框区域应当能直接点到目录 chip 和模型选择器
   const dirChip = page.locator('button[title*="工作目录"]')
-  const modelChip = page.locator('button[title*="模型"]')
+  const modelChip = page.locator('.mp__trigger')
   await expect(dirChip).toHaveCount(1)
   await expect(modelChip).toHaveCount(1)
 
@@ -123,7 +123,7 @@ test('目录 chip 显示可辨认的路径，不是只有最后一级', async ({
   expect(text.replace(/\s+/g, '')).toMatch(/projects\/shop-web|shop-web/)
 })
 
-test('两个 chip 都能点开配置面板', async ({ page }) => {
+test('目录 chip 和模型选择器都能打开', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
@@ -133,8 +133,47 @@ test('两个 chip 都能点开配置面板', async ({ page }) => {
   await expect(page.getByText('本会话工作目录')).toBeVisible()
   await page.keyboard.press('Escape')
 
-  await page.locator('button[title*="模型"]').click()
-  await expect(page.getByText('本会话模型')).toBeVisible()
+  // 模型不再走弹层，而是直接列出模型供点选
+  await page.locator('.mp__trigger').click()
+  await expect(page.getByRole('listbox', { name: '可用模型' })).toBeVisible()
+})
+
+test('模型下拉向上弹出，不遮挡输入框', async ({ page }) => {
+  await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+
+  const trigger = page.locator('.mp__trigger')
+  await trigger.click()
+  const pop = page.getByRole('listbox', { name: '可用模型' })
+  await expect(pop).toBeVisible()
+
+  const popBox = await pop.boundingBox()
+  const triggerBox = await trigger.boundingBox()
+  expect(popBox).not.toBeNull()
+  expect(triggerBox).not.toBeNull()
+  if (popBox && triggerBox) {
+    // 向上弹出：浮层的底边必须在触发按钮顶边之上
+    expect(popBox.y + popBox.height).toBeLessThanOrEqual(triggerBox.y + 2)
+  }
+})
+
+test('点未配置的模型：给出提示且不切换、下拉保持展开', async ({ page }) => {
+  await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+
+  await page.locator('.mp__trigger').click()
+  const pop = page.getByRole('listbox', { name: '可用模型' })
+  const off = pop.getByRole('option').filter({ hasText: '未配置' }).first()
+  await expect(off).toBeVisible()
+  await off.click()
+
+  // 拦截选择：下拉必须还开着，否则用户要再点一次才能回到这里
+  await expect(pop).toBeVisible()
+  await expect(page.getByText(/尚未配置/)).toBeVisible()
 })
 
 // 右键菜单位置的自动化断言暂时移除：在 mock runtime 下 mouse.click(button:'right')
@@ -179,4 +218,32 @@ test('已删除 agent 的 @提及仍显示为 chip，而不是退回纯文本', 
   const chip = page.locator('.c-mention', { hasText: '@已离职的同事' })
   await expect(chip.first()).toBeVisible()
   await expect(page.getByText('你看下这个').first()).toBeVisible()
+})
+
+test('窄窗口下模型选择器让位，发送按钮必须仍可见', async ({ page }) => {
+  // 底栏是 flex 单行，元素一多就会把操作按钮挤出可视区。
+  // 「发送」看不见 = 这个页面没法用。
+  await page.setViewportSize({ width: 760, height: 620 })
+  await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+  await page.waitForTimeout(300)
+
+  const send = page.getByRole('button', { name: '发送', exact: true })
+  await expect(send).toBeVisible()
+
+  const sendBox = await send.boundingBox()
+  expect(sendBox).not.toBeNull()
+  if (sendBox) {
+    // 必须完整落在视口内，不能被裁掉一半
+    expect(sendBox.x + sendBox.width).toBeLessThanOrEqual(760)
+  }
+
+  // 模式按钮也不许被压成竖排
+  const modeBox = await page.getByRole('button', { name: '对话', exact: true }).boundingBox()
+  expect(modeBox).not.toBeNull()
+  if (modeBox) {
+    expect(modeBox.width, '「对话」被压成竖排了').toBeGreaterThan(modeBox.height)
+  }
 })

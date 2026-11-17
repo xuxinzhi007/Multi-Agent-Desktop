@@ -168,6 +168,7 @@ export default function App() {
             }
           }}
           globalProvider={s.llm.provider}
+          globalModel={s.llm.model}
           onClearLLM={() => activeAgent && s.send('agent.clearLLM', { id: activeAgent.id })}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}

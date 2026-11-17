@@ -41,6 +41,8 @@ type State = {
   focusAgentId: string | null
   /** 已经乐观插入消息、但后端还没回执的 agent */
   pending: Record<string, boolean>
+  /** 最近一次停止的原因与进度。「为什么停」必须能说清，不能只显示「已停止」。 */
+  stops: Record<string, { reason: string; iter: number; used: number; at: number }>
 }
 
 const EMPTY: State = {
@@ -61,6 +63,7 @@ const EMPTY: State = {
   tokenUsage: {},
   focusAgentId: null,
   pending: {},
+  stops: {},
 }
 
 export function useBackend() {
@@ -157,6 +160,45 @@ export function useBackend() {
       setState((s) => ({
         ...s,
         tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
+      }))
+    })
+    // loop 内工具调用：start 时记一条「正在做什么」，
+    // end 时补上结果。这些信息让用户能看到循环真的在推进，
+    // 而不是只看到一个「运行中」然后干等。
+    sub(events.agentTool, (e) => {
+      // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
+      // 未知状态一律当 ok —— 不要因为一个新状态值就让类型崩掉。
+      const status: ToolCall['status'] =
+        e.phase === 'start'
+          ? 'running'
+          : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
+            ? 'error'
+            : 'ok'
+      setState((s) => {
+        // 同一次调用的 start 与 end 是同一条记录，按 id+tool 去重后追加
+        const prev = s.tools.filter((t) => !(t.id === e.id && t.tool === e.tool))
+        return {
+          ...s,
+          tools: [
+            ...prev,
+            { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
+          ].slice(-60),
+        }
+      })
+    })
+    // 循环结局：done / failed。失败时要把原因带到界面上，
+    // 否则用户只看到「停止了」但不知道为什么。
+    sub(events.agentLoop, (e) => {
+      setState((s) => {
+        if (e.kind !== 'failed') return s
+        return { ...s, errors: { ...s.errors, [e.id]: e.reason || '循环失败' } }
+      })
+    })
+    // 停止原因：用户按停止和预算用尽是两回事，必须能区分。
+    sub(events.agentStopped, (e) => {
+      setState((s) => ({
+        ...s,
+        stops: { ...s.stops, [e.id]: { reason: e.reason, iter: e.iter, used: e.used, at: Date.now() } },
       }))
     })
     // 命令执行结果直接进对话流，不再另开一个面板：

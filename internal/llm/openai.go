@@ -91,8 +91,8 @@ func ListModels(ctx context.Context, cfg Config) ([]string, error) {
 func (c *openAICompat) Stream(ctx context.Context, msgs []Message) (<-chan Chunk, error) {
 	// 需要鉴权的 provider 缺 Key 时立刻失败。
 	// 否则请求会被发出去（要么被拒要么挂起），用户只看到「排队中」不知原因。
-	// ollama 是本地服务，不需要 Key。
-	if c.cfg.APIKey == "" && c.name != "ollama" {
+	// ollama / llamacpp 是本地服务，不需要 Key。
+	if c.cfg.APIKey == "" && !IsLocalProvider(c.name) {
 		return nil, fmt.Errorf("%w（当前 provider: %s）", ErrMissingAPIKey, c.name)
 	}
 
