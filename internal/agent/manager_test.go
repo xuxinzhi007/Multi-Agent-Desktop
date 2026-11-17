@@ -108,6 +108,7 @@ func TestQueueSerialOrder(t *testing.T) {
 	})
 
 	a := m.Create("a1", "T", "r")
+	a.Backend = "mock"
 	for _, text := range []string{"one", "two", "three"} {
 		if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: text}); err != nil {
 			t.Fatalf("Prompt(%s): %v", text, err)
@@ -220,6 +221,7 @@ func TestStopReturnsToIdleAndStaysThere(t *testing.T) {
 	})
 
 	a := m.Create("", "T", "r")
+	a.Backend = "mock"
 	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "hi"}); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
@@ -256,6 +258,7 @@ func TestStopReturnsToIdleAndStaysThere(t *testing.T) {
 func TestPromptAfterStopWorks(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
 	a := m.Create("", "T", "r")
+	a.Backend = "mock"
 
 	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "first"}); err != nil {
 		t.Fatalf("Prompt: %v", err)

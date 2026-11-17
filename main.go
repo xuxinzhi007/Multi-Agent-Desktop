@@ -446,7 +446,7 @@ func (s *API) ListAgents() []AgentView {
 
 // CreateAgent 新建一个 agent。
 func (s *API) CreateAgent(req CreateAgentRequest) AgentView {
-	a := s.mgr.Create("", req.Name, req.Role)
+	a := s.mgr.CreateWithBackend("", req.Name, req.Role, "loop")
 	return toAgentView(a)
 }
 
@@ -682,6 +682,9 @@ func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
 			log.Printf("persist llm config: %v", err)
 		}
 	}
+	if cfg.Provider != "" && cfg.Provider != "mock" {
+		s.rememberProvider(cfg)
+	}
 	LLMConfigEvt.Emit(s.win, cfg)
 	return cfg
 }
@@ -717,26 +720,30 @@ type ModelChoice struct {
 // 「我现在想用哪个模型」。这里把它压成一次点击。
 func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 	base := s.mgr.LLMConfig()
+	creds := s.providerCreds()
 	var out []ModelChoice
 
-	// add 探测一个 provider，把它的模型摊平进列表。
-	// 连不上时也保留一项占位：用户需要知道「这个能力存在但当前不可用」，
-	// 直接隐藏会让人以为应用根本不支持。
 	add := func(provider string) {
-		cfg := llm.ApplyDefaults(llm.Config{Provider: provider})
-		// 只有当前正在用的那个 provider 才有可信凭据；
-		// 其它 provider 没有 Key，探测必然失败，占位显示即可。
-		configured := provider == base.Provider
-		if configured {
-			cfg.BaseURL = cmp.Or(base.BaseURL, cfg.BaseURL)
-			cfg.APIKey = base.APIKey
+		cfg, configured := creds[provider]
+		if !configured {
+			cfg = llm.ApplyDefaults(llm.Config{Provider: provider})
 		}
 		local := llm.IsLocalProvider(provider)
-
-		if !local && (!configured || cfg.APIKey == "") {
+		if !configured {
 			out = append(out, ModelChoice{
-				Model:    providerName(provider),
+				Model:    providerLabel(provider),
 				Provider: provider,
+				Local:    local,
+				Ready:    false,
+				Note:     "未保存",
+			})
+			return
+		}
+		if !local && cfg.APIKey == "" {
+			out = append(out, ModelChoice{
+				Model:    providerLabel(provider),
+				Provider: provider,
+				BaseURL:  cfg.BaseURL,
 				Ready:    false,
 				Note:     "未配置 Key",
 			})
@@ -748,7 +755,7 @@ func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 		models, err := llm.ListModels(listCtx, cfg)
 		if err != nil {
 			out = append(out, ModelChoice{
-				Model:    providerName(provider),
+				Model:    providerLabel(provider),
 				Provider: provider,
 				BaseURL:  cfg.BaseURL,
 				Local:    local,
@@ -763,28 +770,198 @@ func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 				Provider: provider,
 				BaseURL:  cfg.BaseURL,
 				Local:    local,
-				Current:  configured && base.Model == m,
+				Current:  provider == base.Provider && base.Model == m,
 				Ready:    true,
 			})
 		}
 	}
 
-	add("llamacpp")
-	add("deepseek")
-	add("openai")
+	for _, id := range knownProviderIDs {
+		add(id)
+	}
 	return out
 }
 
-func providerName(p string) string {
+func providerLabel(p string) string {
 	switch p {
 	case "llamacpp":
-		return "本地模型（未启动）"
+		return "本地 llama.cpp"
+	case "ollama":
+		return "Ollama"
 	case "deepseek":
-		return "DeepSeek（未配置 Key）"
+		return "DeepSeek"
 	case "openai":
-		return "OpenAI（未配置 Key）"
+		return "OpenAI"
+	case "claude":
+		return "Claude"
 	}
 	return p
+}
+
+var knownProviderIDs = []string{"llamacpp", "ollama", "deepseek", "openai", "claude"}
+
+func knownProvider(id string) bool {
+	for _, p := range knownProviderIDs {
+		if p == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ProviderEndpoint 是设置里的一条厂商连接：保存过没有、现在是否生效、加载到哪些模型。
+type ProviderEndpoint struct {
+	Provider string   `json:"provider"`
+	BaseURL  string   `json:"baseUrl,omitempty"`
+	HasKey   bool     `json:"hasKey"`
+	Saved    bool     `json:"saved"`
+	OK       bool     `json:"ok"`
+	Reason   string   `json:"reason,omitempty"`
+	Models   []string `json:"models,omitempty"`
+}
+
+// ListProviderEndpoints 列出全部厂商。已保存的会当场检查连接，并带回它的模型。
+func (s *API) ListProviderEndpoints(ctx context.Context) []ProviderEndpoint {
+	saved := s.providerCreds()
+	out := make([]ProviderEndpoint, len(knownProviderIDs))
+	var wg sync.WaitGroup
+	for i, id := range knownProviderIDs {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			cfg, ok := saved[id]
+			out[i] = s.endpointFor(ctx, id, cfg, ok)
+		}(i, id)
+	}
+	wg.Wait()
+	return out
+}
+
+// SaveProvider 保存一个厂商的地址和 Key，然后检查它现在是否生效。
+func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint, error) {
+	if !knownProvider(cfg.Provider) {
+		return ProviderEndpoint{}, fmt.Errorf("不支持的服务厂商 %s", cfg.Provider)
+	}
+	cfg = llm.ApplyDefaults(cfg)
+	if prev, ok := s.mgr.SavedProvider(cfg.Provider); ok {
+		if cfg.APIKey == "" {
+			cfg.APIKey = prev.APIKey
+		}
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = prev.BaseURL
+		}
+	}
+	cfg.Model = ""
+	if cfg.BaseURL == "" {
+		return ProviderEndpoint{}, fmt.Errorf("请先填写服务地址")
+	}
+	if !llm.IsLocalProvider(cfg.Provider) && cfg.APIKey == "" {
+		return ProviderEndpoint{}, fmt.Errorf("请先填写 API Key")
+	}
+	s.rememberProvider(cfg)
+	base := s.mgr.LLMConfig()
+	if base.Provider == cfg.Provider {
+		base.BaseURL = cfg.BaseURL
+		base.APIKey = cfg.APIKey
+		s.mgr.SetLLMConfig(base)
+		if s.settings != nil {
+			_ = s.settings.SetLLM(base)
+		}
+		LLMConfigEvt.Emit(s.win, base)
+	} else if base.Provider == "" || base.Provider == "mock" {
+		s.mgr.SetLLMConfig(cfg)
+		if s.settings != nil {
+			_ = s.settings.SetLLM(cfg)
+		}
+		LLMConfigEvt.Emit(s.win, cfg)
+	}
+	ep := s.endpointFor(ctx, cfg.Provider, cfg, true)
+	return ep, nil
+}
+
+func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved bool) ProviderEndpoint {
+	ep := ProviderEndpoint{Provider: id, Saved: saved}
+	if !saved {
+		ep.Reason = "未保存"
+		return ep
+	}
+	cfg = llm.ApplyDefaults(cfg)
+	ep.BaseURL = cfg.BaseURL
+	ep.HasKey = cfg.APIKey != ""
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	models, err := s.listModelsWithSavedCreds(cctx, cfg)
+	if err != nil {
+		ep.Reason = err.Error()
+		return ep
+	}
+	ep.OK = true
+	ep.Models = models
+	return ep
+}
+
+func (s *API) providerCreds() map[string]llm.Config {
+	out := map[string]llm.Config{}
+	if s.mgr == nil {
+		return out
+	}
+	for _, p := range s.mgr.Providers() {
+		if p.Provider == "" || p.Provider == "mock" {
+			continue
+		}
+		out[p.Provider] = llm.ApplyDefaults(p)
+	}
+	base := s.mgr.LLMConfig()
+	if base.Provider == "" || base.Provider == "mock" {
+		return out
+	}
+	prev, ok := out[base.Provider]
+	if !ok {
+		out[base.Provider] = llm.ApplyDefaults(base)
+		return out
+	}
+	if prev.APIKey == "" {
+		prev.APIKey = base.APIKey
+	}
+	if prev.BaseURL == "" {
+		prev.BaseURL = base.BaseURL
+	}
+	out[base.Provider] = llm.ApplyDefaults(prev)
+	return out
+}
+
+func (s *API) rememberProvider(cfg LLMConfig) {
+	if s.mgr == nil || cfg.Provider == "" || cfg.Provider == "mock" {
+		return
+	}
+	if s.settings != nil {
+		saved, err := s.settings.UpsertProvider(cfg)
+		if err != nil {
+			log.Printf("persist provider: %v", err)
+			s.mgr.SetProviders(upsertProviderList(s.mgr.Providers(), cfg))
+			return
+		}
+		s.mgr.SetProviders(saved)
+		return
+	}
+	s.mgr.SetProviders(upsertProviderList(s.mgr.Providers(), cfg))
+}
+
+func upsertProviderList(list []llm.Config, cfg llm.Config) []llm.Config {
+	next := make([]llm.Config, 0, len(list)+1)
+	replaced := false
+	for _, p := range list {
+		if p.Provider == cfg.Provider {
+			next = append(next, cfg)
+			replaced = true
+			continue
+		}
+		next = append(next, p)
+	}
+	if !replaced {
+		next = append(next, cfg)
+	}
+	return next
 }
 
 func reasonOf(err error) string {
@@ -1805,10 +1982,17 @@ func main() {
 		settings, _ = config.Open("") // 降级为内存配置，应用仍可启动
 	}
 	effective := config.ApplyEnv(settings.Get())
+	if len(effective.Providers) == 0 && effective.LLM.Provider != "" && effective.LLM.Provider != "mock" {
+		effective.Providers = []llm.Config{effective.LLM}
+		if err := settings.SetProviders(effective.Providers); err != nil {
+			log.Printf("persist providers: %v", err)
+		}
+	}
 	_ = settings.SetLLM(effective.LLM)
 
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
+	mgr.SetProviders(effective.Providers)
 	homeDir := mustHome()
 	if effective.WorkDir != "" {
 		homeDir = effective.WorkDir

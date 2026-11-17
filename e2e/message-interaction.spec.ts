@@ -123,6 +123,22 @@ test('目录 chip 显示可辨认的路径，不是只有最后一级', async ({
   expect(text.replace(/\s+/g, '')).toMatch(/projects\/shop-web|shop-web/)
 })
 
+test('打开会话后，显示的模型已经写进这次对话', async ({ page, callLog }) => {
+  await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+
+  // 没点过选择器，按钮上的名字就是已经记到这次对话里的模型。
+  await expect(page.locator('.mp__label')).toContainText('qwen2')
+  await expect
+    .poll(async () => {
+      const calls = await callLog()
+      return calls.some((c) => c.method === 'API.SetAgentLLM')
+    })
+    .toBe(true)
+})
+
 test('目录 chip 和模型选择器都能打开', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')

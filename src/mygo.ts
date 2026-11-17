@@ -263,6 +263,17 @@ export interface PromptRequest {
   channelId?: string;
 }
 
+/** ProviderEndpoint 是设置里的一条厂商连接：保存过没有、现在是否生效、加载到哪些模型。 */
+export interface ProviderEndpoint {
+  provider: string;
+  baseUrl?: string;
+  hasKey: boolean;
+  saved: boolean;
+  ok: boolean;
+  reason?: string;
+  models?: string[];
+}
+
 /**
  * ProviderStatus 描述一个 provider 在当前设置下是否可用。
  * 前端据此把「没配好的 provider」标出来，而不是等用户点了才报错。
@@ -490,6 +501,10 @@ export const API = {
   listNotesByTag(tag: string): Promise<Note[]> {
     return call("API.ListNotesByTag", tag);
   },
+  /** ListProviderEndpoints 列出全部厂商。已保存的会当场检查连接，并带回它的模型。 */
+  listProviderEndpoints(): Promise<ProviderEndpoint[]> {
+    return call("API.ListProviderEndpoints");
+  },
   /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
@@ -531,6 +546,10 @@ export const API = {
   /** RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("API.RunShell", req);
+  },
+  /** SaveProvider 保存一个厂商的地址和 Key，然后检查它现在是否生效。 */
+  saveProvider(cfg: Config): Promise<ProviderEndpoint> {
+    return call("API.SaveProvider", cfg);
   },
   /** SearchNotes 全文搜索笔记。 */
   searchNotes(text: string, limit: number): Promise<Note[]> {

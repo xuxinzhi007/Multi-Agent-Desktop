@@ -13,6 +13,7 @@ import (
 
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/channel"
+	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/llm"
 )
 
@@ -183,6 +184,50 @@ func TestProvidersStatus(t *testing.T) {
 	}
 	if !strings.Contains(oa.Reason, "Base URL") {
 		t.Errorf("openai 的未就绪原因 = %q, 应当提示缺 Base URL", oa.Reason)
+	}
+}
+
+func TestSaveProviderKeepsList(t *testing.T) {
+	s := newTestAPI(t)
+	st, err := config.Open(filepath.Join(t.TempDir(), config.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.settings = st
+	ctx := context.Background()
+	dead := "http://127.0.0.1:1"
+	if _, err := s.SaveProvider(ctx, llm.Config{Provider: "llamacpp", BaseURL: dead}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveProvider(ctx, llm.Config{Provider: "deepseek", BaseURL: dead, APIKey: "sk-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveProvider(ctx, llm.Config{Provider: "deepseek", BaseURL: dead}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s.mgr.SavedProvider("deepseek")
+	if !ok || got.APIKey != "sk-1" {
+		t.Fatalf("deepseek = %+v ok=%v", got, ok)
+	}
+	saved := 0
+	for _, row := range s.ListProviderEndpoints(ctx) {
+		if !row.Saved {
+			continue
+		}
+		saved++
+		if row.OK {
+			t.Fatalf("%s 连的是关闭端口，不该生效", row.Provider)
+		}
+	}
+	if saved != 2 {
+		t.Fatalf("saved = %d", saved)
+	}
+	again, err := config.Open(st.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Get().Providers) != 2 {
+		t.Fatalf("disk providers = %+v", again.Get().Providers)
 	}
 }
 

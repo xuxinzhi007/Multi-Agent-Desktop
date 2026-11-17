@@ -119,10 +119,24 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     createdAt: now(),
     messages: [],
     queueLen: 0,
-    backend: (req as { backend?: string })?.backend ?? 'loop',
+    backend: 'loop',
   }),
   'API.ListModelsFor': () => ['demo-model'],
   'API.ListModels': () => ['demo-model'],
+  'API.ListProviderEndpoints': () => [
+    { provider: 'llamacpp', baseUrl: 'http://127.0.0.1:8080', saved: false, ok: false, reason: '未保存' },
+  ],
+  'API.SaveProvider': (cfg: unknown) => {
+    const c = cfg as { provider?: string; baseUrl?: string; apiKey?: string }
+    return {
+      provider: c.provider ?? '',
+      baseUrl: c.baseUrl ?? '',
+      saved: true,
+      ok: true,
+      hasKey: !!c.apiKey,
+      models: ['demo-model'],
+    }
+  },
   'API.GetTheme': () => 'dark',
   'API.GetAgentLLM': () => ({ provider: '', baseUrl: '', apiKey: '', model: '' }),
 }

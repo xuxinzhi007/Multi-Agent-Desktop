@@ -64,7 +64,19 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         createdAt: Date.now() / 1000,
         messages: [],
         queueLen: 0,
-        backend: (req as { backend?: string })?.backend ?? 'mock',
+        backend: 'loop',
+        workDir: '',
+      }),
+      'API.CreateCLIAgent': (name, role, backend) => ({
+        id: 'agent-test-1',
+        name: name ?? 'test',
+        role: role ?? '',
+        color: '#5b9dff',
+        status: 'idle',
+        createdAt: Date.now() / 1000,
+        messages: [],
+        queueLen: 0,
+        backend: backend ?? 'loop',
         workDir: '',
       }),
       'API.CreateChannel': () => ({
@@ -78,6 +90,31 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
       'API.SetWorkDir': () => undefined,
       'API.ListModels': () => ['mock'],
+      'API.ListProviderEndpoints': () => [
+        {
+          provider: 'llamacpp',
+          baseUrl: 'http://127.0.0.1:8080',
+          saved: true,
+          ok: true,
+          hasKey: false,
+          models: ['qwen2.5-0.5b'],
+        },
+        { provider: 'ollama', saved: false, ok: false, reason: '未保存' },
+        { provider: 'deepseek', saved: false, ok: false, reason: '未保存' },
+        { provider: 'openai', saved: false, ok: false, reason: '未保存' },
+        { provider: 'claude', saved: false, ok: false, reason: '未保存' },
+      ],
+      'API.SaveProvider': (cfg) => {
+        const c = cfg as { provider?: string; baseUrl?: string; apiKey?: string }
+        return {
+          provider: c.provider ?? '',
+          baseUrl: c.baseUrl ?? '',
+          saved: true,
+          ok: true,
+          hasKey: !!c.apiKey,
+          models: ['from-vendor'],
+        }
+      },
       'API.IslandResize': () => true,
       'API.PauseAll': () => 2,
       'API.ResumeAll': () => 0,

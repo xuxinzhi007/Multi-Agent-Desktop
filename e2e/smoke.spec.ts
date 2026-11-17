@@ -67,7 +67,7 @@ test('提交新建 Agent 会调用 CreateAgent', async ({ page, callLog }) => {
 
   await expect(page.getByRole('dialog')).toBeHidden()
   const calls = await callLog()
-  expect(calls.some((c) => c.method === 'API.CreateAgent')).toBe(true)
+  expect(calls.some((c) => c.method === 'API.CreateCLIAgent' && c.args[2] === 'loop')).toBe(true)
 })
 
 test('设置弹窗能打开且分组可见', async ({ page }) => {
@@ -77,7 +77,7 @@ test('设置弹窗能打开且分组可见', async ({ page }) => {
   // 左侧分类导航三个入口都在，默认落在「外观」
   const nav = page.getByRole('navigation', { name: '设置分类' })
   await expect(nav.getByRole('button', { name: '外观' })).toBeVisible()
-  await expect(nav.getByRole('button', { name: /模型/ })).toBeVisible()
+  await expect(nav.getByRole('button', { name: '连接' })).toBeVisible()
   await expect(nav.getByRole('button', { name: '关于' })).toBeVisible()
   await expect(page.getByRole('radiogroup', { name: '主题' })).toBeVisible()
   await page.keyboard.press('Escape')
@@ -125,37 +125,27 @@ test('设置里有诊断页，能自己看出为什么不动', async ({ page }) 
   await expect(dialog.getByText('test-build')).toBeVisible()
 })
 
-test('模型列表：点一下就切换，不需要先选 provider 再填凭据', async ({ page }) => {
+test('连接页按厂商保存，生效的会标出来', async ({ page, callLog }) => {
   await page.getByRole('button', { name: '设置' }).click()
   const dialog = page.getByRole('dialog')
-  await dialog.getByRole('button', { name: /模型/ }).first().click()
+  await dialog.getByRole('button', { name: '连接' }).click()
 
-  const list = dialog.getByRole('listbox', { name: '可用模型' })
-  await expect(list).toBeVisible()
+  const saved = dialog.getByRole('list', { name: '已保存的服务' })
+  await expect(saved).toBeVisible()
+  await expect(saved.getByRole('listitem').filter({ hasText: '生效' })).toBeVisible()
+  await expect(saved.getByText('qwen2.5-0.5b')).toBeVisible()
+  await expect(dialog.getByRole('listbox', { name: '可用模型' })).toHaveCount(0)
 
-  // 每一项只显示模型名，不夹带 BaseURL / Key 之类的配置项
-  const item = list.getByRole('option').filter({ hasText: 'deepseek-chat' })
-  await expect(item).toBeVisible()
+  await dialog.getByRole('list', { name: '服务厂商' }).getByRole('button', { name: /DeepSeek/ }).click()
+  await dialog.getByRole('textbox', { name: 'API Key' }).fill('sk-test')
+  await dialog.getByRole('button', { name: '保存并检查' }).click()
 
-  const calls: string[] = []
-  await page.exposeFunction('__rec', (m: string) => calls.push(m))
-  await page.evaluate(() => {
-    const w = window as unknown as { mygo: { call: (m: string, ...a: unknown[]) => Promise<unknown> } }
-    const orig = w.mygo.call
-    w.mygo.call = (method: string, ...args: unknown[]) => {
-      void (window as unknown as { __rec: (m: string) => void }).__rec(method)
-      return orig(method, ...args)
-    }
-  })
+  await expect(saved.getByRole('listitem').filter({ hasText: 'DeepSeek' }).getByText('生效')).toBeVisible()
+  await expect(saved.getByText('from-vendor')).toBeVisible()
 
-  await item.click()
-  await page.waitForTimeout(300)
-
-  // 点一下必须直接落盘，不能再要用户按一次「保存」
-  expect(
-    calls.some((c) => c === 'API.SetLLMConfig'),
-    `点选模型后没有保存，实际调用: ${calls.join(',')}`,
-  ).toBe(true)
+  const calls = await callLog()
+  expect(calls.some((c) => c.method === 'API.SaveProvider')).toBe(true)
+  expect(calls.some((c) => c.method === 'API.ListProviderEndpoints')).toBe(true)
 })
 
 test('源码比进程新时，诊断页必须警告「后端是旧版本」', async ({ page }) => {

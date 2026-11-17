@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import { API } from '../mygo'
+import { API, type ProviderEndpoint } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
+import DiagnosePanel from './DiagnosePanel'
 
 type Props = {
   open: boolean
@@ -13,14 +14,211 @@ type Props = {
   onSave: (cfg: LLMConfig) => void
 }
 
-import DiagnosePanel from './DiagnosePanel'
-import ModelList from './ModelList'
+const VENDORS: { id: string; label: string; local: boolean; baseUrl: string }[] = [
+  { id: 'llamacpp', label: '本地 llama.cpp', local: true, baseUrl: 'http://127.0.0.1:8080' },
+  { id: 'ollama', label: 'Ollama', local: true, baseUrl: 'http://127.0.0.1:11434' },
+  { id: 'deepseek', label: 'DeepSeek', local: false, baseUrl: 'https://api.deepseek.com' },
+  { id: 'openai', label: 'OpenAI', local: false, baseUrl: 'https://api.openai.com' },
+  { id: 'claude', label: 'Claude', local: false, baseUrl: 'https://api.anthropic.com' },
+]
+
+function errText(e: unknown): string {
+  if (e instanceof Error && e.message) return e.message
+  if (typeof e === 'string' && e) return e
+  if (e && typeof e === 'object' && 'message' in e) {
+    const m = (e as { message?: unknown }).message
+    if (typeof m === 'string' && m) return m
+  }
+  return '连接失败'
+}
+
+function vendorLabel(id: string): string {
+  return VENDORS.find((v) => v.id === id)?.label || id
+}
+
+function ProviderBoard() {
+  const [rows, setRows] = useState<ProviderEndpoint[]>([])
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [showKey, setShowKey] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [formErr, setFormErr] = useState('')
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      setRows(await API.listProviderEndpoints())
+    } catch (e) {
+      setFormErr(errText(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  const startEdit = (id: string) => {
+    const row = rows.find((r) => r.provider === id)
+    const preset = VENDORS.find((v) => v.id === id)
+    setEditing(id)
+    setBaseUrl(row?.baseUrl || preset?.baseUrl || '')
+    setApiKey('')
+    setFormErr('')
+  }
+
+  const save = async () => {
+    if (!editing) return
+    setBusy(true)
+    setFormErr('')
+    try {
+      const ep = await API.saveProvider({
+        provider: editing,
+        baseUrl,
+        apiKey,
+        model: '',
+      })
+      setRows((cur) => {
+        const next = cur.some((r) => r.provider === ep.provider)
+          ? cur.map((r) => (r.provider === ep.provider ? ep : r))
+          : [...cur, ep]
+        return next
+      })
+    } catch (e) {
+      setFormErr(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saved = rows.filter((r) => r.saved)
+  const current = VENDORS.find((v) => v.id === editing)
+  const editingRow = rows.find((r) => r.provider === editing)
+
+  return (
+    <>
+      <section className="c-settings__card">
+        <div className="c-settings__card-head">
+          <div>
+            <div className="c-settings__card-title">已保存</div>
+            <div className="c-settings__card-sub">检查通过的标成生效，并列出这个厂商加载到的模型</div>
+          </div>
+        </div>
+        <div className="c-settings__card-body">
+          {loading && <p className="c-settings__prose">正在检查已保存的服务…</p>}
+          {!loading && saved.length === 0 && <p className="c-settings__prose">还没有保存的服务。</p>}
+          <div role="list" aria-label="已保存的服务" className="c-providers">
+            {saved.map((row) => (
+              <div key={row.provider} role="listitem" className="c-providers__row">
+                <div className="c-providers__main">
+                  <span className="c-providers__name">{vendorLabel(row.provider)}</span>
+                  <span className="c-providers__url">{row.baseUrl}</span>
+                  <span className={`c-providers__badge ${row.ok ? 'is-ok' : 'is-bad'}`}>
+                    {row.ok ? '生效' : '未生效'}
+                  </span>
+                </div>
+                {row.ok && row.models && row.models.length > 0 && (
+                  <ul className="c-providers__models" aria-label={`${vendorLabel(row.provider)} 的模型`}>
+                    {row.models.map((m) => (
+                      <li key={m}>{m}</li>
+                    ))}
+                  </ul>
+                )}
+                {!row.ok && row.reason && <p className="c-settings__hint">{row.reason}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="c-settings__card">
+        <div className="c-settings__card-head">
+          <div>
+            <div className="c-settings__card-title">服务厂商</div>
+            <div className="c-settings__card-sub">选一个厂商，填地址和 Key，保存后立刻检查</div>
+          </div>
+        </div>
+        <div className="c-settings__card-body">
+          <div role="list" aria-label="服务厂商" className="c-providers">
+            {VENDORS.map((v) => {
+              const row = rows.find((r) => r.provider === v.id)
+              const on = editing === v.id
+              return (
+                <div key={v.id} role="listitem" className={`c-providers__row ${on ? 'is-on' : ''}`}>
+                  <button type="button" className="c-providers__pick" onClick={() => startEdit(v.id)}>
+                    <span className="c-providers__name">{v.label}</span>
+                    <span className="c-providers__url">
+                      {row?.saved ? '已保存' : '未保存'}
+                      {row?.ok ? ' · 生效' : ''}
+                    </span>
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+
+          {editing && (
+            <>
+              <label className="c-settings__field">
+                <span className="c-settings__field-label">服务地址</span>
+                <input
+                  className="c-settings__input"
+                  aria-label="服务地址"
+                  value={baseUrl}
+                  placeholder={current?.baseUrl || 'https://'}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                />
+              </label>
+              <label className="c-settings__field">
+                <span className="c-settings__field-label">API Key</span>
+                <span className="c-settings__input-row">
+                  <input
+                    className="c-settings__input"
+                    aria-label="API Key"
+                    type={showKey ? 'text' : 'password'}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={apiKey}
+                    placeholder={
+                      current?.local
+                        ? '本地服务可以留空'
+                        : editingRow?.hasKey
+                          ? '已保存，留空则不修改'
+                          : 'sk-…'
+                    }
+                    onChange={(e) => setApiKey(e.target.value)}
+                  />
+                  <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowKey((v) => !v)}>
+                    {showKey ? '隐藏' : '显示'}
+                  </button>
+                </span>
+              </label>
+              <div className="c-settings__field">
+                <button type="button" className="c-btn c-btn--primary" disabled={busy} onClick={() => void save()}>
+                  {busy ? '正在检查…' : '保存并检查'}
+                </button>
+                {formErr && (
+                  <span className="c-settings__hint" role="status">
+                    {formErr}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+    </>
+  )
+}
 
 type TabId = 'appearance' | 'model' | 'diagnose' | 'about'
 
 const TABS: { id: TabId; icon: string; label: string }[] = [
   { id: 'appearance', icon: '◐', label: '外观' },
-  { id: 'model', icon: '✦', label: '模型' },
+  { id: 'model', icon: '✦', label: '连接' },
   { id: 'diagnose', icon: '⚕', label: '诊断' },
   { id: 'about', icon: 'ⓘ', label: '关于' },
 ]
@@ -36,8 +234,8 @@ const TAB_HEAD: Record<TabId, { title: string; desc: string }> = {
     desc: '选择界面的明暗风格。跟随系统时，会随 macOS / Windows 的深浅色设置自动切换。',
   },
   model: {
-    title: '模型',
-    desc: '配置对话背后的推理引擎。凭据只在这里填一次，其余地方只做选择。',
+    title: '连接',
+    desc: '每个厂商单独保存。保存后检查是否生效，生效的会标出来，并列出它加载到的模型。',
   },
   about: {
     title: '关于',
@@ -60,7 +258,7 @@ const THEME_OPTIONS: { id: Theme; icon: string; label: string; desc: string }[] 
  * 内容装进分组卡片里，靠边框和间距分层而不是靠底色深浅。
  */
 export default function SettingsModal(p: Props) {
-  const { open, llm, version, onClose, onSave } = p
+  const { open, llm, version, onClose } = p
 
   const [cfg, setCfg] = useState<LLMConfig>(llm)
   const { theme, setTheme } = useTheme()
@@ -78,18 +276,13 @@ export default function SettingsModal(p: Props) {
 
   useEffect(() => {
     if (!open) return
-    setCfg(llm)
     setTab('appearance')
-  }, [open, llm])
+  }, [open])
 
-  const dirty = useMemo(
-    () =>
-      cfg.provider !== llm.provider ||
-      cfg.baseUrl !== llm.baseUrl ||
-      cfg.apiKey !== llm.apiKey ||
-      cfg.model !== llm.model,
-    [cfg, llm],
-  )
+  useEffect(() => {
+    if (!open) return
+    setCfg(llm)
+  }, [open, llm])
 
   return (
     <Modal
@@ -100,20 +293,10 @@ export default function SettingsModal(p: Props) {
       footer={
         <>
           <span className="c-settings__footer-state" role="status">
-            {dirty ? '有未保存的修改' : '所有修改已保存'}
+            厂商在列表里单独保存
           </span>
-          <button className="c-btn c-btn--ghost" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="c-btn c-btn--primary"
-            disabled={!dirty}
-            onClick={() => {
-              onSave(cfg)
-              onClose()
-            }}
-          >
-            保存
+          <button className="c-btn c-btn--primary" onClick={onClose}>
+            关闭
           </button>
         </>
       }
@@ -138,13 +321,6 @@ export default function SettingsModal(p: Props) {
                   {t.icon}
                 </span>
                 <span>{t.label}</span>
-                {t.id === 'model' && llm.model && (
-                  // 显示「当前实际在用」的模型，而不是正在编辑的草稿。
-                  // 编辑中的值还没保存，显示它会让用户以为已经切过去了。
-                  <span className="c-settings__nav-hint" title={llm.model}>
-                    {llm.model.length > 14 ? `${llm.model.slice(0, 13)}…` : llm.model}
-                  </span>
-                )}
               </button>
             )
           })}
@@ -192,17 +368,7 @@ export default function SettingsModal(p: Props) {
               </section>
             )}
 
-            {tab === 'model' && (
-              <ModelList
-                current={llm}
-                // 点一下立刻生效并落盘：用户不需要再按「保存」。
-                // 多一次确认只会让人担心「我到底选上没有」。
-                onPick={(next) => {
-                  setCfg(next)
-                  onSave(next)
-                }}
-              />
-            )}
+            {tab === 'model' && <ProviderBoard />}
 
             {tab === 'diagnose' && <DiagnosePanel />}
 
@@ -244,13 +410,9 @@ export default function SettingsModal(p: Props) {
                         <dd className="c-settings__kv-val">{cfg.provider || '未设置'}</dd>
                       </div>
                       <div className="c-settings__kv-row">
-                        <dt className="c-settings__kv-key">当前模型</dt>
-                        <dd className="c-settings__kv-val mono">{cfg.model || '—'}</dd>
-                      </div>
-                      <div className="c-settings__kv-row">
                         <dt className="c-settings__kv-key">API Key</dt>
                         <dd className="c-settings__kv-val">
-                          {cfg.apiKey ? '已填写（仅本次运行有效）' : '未填写'}
+                          {cfg.apiKey ? '已填写' : '未填写'}
                         </dd>
                       </div>
                     </dl>

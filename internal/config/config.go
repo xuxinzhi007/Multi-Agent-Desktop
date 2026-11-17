@@ -25,6 +25,8 @@ const FileName = "config.json"
 // Settings 是应用级设置。零值是安全的默认值（mock provider）。
 type Settings struct {
 	LLM llm.Config `json:"llm"`
+	// Providers 是已保存的服务厂商。模型不在这里选，只存地址和 Key。
+	Providers []llm.Config `json:"providers,omitempty"`
 	// WorkDir 是新建会话的默认工作目录（空则用用户主目录）
 	WorkDir string `json:"workDir,omitempty"`
 }
@@ -84,6 +86,38 @@ func (s *Store) SetLLM(cfg llm.Config) error {
 	next := s.cur
 	s.mu.Unlock()
 	return s.write(next)
+}
+
+// SetProviders 替换已保存的厂商列表并落盘。
+func (s *Store) SetProviders(list []llm.Config) error {
+	s.mu.Lock()
+	s.cur.Providers = append([]llm.Config(nil), list...)
+	next := s.cur
+	s.mu.Unlock()
+	return s.write(next)
+}
+
+// UpsertProvider 按厂商名新增或覆盖一条连接，并落盘。
+func (s *Store) UpsertProvider(cfg llm.Config) ([]llm.Config, error) {
+	s.mu.Lock()
+	next := make([]llm.Config, 0, len(s.cur.Providers)+1)
+	replaced := false
+	for _, p := range s.cur.Providers {
+		if p.Provider == cfg.Provider {
+			next = append(next, cfg)
+			replaced = true
+			continue
+		}
+		next = append(next, p)
+	}
+	if !replaced {
+		next = append(next, cfg)
+	}
+	s.cur.Providers = next
+	out := append([]llm.Config(nil), next...)
+	snap := s.cur
+	s.mu.Unlock()
+	return out, s.write(snap)
 }
 
 // SetWorkDir 更新默认工作目录并落盘。

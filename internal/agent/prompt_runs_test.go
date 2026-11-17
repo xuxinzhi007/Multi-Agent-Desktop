@@ -10,6 +10,7 @@ import (
 func TestPromptActuallyRuns(t *testing.T) {
 	m := newTestManager(t)
 	a := m.Create("a1", "测试", "通用开发助手")
+	a.Backend = "mock"
 	if a == nil {
 		t.Fatal("create failed")
 	}

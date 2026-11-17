@@ -118,7 +118,7 @@ export default function App() {
             setView('chat')
           }}
           onStop={(id) => s.send('agent.stop', { id })}
-          onQuickCreate={(name, role) => createAgent(name, role, 'mock')}
+          onQuickCreate={(name, role) => createAgent(name, role, 'loop')}
           onCreateRequest={() => setCreateOpen(true)}
         />
       ) : activeChannel ? (
@@ -167,9 +167,12 @@ export default function App() {
               s.send('agent.llm', { id: activeAgent.id, cfg: patch.llm })
             }
           }}
-          globalProvider={s.llm.provider}
-          globalModel={s.llm.model}
-          onClearLLM={() => activeAgent && s.send('agent.clearLLM', { id: activeAgent.id })}
+          connection={{
+            provider: s.llm.provider,
+            baseUrl: s.llm.baseUrl,
+            apiKey: s.llm.apiKey,
+            model: s.llm.model,
+          }}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
           onQuickCreate={async (name, role) => {

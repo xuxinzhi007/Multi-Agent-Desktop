@@ -74,6 +74,7 @@ type Manager struct {
 	agents    map[string]*Agent
 	order     []string
 	llmCfg    llm.Config
+	providers []llm.Config
 	emit      Emitter
 	store     string // 持久化文件路径，空则不持久化
 	workDir   string // CLI agent 默认工作目录
@@ -262,6 +263,29 @@ func (m *Manager) SetLLMConfig(cfg llm.Config) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) SetProviders(list []llm.Config) {
+	m.mu.Lock()
+	m.providers = append([]llm.Config(nil), list...)
+	m.mu.Unlock()
+}
+
+func (m *Manager) Providers() []llm.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]llm.Config(nil), m.providers...)
+}
+
+func (m *Manager) SavedProvider(id string) (llm.Config, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.providers {
+		if p.Provider == id {
+			return p, true
+		}
+	}
+	return llm.Config{}, false
+}
+
 func (m *Manager) LLMConfig() llm.Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -303,6 +327,8 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 	if cfg.Provider == "" {
 		a.LLMCfg = nil
 	} else {
+		cfg = fillSavedCreds(m, cfg)
+		cfg = llm.ApplyDefaults(cfg)
 		a.LLMCfg = &cfg
 	}
 	a.mu.Unlock()
@@ -425,8 +451,9 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Messages: []llm.Message{
 			{Role: "system", Content: systemPromptFor(role, kb)},
 		},
-		queue: make(chan PromptRequest, 32),
-		done:  make(chan struct{}),
+		Backend: "loop",
+		queue:   make(chan PromptRequest, 32),
+		done:    make(chan struct{}),
 	}
 
 	m.agents[id] = a
@@ -641,7 +668,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	// 根据 backend 选择执行方式
 	backend := a.Backend
 	if backend == "" {
-		backend = "mock"
+		backend = "loop"
 	}
 
 	switch backend {
@@ -851,15 +878,46 @@ func (a *Agent) EffectiveWorkDir(m *Manager) string {
 	return m.workDir
 }
 
-// EffectiveLLM 返回会话级模型配置，未设置时回落到全局默认。
+// EffectiveLLM 拼出这一轮真正要发出去的配置。
+// 连接（地址、Key）在设置里；模型在会话上。
+// 会话没写的字段沿用同一提供方的连接信息，空模型不能把连接上的模型盖掉。
 func (a *Agent) EffectiveLLM(m *Manager) llm.Config {
+	base := m.LLMConfig()
 	a.mu.Lock()
 	cfg := a.LLMCfg
 	a.mu.Unlock()
-	if cfg != nil {
-		return *cfg
+	if cfg == nil {
+		return fillSavedCreds(m, base)
 	}
-	return m.LLMConfig()
+	out := *cfg
+	same := out.Provider == "" || out.Provider == base.Provider
+	if out.Provider == "" {
+		out.Provider = base.Provider
+	}
+	if same && out.BaseURL == "" {
+		out.BaseURL = base.BaseURL
+	}
+	if same && out.APIKey == "" {
+		out.APIKey = base.APIKey
+	}
+	if same && out.Model == "" {
+		out.Model = base.Model
+	}
+	return fillSavedCreds(m, out)
+}
+
+func fillSavedCreds(m *Manager, cfg llm.Config) llm.Config {
+	saved, ok := m.SavedProvider(cfg.Provider)
+	if !ok {
+		return cfg
+	}
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = saved.BaseURL
+	}
+	if cfg.APIKey == "" {
+		cfg.APIKey = saved.APIKey
+	}
+	return cfg
 }
 
 // AppendSystemMessage 追加一条 system message（用于注入知识库内容）。

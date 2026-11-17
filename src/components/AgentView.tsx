@@ -34,12 +34,8 @@ type Props = {
   onQuickCreate?: (presetName: string, role: string) => void
   /** 空状态下打开「新建 Agent」弹窗 */
   onCreateRequest?: () => void
-  /** 全局配置的 provider，会话级未设置时用它 */
-  globalProvider?: string
-  /** 全局配置的模型，会话级未设置时显示它 */
-  globalModel?: string
-  /** 清掉会话级模型设置，回到跟随全局 */
-  onClearLLM?: () => void
+  /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
+  connection?: { provider: string; baseUrl: string; apiKey: string; model: string }
 }
 
 // 空状态的一键角色。只保留 3 个 —— 选择过多反而增加决策成本。
@@ -471,19 +467,22 @@ export default function AgentView(p: Props) {
               {/* 模型选择直接长在输入框底栏：用户换模型时不用离开对话。
                   工作目录仍然走弹层（它不常改，且需要输入路径）。 */}
               <ModelPicker
-                current={p.agent.llm?.model || p.globalModel || ''}
-                onPick={(m) =>
+                agentId={p.agent.id}
+                model={p.agent.llm?.model || ''}
+                provider={p.agent.llm?.provider}
+                onPick={(m) => {
+                  const conn = p.connection
+                  const same = !!conn && conn.provider === m.provider
                   p.onConfig({
                     llm: {
                       provider: m.provider,
-                      baseUrl: m.baseUrl ?? '',
-                      // 同一 provider 内换模型要保留原 Key，
-                      // 否则用户切个模型就被要求重新填一遍凭据
-                      apiKey: p.agent!.llm?.provider === m.provider ? (p.agent!.llm?.apiKey ?? '') : '',
+                      baseUrl: m.baseUrl || (same ? conn.baseUrl : ''),
+                      apiKey: same ? conn.apiKey : '',
                       model: m.model,
                     },
                   })
-                }
+                }}
+                preferred={p.connection?.model}
               />
               <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
                 <WorkDirChip agent={p.agent} fallbackWorkDir={p.workDir} onConfig={p.onConfig} />

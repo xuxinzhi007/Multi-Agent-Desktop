@@ -348,7 +348,10 @@ export function useBackend() {
       case 'shell.run':
         return API.runShell(data as { agentId: string; command: string })
       case 'llm.config':
-        return API.setLLMConfig(data as Config)
+        return API.setLLMConfig(data as Config).then((cfg) => {
+          if (cfg) setState((s) => ({ ...s, llm: cfg }))
+          return cfg
+        })
       case 'workdir.set':
         return API.setWorkDir((data as { dir: string }).dir)
       case 'agent.workDir': {
@@ -365,10 +368,22 @@ export function useBackend() {
         })
       case 'agent.llm': {
         const { id, cfg } = data as { id: string; cfg: Config }
-        return API.setAgentLLM(id, cfg).catch((e) => {
-          console.error('setAgentLLM failed', e)
-          return null
-        })
+        return API.setAgentLLM(id, cfg)
+          .then((view) => {
+            // 返回值先落进本地状态。只等 agent.config 事件的话，
+            // 按钮上的模型要等事件到了才算数，中间发出去的消息仍用旧配置。
+            if (view?.id) {
+              setState((s) => ({
+                ...s,
+                agents: s.agents.map((x) => (x.id === view.id ? { ...x, ...view } : x)),
+              }))
+            }
+            return view
+          })
+          .catch((e) => {
+            console.error('setAgentLLM failed', e)
+            return null
+          })
       }
       case 'channel.create': {
         const { name, members } = data as { name: string; members: string[] }

@@ -30,13 +30,6 @@ const LABEL_STYLE = {
   marginBottom: 6,
 } as const
 
-const BACKENDS = [
-  { id: 'loop', label: 'Agent Loop', desc: '自持循环 · 可中断' },
-  { id: 'mock', label: '内置', desc: '无需配置' },
-  { id: 'claude', label: 'Claude', desc: 'code -p' },
-  { id: 'codex', label: 'Codex', desc: 'exec --json' },
-] as const
-
 /** suggestName 生成一个不重复的默认名：前端 / 前端 2 / 前端 3 … */
 function suggestName(base: string, existingCount: number): string {
   return existingCount === 0 ? base : `${base} ${existingCount + 1}`
@@ -54,7 +47,6 @@ function suggestName(base: string, existingCount: number): string {
 export default function CreateAgentModal({ open, onClose, onCreate, existingCount = 0 }: Props) {
   const [name, setName] = useState('')
   const [role, setRole] = useState(ROLE_PRESETS[0].role)
-  const [backend, setBackend] = useState<string>('mock')
   const [workDir, setWorkDir] = useState('')
   const [nameTouched, setNameTouched] = useState(false)
   const [colorIdx, setColorIdx] = useState(0)
@@ -64,7 +56,6 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
       const preset = ROLE_PRESETS[0]
       setName(suggestName(preset.name, existingCount))
       setRole(preset.role)
-      setBackend('mock')
       setWorkDir('')
       setNameTouched(false)
       setColorIdx(existingCount % AGENT_COLORS.length)
@@ -86,7 +77,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
 
   const submit = () => {
     if (!canSubmit) return
-    onCreate(name.trim(), role, backend, workDir.trim() || undefined)
+    onCreate(name.trim(), role, 'loop', workDir.trim() || undefined)
     onClose()
   }
 
@@ -176,38 +167,6 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
           <div>
             <label style={LABEL_STYLE}>工作目录（可选）</label>
             <DirectoryPicker value={workDir} onChange={setWorkDir} compact />
-          </div>
-
-          <div>
-            <label style={LABEL_STYLE}>执行后端</label>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-              {BACKENDS.map((b) => (
-                <button
-                  key={b.id}
-                  type="button"
-                  onClick={() => setBackend(b.id)}
-                  aria-pressed={backend === b.id}
-                  className={`c-backend-card ${backend === b.id ? 'c-backend-card--active' : ''}`}
-                >
-                  <span style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 600 }}>
-                    {b.label}
-                  </span>
-                  <span
-                    style={{
-                      display: 'block',
-                      fontSize: 10,
-                      color: 'var(--text-disabled)',
-                      marginTop: 1,
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}
-                  >
-                    {b.desc}
-                  </span>
-                </button>
-              ))}
-            </div>
           </div>
         </div>
 

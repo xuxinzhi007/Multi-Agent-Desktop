@@ -155,3 +155,25 @@ func TestFileIsReadableJSON(t *testing.T) {
 		t.Errorf("llm.provider = %v, want ollama", llmRaw["provider"])
 	}
 }
+
+func TestUpsertProviderKeepsSeveral(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := st.UpsertProvider(llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080"}); err != nil {
+		t.Fatalf("upsert llamacpp: %v", err)
+	}
+	if _, err := st.UpsertProvider(llm.Config{Provider: "deepseek", BaseURL: "https://api.deepseek.com", APIKey: "sk"}); err != nil {
+		t.Fatalf("upsert deepseek: %v", err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := again.Get().Providers
+	if len(got) != 2 || got[0].Provider != "llamacpp" || got[1].APIKey != "sk" {
+		t.Fatalf("providers = %+v", got)
+	}
+}

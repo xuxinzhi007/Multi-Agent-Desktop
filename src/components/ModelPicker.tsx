@@ -3,13 +3,14 @@ import { API, type ModelChoice } from '../mygo'
 import { toast } from './Toast'
 
 /**
- * 模型选择器。
+ * 会话里的模型选择。
  *
- * 设计目标只有一条：**看到模型名，点一下，就切过去了**。
+ * 选中态只看这次对话自己的模型。列表接口上的 current 是连接配置里
+ * 残留的名字，拿它当选中会让按钮显示一个其实没写进这次对话的模型，
+ * 发出去用的是另一份配置，必须再点一次才对得上。
  *
- * 之前是「先选 provider → 填 BaseURL → 填 Key → 再选模型」四步，
- * 任何一步不懂就卡死。这里把配置全部收进设置页，
- * 日常操作只留「换模型」这一件事。
+ * 对话还没有模型时，把第一个可用模型写进去。按钮上看到的就是
+ * 下一条消息会用的那个，不用再点一次。
  *
  * 向上弹出：它长在输入框底栏，向下弹会被输入区挡住。
  */
@@ -28,16 +29,27 @@ function shortModel(name: string): string {
 }
 
 export default function ModelPicker({
-  current,
+  agentId,
+  model,
+  provider,
+  preferred,
   onPick,
 }: {
-  current: string
+  agentId: string
+  /** 这次对话已经记下的模型。空字符串表示还没选。 */
+  model: string
+  provider?: string
+  /** 会话还没有模型时，优先用这个名字（它在可用列表里才算）。 */
+  preferred?: string
   onPick: (m: ModelChoice) => void
 }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<ModelChoice[]>([])
   const [loading, setLoading] = useState(false)
+  const [bound, setBound] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -53,6 +65,33 @@ export default function ModelPicker({
   useEffect(() => {
     if (open) void load()
   }, [open, load])
+
+  // 换了一场对话，清掉上一场临时显示的名字。
+  useEffect(() => {
+    setBound('')
+  }, [agentId])
+
+  // 这场对话还没有模型：读到列表后把第一个可用的写进去。
+  // 只跑一次；失败或列表为空就停在「选择模型」，不再反复请求。
+  useEffect(() => {
+    if (model) return
+    let stop = false
+    API.listAllModels()
+      .then((list) => {
+        if (stop) return
+        setItems(list)
+        const pick =
+          list.find((m) => m.ready && !!preferred && m.model === preferred) ??
+          list.find((m) => m.ready)
+        if (!pick) return
+        setBound(pick.model)
+        onPickRef.current(pick)
+      })
+      .catch(() => {})
+    return () => {
+      stop = true
+    }
+  }, [agentId, model, preferred])
 
   // 点击外部收起。用 mousedown 而不是 click：
   // click 在元素被移除后才触发，会漏判。
@@ -76,18 +115,19 @@ export default function ModelPicker({
     if (!m.ready) {
       // 拦截但保持展开：用户下一步就要去配置，
       // 直接收起会让他再点一次才能回到这里。
-      toast(`⚠️ ${m.model} 尚未配置，请先在设置中完善`, 'error')
+      toast(`⚠️ ${m.model} 尚未配置，请先在设置里确认连接`, 'error')
       return
     }
+    setBound(m.model)
     onPick(m)
     setOpen(false)
     toast(`✅ 已切换至 ${m.model}`, 'success')
   }
 
-  // 列表到达后以列表里的 Current 为准，它反映后端实际在用的那个；
-  // 列表还没到时用传入值兜底，避免按钮瞬间变空。
-  const active = items.find((m) => m.current)
-  const label = active?.model || current || '选择模型'
+  const shown = model || bound
+  const label = shown || '选择模型'
+  const selected = (m: ModelChoice) =>
+    m.ready && m.model === shown && (!provider || !model || m.provider === provider)
   const ready = items.filter((m) => m.ready)
   const disabled = items.filter((m) => !m.ready)
 
@@ -122,7 +162,7 @@ export default function ModelPicker({
           )}
 
           {ready.map((m) => {
-            const on = m.current
+            const on = selected(m)
             return (
               <button
                 key={`${m.provider}/${m.model}`}

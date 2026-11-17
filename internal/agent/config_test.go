@@ -219,6 +219,18 @@ func TestSessionLLMConfig(t *testing.T) {
 			agentCfg: nil,
 			want:     llm.Config{},
 		},
+		{
+			name:     "会话没写模型时仍用连接上的模型",
+			global:   llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080", APIKey: "k", Model: "local-m"},
+			agentCfg: &llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080"},
+			want:     llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080", APIKey: "k", Model: "local-m"},
+		},
+		{
+			name:     "会话只选定模型，凭据仍用连接",
+			global:   llm.Config{Provider: "deepseek", BaseURL: "https://api.deepseek.com", APIKey: "sk", Model: "deepseek-chat"},
+			agentCfg: &llm.Config{Provider: "deepseek", Model: "deepseek-reasoner"},
+			want:     llm.Config{Provider: "deepseek", BaseURL: "https://api.deepseek.com", APIKey: "sk", Model: "deepseek-reasoner"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -284,6 +296,7 @@ func TestSessionLLMMidRunSnapshot(t *testing.T) {
 		mu.Unlock()
 	})
 	a := m.Create("a1", "A1", "r")
+	a.Backend = "mock"
 
 	if err := m.Prompt(context.Background(), PromptRequest{AgentID: "a1", Text: "first"}); err != nil {
 		t.Fatalf("Prompt(first): %v", err)

@@ -16,6 +16,7 @@ import (
 func TestWorkerSurvivesPanic(t *testing.T) {
 	m := newTestManager(t)
 	a := m.Create("a1", "测试", "通用开发助手")
+	a.Backend = "mock"
 
 	// 让第一次执行 panic
 	var panicked atomic.Bool
