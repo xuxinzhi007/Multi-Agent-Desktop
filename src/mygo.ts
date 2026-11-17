@@ -28,6 +28,12 @@ export interface AgentLoopEvent {
   reason?: string;
 }
 
+/** AgentReasoningEvent 是思考模式这一轮的推理文本。 */
+export interface AgentReasoningEvent {
+  id: string;
+  reasoning: string;
+}
+
 /**
  * AgentStoppedEvent 记录「为什么停」。用户按停止和预算用尽是两回事，
  * 界面要能说清是哪一种，否则用户不知道为什么没跑完。
@@ -103,6 +109,7 @@ export interface Config {
   baseUrl: string;
   apiKey: string;
   model: string;
+  thinking?: string;
 }
 
 /** CreateAgentRequest 是新建 agent 的参数。 */
@@ -169,6 +176,7 @@ export interface Message {
   toolCalls?: ToolCall[];
   toolId?: string;
   timestamp?: number;
+  reasoning?: string;
 }
 
 /** MessageEvent 是一条完整消息。 */
@@ -637,6 +645,7 @@ export const events = {
    * 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
    */
   agentTool: event<AgentToolEvent>("agent.tool"),
+  agentReasoning: event<AgentReasoningEvent>("agent.reasoning"),
   agentLoop: event<AgentLoopEvent>("agent.loop"),
   agentStopped: event<AgentStoppedEvent>("agent.stopped"),
   shellStart: event<ShellEvent>("shell.start"),

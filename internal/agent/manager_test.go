@@ -178,8 +178,8 @@ func TestRoutePrefix(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) == 0 || !strings.HasPrefix(seen[0], "[from from]") {
-		t.Fatalf("expected [from from] prefix, got %v", seen)
+	if len(seen) == 0 || !strings.Contains(seen[0], "来自会话「A」") {
+		t.Fatalf("expected sender name in forwarded prompt, got %v", seen)
 	}
 }
 

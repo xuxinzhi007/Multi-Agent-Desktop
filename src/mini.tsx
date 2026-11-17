@@ -45,6 +45,27 @@ function viewStatus(a: MiniAgentStatus): ViewStatus {
   }
 }
 
+function taskOf(a: { status: string; messages?: { role: string; content: string }[] }): string {
+  if (a.status !== 'running' && a.status !== 'queued' && a.status !== 'blocked') return ''
+  const msgs = a.messages ?? []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role !== 'user') continue
+    const t = msgs[i].content.replace(/\s+/g, ' ').trim()
+    return t.length > 40 ? t.slice(0, 40) + '…' : t
+  }
+  return ''
+}
+
+function progressOf(a: { status: string; chars?: number }): number {
+  if (a.status === 'done') return 100
+  if (a.status === 'idle') return 0
+  if (a.status === 'error' || a.status === 'blocked') return 45
+  const p = Math.floor(((a.chars ?? 0) * 100) / 800)
+  if (p > 95) return 95
+  if (p < 8) return 8
+  return p
+}
+
 function isActive(s: ViewStatus) {
   return s === 'running' || s === 'thinking' || s === 'waiting'
 }
@@ -115,10 +136,12 @@ function MiniApp() {
     API.islandResize(expanded).catch(() => {})
   }, [expanded])
 
-  useEffect(() => {
-    const unsub = events.miniStatus.on((s) => setStatus(s))
+  const listGen = useRef(0)
+  const refreshList = () => {
+    const gen = ++listGen.current
     API.listAgents()
-      .then((agents) =>
+      .then((agents) => {
+        if (listGen.current !== gen) return
         setStatus((prev) => ({
           agents: agents.map((a) => ({
             id: a.id,
@@ -126,17 +149,38 @@ function MiniApp() {
             role: a.role,
             color: a.color,
             status: a.status,
-            progress: a.status === 'idle' ? 0 : 0,
+            task: taskOf(a),
+            progress: progressOf(a),
             chars: a.chars ?? 0,
             startedAt: a.startedAt ?? 0,
             lastTool: a.lastTool ?? '',
-            logs: [],
+            logs: a.lastTool
+              ? [{ at: Math.floor(Date.now() / 1000), kind: 'tool', text: a.lastTool }]
+              : [],
           })),
           paused: prev.paused,
-        })),
-      )
+        }))
+      })
       .catch(() => {})
-    return unsub
+  }
+
+  useEffect(() => {
+    const unsub = events.miniStatus.on((s) => {
+      listGen.current++
+      setStatus(s)
+    })
+    refreshList()
+    const onFocus = () => refreshList()
+    const onVis = () => {
+      if (document.visibilityState === 'visible') refreshList()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      unsub()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVis)
+    }
   }, [])
 
   // 点击岛外收起
@@ -175,6 +219,10 @@ function MiniApp() {
   }, [agents])
 
   const progress = overallProgress(agents)
+  const liveTool = agents.find((a) => {
+    const vs = viewStatus(a)
+    return (vs === 'running' || vs === 'thinking') && a.lastTool
+  })?.lastTool
 
   // 只展示活跃 + 异常的，已完成/已停止的不占展开面板空间
   const visible = useMemo(
@@ -217,7 +265,7 @@ function MiniApp() {
             {counts.error > 0
               ? '有 Agent 需要处理'
               : counts.running > 0
-                ? 'Agent 协作中'
+                ? liveTool || 'Agent 协作中'
                 : counts.waiting > 0
                   ? 'Agent 等待中'
                   : agents.length > 0
@@ -420,6 +468,7 @@ function AgentCard({
   const meta = STATUS_META[vs]
   const waiting = vs === 'waiting'
   const logs = agent.logs ?? []
+  const doing = (vs === 'running' || vs === 'thinking') && agent.lastTool ? agent.lastTool : ''
 
   return (
     <div
@@ -472,9 +521,9 @@ function AgentCard({
               </span>
             </div>
             <div className="card__role">{agent.role || '通用助手'}</div>
-            {agent.task && (
+            {(doing || agent.task) && (
               <div className={`card__task ${waiting ? 'card__task--waiting' : ''}`}>
-                {agent.task}
+                {doing || agent.task}
               </div>
             )}
             {waiting && agent.dep && (

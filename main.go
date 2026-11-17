@@ -72,13 +72,14 @@ var (
 	ToolStart    = mygo.NewEvent[ToolStartEvent]("tool.start")
 	// loop 内工具调用与运行结局。循环真的在跑，界面必须能看到，
 	// 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
-	AgentTool    = mygo.NewEvent[AgentToolEvent]("agent.tool")
-	AgentLoop    = mygo.NewEvent[AgentLoopEvent]("agent.loop")
-	AgentStopped = mygo.NewEvent[AgentStoppedEvent]("agent.stopped")
-	ShellStart   = mygo.NewEvent[ShellEvent]("shell.start")
-	ShellResult_ = mygo.NewEvent[ShellResultEvent]("shell.result")
-	LLMConfigEvt = mygo.NewEvent[LLMConfig]("llm.config")
-	WorkDirEvt   = mygo.NewEvent[WorkDirEvent]("workdir")
+	AgentTool      = mygo.NewEvent[AgentToolEvent]("agent.tool")
+	AgentReasoning = mygo.NewEvent[AgentReasoningEvent]("agent.reasoning")
+	AgentLoop      = mygo.NewEvent[AgentLoopEvent]("agent.loop")
+	AgentStopped   = mygo.NewEvent[AgentStoppedEvent]("agent.stopped")
+	ShellStart     = mygo.NewEvent[ShellEvent]("shell.start")
+	ShellResult_   = mygo.NewEvent[ShellResultEvent]("shell.result")
+	LLMConfigEvt   = mygo.NewEvent[LLMConfig]("llm.config")
+	WorkDirEvt     = mygo.NewEvent[WorkDirEvent]("workdir")
 
 	// 会话级配置变更：携带完整 AgentView，前端整体替换即可。
 	AgentConfig = mygo.NewEvent[AgentView]("agent.config")
@@ -102,6 +103,12 @@ type ToolStartEvent struct {
 	AgentID string `json:"agentId"`
 	Tool    string `json:"tool"`
 	Target  string `json:"target"`
+}
+
+// AgentReasoningEvent 是思考模式这一轮的推理文本。
+type AgentReasoningEvent struct {
+	ID        string `json:"id"`
+	Reasoning string `json:"reasoning"`
 }
 
 // AgentToolEvent 是一次 loop 内工具调用的开始或结束。
@@ -220,7 +227,7 @@ func buildMiniStatus(mgr *agent.Manager) MiniStatus {
 			Role:          sn.Role,
 			Color:         sn.Color,
 			Status:        st,
-			Task:          extractTask(a),
+			Task:          extractTask(sn),
 			StartedAt:     sn.StartedAt,
 			QueuedAt:      sn.QueuedAt,
 			LastTool:      sn.LastTool,
@@ -289,7 +296,7 @@ func miniLogs(sn *agent.Agent) []MiniLogEntry {
 		switch m.Role {
 		case "user":
 			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "status", Text: "› " + firstLine(m.Content)})
-		case "assistant":
+		case "assistant", "tool":
 			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "tool", Text: firstLine(m.Content)})
 		}
 	}
@@ -316,7 +323,7 @@ func firstLine(s string) string {
 
 // extractTask 提取 agent 当前任务摘要。
 func extractTask(a *agent.Agent) string {
-	if a.Status != "running" && a.Status != "queued" {
+	if a.Status != agent.StatusRunning && a.Status != agent.StatusQueued && a.Status != agent.StatusBlocked {
 		return ""
 	}
 	// 从最后一条 user 消息提取
@@ -455,6 +462,7 @@ func (s *API) DeleteAgent(id string) bool {
 	ok := s.mgr.Delete(id)
 	if ok {
 		s.channels.RemoveMember(id)
+		s.pushMini()
 	}
 	return ok
 }
@@ -1512,6 +1520,7 @@ func (s *API) ToggleMiniWindow(show bool) bool {
 	if show {
 		mini.Show()
 		mini.Focus()
+		s.pushMini()
 		if s.win != nil && !s.win.IsDestroyed() {
 			s.win.Hide()
 		}
@@ -1698,6 +1707,19 @@ func toAgentDelta(data any) (DeltaEvent, bool) {
 		return DeltaEvent{}, false
 	}
 	return DeltaEvent{ID: id, Delta: delta}, true
+}
+
+func toAgentReasoning(data any) (AgentReasoningEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return AgentReasoningEvent{}, false
+	}
+	id, _ := m["id"].(string)
+	reasoning, _ := m["reasoning"].(string)
+	if id == "" || reasoning == "" {
+		return AgentReasoningEvent{}, false
+	}
+	return AgentReasoningEvent{ID: id, Reasoning: reasoning}, true
 }
 
 func toAgentTool(data any) (AgentToolEvent, bool) {
@@ -1929,6 +1951,10 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 			if v, ok := toAgentTool(data); ok {
 				AgentTool.Emit(win, v)
 			}
+		case "agent.reasoning":
+			if v, ok := toAgentReasoning(data); ok {
+				AgentReasoning.Emit(win, v)
+			}
 		case "agent.loop":
 			if v, ok := toAgentLoop(data); ok {
 				AgentLoop.Emit(win, v)
@@ -1949,10 +1975,9 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		}
 	}
 
-	// 迷你悬浮窗也推（只有状态变化才推，减少流量）
 	if miniWin != nil && !miniWin.IsDestroyed() {
 		switch event {
-		case "agent.created", "agent.deleted", "agent.status":
+		case "agent.created", "agent.deleted", "agent.status", "agent.tool", "agent.loop":
 			MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
 		}
 	}

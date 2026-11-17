@@ -600,6 +600,9 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "r"})
+	if raw, ok := s.mgr.Get(a.ID); ok {
+		raw.Backend = "mock"
+	}
 	ch := s.CreateChannel("g", []string{a.ID}, "")
 
 	if got := len(s.ListChannels()); got != 1 {
@@ -641,6 +644,9 @@ func TestChannelReplyLandsInChannel(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
+	if raw, ok := s.mgr.Get(a.ID); ok {
+		raw.Backend = "mock"
+	}
 	ch := s.CreateChannel("测试群", []string{a.ID}, "")
 
 	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hello"); err != nil {
@@ -736,6 +742,9 @@ func TestMockPromptDoesNotLeaveAgentBlocked(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "后端"})
+	if raw, ok := s.mgr.Get(a.ID); ok {
+		raw.Backend = "mock"
+	}
 	if err := s.PromptAgent(context.Background(), PromptRequest{AgentID: a.ID, Text: "你好"}); err != nil {
 		t.Fatalf("PromptAgent: %v", err)
 	}

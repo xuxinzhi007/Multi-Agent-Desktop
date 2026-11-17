@@ -22,6 +22,10 @@ type Props = {
   onShell: (command: string) => void
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
+  /** 这一轮已经发生的工具步骤。思考中靠它显示在读什么、跑了什么。 */
+  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' }[]
+  /** 模型这一轮的思考文本，还没写进消息时先显示在这里。 */
+  reasoning?: string
   onToggleInspector: () => void
   inspectorOpen: boolean
   /** 单聊模式：禁用 @ 路由功能 */
@@ -44,6 +48,145 @@ const quickRoles = [
   { emoji: '⚙️', label: '后端', name: '后端', role: 'Go 专家，关注 API 设计、并发安全与查询效率' },
   { emoji: '🔍', label: '审查', name: 'Reviewer', role: '代码审查者，指出风险、代码异味与不符合规范的地方' },
 ] as const
+
+const TOOL_LABEL: Record<string, string> = {
+  read_file: '读取',
+  write_file: '写入',
+  edit_file: '修改',
+  bash: '执行',
+}
+
+function stepText(tool: string, target: string) {
+  const label = TOOL_LABEL[tool] ?? tool
+  const prefix = tool + ' '
+  const detail = target.startsWith(prefix) ? target.slice(prefix.length) : target
+  const line = detail.replace(/\s+/g, ' ').trim()
+  if (!line || line === tool) return label
+  return line.length > 80 ? `${label} ${line.slice(0, 80)}…` : `${label} ${line}`
+}
+
+function ThinkingSwitch({
+  provider,
+  thinking,
+  onToggle,
+}: {
+  provider: string
+  thinking?: string
+  onToggle: (next: 'on' | 'off') => void
+}) {
+  if (provider !== 'deepseek') return null
+  const on = thinking !== 'off'
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(on ? 'off' : 'on')}
+      title={on ? '思考模式开着' : '思考模式关着'}
+      style={{
+        border: '1px solid var(--border)',
+        background: on ? 'var(--accent-dim)' : 'transparent',
+        color: on ? 'var(--accent-bright)' : 'var(--text-tertiary)',
+        borderRadius: 'var(--radius-sm)',
+        fontSize: 'var(--text-xs)',
+        padding: '2px 8px',
+        cursor: 'pointer',
+        flexShrink: 0,
+      }}
+    >
+      思考{on ? '开' : '关'}
+    </button>
+  )
+}
+
+function presentTranscript(messages: Message[]): Message[] {
+  const out: Message[] = []
+  let chain: string[] = []
+  for (const m of messages) {
+    if (m.role === 'system' || m.role === 'tool') continue
+    if (m.role === 'assistant' && !(m.content || '').trim()) {
+      if (m.reasoning) chain.push(m.reasoning)
+      continue
+    }
+    if (m.role === 'assistant') {
+      const parts = [...chain]
+      if (m.reasoning) parts.push(m.reasoning)
+      chain = []
+      out.push(parts.length ? { ...m, reasoning: parts.join('\n\n') } : m)
+      continue
+    }
+    chain = []
+    out.push(m)
+  }
+  return out
+}
+
+function ReasoningText({ text }: { text: string }) {
+  return (
+    <details open style={{ margin: '4px 0 8px' }}>
+      <summary
+        style={{
+          cursor: 'pointer',
+          fontSize: 'var(--text-xs)',
+          color: 'var(--text-tertiary)',
+          userSelect: 'none',
+        }}
+      >
+        思考
+      </summary>
+      <div
+        style={{
+          marginTop: 4,
+          maxHeight: 160,
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          fontSize: 'var(--text-xs)',
+          lineHeight: 'var(--leading-normal)',
+          color: 'var(--text-tertiary)',
+        }}
+      >
+        {text}
+      </div>
+    </details>
+  )
+}
+
+function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; reasoning?: string }) {
+  const current = [...steps].reverse().find((s) => s.status === 'running')
+  return (
+    <div style={{ padding: '4px 0 8px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 7,
+          color: 'var(--text-tertiary)',
+          fontSize: 'var(--text-sm)',
+        }}
+      >
+        <span className="blink" style={{ color: 'var(--warning)' }}>
+          ●
+        </span>
+        {current ? stepText(current.tool, current.target) : '正在思考…'}
+      </div>
+      {reasoning && <ReasoningText text={reasoning} />}
+      {steps.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 14 }}>
+          {steps.map((s, i) => (
+            <div
+              key={`${s.tool}-${i}`}
+              style={{
+                fontSize: 'var(--text-xs)',
+                color: s.status === 'error' ? 'var(--danger)' : 'var(--text-tertiary)',
+                lineHeight: 'var(--leading-normal)',
+              }}
+            >
+              {s.status === 'running' ? '…' : s.status === 'error' ? '✕' : '✓'} {stepText(s.tool, s.target)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
@@ -77,7 +220,7 @@ export default function AgentView(p: Props) {
   const quoteToAgent = (msg: Message, targetAgentId: string) => {
     const target = p.agents?.find((a) => a.id === targetAgentId)
     if (target && p.onRoute) {
-      p.onRoute(target.id, `引用：${msg.content.slice(0, 200)}`)
+      p.onRoute(target.id, msg.content.slice(0, 200))
     }
     closeContextMenu()
   }
@@ -233,7 +376,7 @@ export default function AgentView(p: Props) {
   }
 
   const running = p.agent.status === 'running'
-  const visible = p.agent.messages.filter((m) => m.role !== 'system')
+  const visible = presentTranscript(p.agent.messages)
 
   return (
     <div className="c-col" style={{ flex: 1 }}>
@@ -334,23 +477,7 @@ export default function AgentView(p: Props) {
 
         {p.streaming && <Bubble m={{ role: 'assistant', content: p.streaming }} color={p.agent.color} live />}
 
-        {running && !p.streaming && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
-              color: 'var(--text-tertiary)',
-              fontSize: 'var(--text-sm)',
-              padding: '4px 0',
-            }}
-          >
-            <span className="blink" style={{ color: 'var(--warning)' }}>
-              ●
-            </span>
-            正在思考…
-          </div>
-        )}
+        {running && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
 
         {(p.shellLogs ?? []).map((log) => (
           <ShellEntry key={log.id} log={log} />
@@ -473,16 +600,35 @@ export default function AgentView(p: Props) {
                 onPick={(m) => {
                   const conn = p.connection
                   const same = !!conn && conn.provider === m.provider
+                  const thinking = p.agent?.llm?.thinking
                   p.onConfig({
                     llm: {
                       provider: m.provider,
                       baseUrl: m.baseUrl || (same ? conn.baseUrl : ''),
                       apiKey: same ? conn.apiKey : '',
                       model: m.model,
+                      ...(thinking ? { thinking } : {}),
                     },
                   })
                 }}
                 preferred={p.connection?.model}
+              />
+              <ThinkingSwitch
+                provider={p.agent.llm?.provider || p.connection?.provider || ''}
+                thinking={p.agent.llm?.thinking}
+                onToggle={(next) => {
+                  const llm = p.agent?.llm
+                  const conn = p.connection
+                  p.onConfig({
+                    llm: {
+                      provider: llm?.provider || conn?.provider || '',
+                      baseUrl: llm?.baseUrl || conn?.baseUrl || '',
+                      apiKey: llm?.apiKey || conn?.apiKey || '',
+                      model: llm?.model || conn?.model || '',
+                      thinking: next,
+                    },
+                  })
+                }}
               />
               <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
                 <WorkDirChip agent={p.agent} fallbackWorkDir={p.workDir} onConfig={p.onConfig} />
@@ -963,6 +1109,7 @@ const Bubble = memo(
   (a, b) =>
     a.m.role === b.m.role &&
     a.m.content === b.m.content &&
+    a.m.reasoning === b.m.reasoning &&
     a.m.timestamp === b.m.timestamp &&
     a.color === b.color &&
     a.live === b.live &&
@@ -1064,6 +1211,7 @@ function BubbleImpl({
           }}
           className={isUser ? undefined : 'markdown-body'}
         >
+          {!isUser && m.reasoning && <ReasoningText text={m.reasoning} />}
           {isUser ? (
             <MentionText text={displayContent} agents={agents} selfColor={color} />
           ) : (

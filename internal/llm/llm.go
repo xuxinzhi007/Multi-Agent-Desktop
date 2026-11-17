@@ -19,6 +19,7 @@ type Message struct {
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // role=assistant 时模型发起的调用
 	ToolID    string     `json:"toolId,omitempty"`    // role=tool 时对应哪个调用
 	Timestamp int64      `json:"timestamp,omitempty"` // Unix 秒
+	Reasoning string     `json:"reasoning,omitempty"` // 思考模式的推理，不并进 content
 }
 
 // ToolCall 是模型请求的一次工具调用。
@@ -49,6 +50,9 @@ type Config struct {
 	BaseURL  string `json:"baseUrl"`
 	APIKey   string `json:"apiKey"`
 	Model    string `json:"model"`
+	// Thinking 是会话上的思考模式。on 打开，off 关掉。
+	// 空值对 deepseek 按打开处理，其它厂商不带这个字段。
+	Thinking string `json:"thinking,omitempty"`
 }
 
 var ErrNotConfigured = errors.New("llm: provider not configured")

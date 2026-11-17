@@ -211,6 +211,9 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	if slow, ok := t.(interface{ Timeout() time.Duration }); ok && slow.Timeout() > timeout {
+		timeout = slow.Timeout()
+	}
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

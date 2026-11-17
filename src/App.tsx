@@ -151,6 +151,8 @@ export default function App() {
             s.send('shell.run', { agentId: activeAgent?.id ?? '', command })
           }
           shellLogs={activeAgent ? (s.shellByAgent[activeAgent.id] ?? []) : []}
+          steps={activeAgent ? s.tools.filter((t) => t.id === activeAgent.id).slice(-8) : []}
+          reasoning={activeAgent ? s.reasoning[activeAgent.id] : ''}
           onRoute={(targetName, text) => {
             if (!activeAgent) return
             const target = s.agents.find((a) => a.name === targetName || a.id === targetName)

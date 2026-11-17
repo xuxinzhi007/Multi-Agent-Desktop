@@ -9,6 +9,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -141,6 +142,8 @@ type Runner struct {
 
 	// System 是系统提示。循环每轮都会把它作为第一条消息。
 	System string
+	// Sync 在每次检查点把当前完整消息拷出去。会话落盘用它，避免只在整轮结束时才写。
+	Sync func([]llm.Message)
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
@@ -257,10 +260,14 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		}
 
 		// ── 5. 把模型这轮说的话记进历史
-		if turn.Text != "" || len(turn.Calls) > 0 {
+		if turn.Reasoning != "" {
+			r.emit(Event{Kind: "reasoning", Phase: st.Phase, Iter: st.Iteration, Text: turn.Reasoning})
+		}
+		if turn.Text != "" || turn.Reasoning != "" || len(turn.Calls) > 0 {
 			st.Messages = append(st.Messages, llm.Message{
 				Role:      "assistant",
 				Content:   turn.Text,
+				Reasoning: turn.Reasoning,
 				ToolCalls: toLLMCalls(turn.Calls),
 				Timestamp: time.Now().Unix(),
 			})
@@ -283,7 +290,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				break
 			}
 			st.Budget.UsedToolCalls++
-			r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name})
+			r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c)})
 
 			var res tool.Result
 			if r.Tools != nil {
@@ -369,6 +376,9 @@ func (r *Runner) checkpoint(_ context.Context, st *State) {
 	if err := r.Store.Save(ctx, st); err != nil {
 		st.StopReason = joinReason(st.StopReason, "checkpoint failed: "+err.Error())
 	}
+	if r.Sync != nil {
+		r.Sync(append([]llm.Message(nil), st.Messages...))
+	}
 }
 
 // formatObservation 把工具结果包成「分隔的、不可信的数据」。
@@ -387,6 +397,25 @@ func toLLMCalls(calls []tool.Call) []llm.ToolCall {
 		out = append(out, llm.ToolCall{ID: c.ID, Name: c.Name, Input: c.Input})
 	}
 	return out
+}
+
+func callHint(c tool.Call) string {
+	var m map[string]any
+	if json.Unmarshal(c.Input, &m) != nil {
+		return c.Name
+	}
+	for _, k := range []string{"path", "file_path", "command", "cmd", "name", "task"} {
+		s, ok := m[k].(string)
+		if !ok || s == "" {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if len([]rune(s)) > 72 {
+			s = string([]rune(s)[:72]) + "…"
+		}
+		return c.Name + " " + s
+	}
+	return c.Name
 }
 
 func joinReason(a, b string) string {

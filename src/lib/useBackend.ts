@@ -36,6 +36,8 @@ type State = {
   changes: FileChange[]
   todos: TodoItem[]
   tools: ToolCall[]
+  /** 这一轮还没落成消息的思考文本，按 agent id */
+  reasoning: Record<string, string>
   tokenUsage: Record<string, { in: number; out: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
@@ -60,6 +62,7 @@ const EMPTY: State = {
   changes: [],
   todos: [],
   tools: [],
+  reasoning: {},
   tokenUsage: {},
   focusAgentId: null,
   pending: {},
@@ -138,6 +141,7 @@ export function useBackend() {
             return { ...a, messages: [...list, message] }
           }),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
+          reasoning: message.role === 'assistant' ? omit(s.reasoning, id) : s.reasoning,
           tokenUsage: newTokenUsage,
           // 后端回推了消息说明确实在处理，清掉 pending
           pending: omit(s.pending, id),
@@ -165,6 +169,14 @@ export function useBackend() {
     // loop 内工具调用：start 时记一条「正在做什么」，
     // end 时补上结果。这些信息让用户能看到循环真的在推进，
     // 而不是只看到一个「运行中」然后干等。
+    sub(events.agentReasoning, (e) => {
+      if (!e.reasoning) return
+      setState((s) => {
+        const prev = s.reasoning[e.id]
+        const next = prev ? `${prev}\n\n${e.reasoning}` : e.reasoning
+        return { ...s, reasoning: { ...s.reasoning, [e.id]: next } }
+      })
+    })
     sub(events.agentTool, (e) => {
       // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
       // 未知状态一律当 ok —— 不要因为一个新状态值就让类型崩掉。
@@ -175,15 +187,23 @@ export function useBackend() {
             ? 'error'
             : 'ok'
       setState((s) => {
-        // 同一次调用的 start 与 end 是同一条记录，按 id+tool 去重后追加
-        const prev = s.tools.filter((t) => !(t.id === e.id && t.tool === e.tool))
-        return {
-          ...s,
-          tools: [
-            ...prev,
-            { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
-          ].slice(-60),
+        if (e.phase === 'start') {
+          return {
+            ...s,
+            tools: [
+              ...s.tools,
+              { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
+            ].slice(-60),
+          }
         }
+        const tools = s.tools.slice()
+        for (let i = tools.length - 1; i >= 0; i--) {
+          if (tools[i].id === e.id && tools[i].tool === e.tool && tools[i].status === 'running') {
+            tools[i] = { ...tools[i], status }
+            break
+          }
+        }
+        return { ...s, tools }
       })
     })
     // 循环结局：done / failed。失败时要把原因带到界面上，

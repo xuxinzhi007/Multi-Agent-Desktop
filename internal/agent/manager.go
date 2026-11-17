@@ -44,11 +44,14 @@ type Agent struct {
 	BlockedReason string `json:"blockedReason,omitempty"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
-	StartedAt int64  `json:"-"` // 本轮开始的 Unix 秒
-	QueuedAt  int64  `json:"-"` // 进入排队的 Unix 秒，0 表示当前没在排队
-	LastTool  string `json:"-"` // 最近一次工具调用名
-	Chars     int    `json:"-"` // 本轮已生成字符数
-	LastError string `json:"-"` // 最近一次错误内容（供悬浮岛显示真实原因）
+	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
+	QueuedAt   int64  `json:"-"` // 进入排队的 Unix 秒，0 表示当前没在排队
+	LastTool   string `json:"-"` // 最近一次工具调用名
+	Chars      int    `json:"-"` // 本轮已生成字符数
+	LastError  string `json:"-"` // 最近一次错误内容（供悬浮岛显示真实原因）
+	turnKind   string `json:"-"` // ok / error / stopped，本轮结束原因，给等待方读
+	turnReason string `json:"-"`
+	workerGone bool   `json:"-"`
 
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
@@ -79,6 +82,8 @@ type Manager struct {
 	store     string // 持久化文件路径，空则不持久化
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
+	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
+	waiting map[string]string
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
@@ -527,6 +532,41 @@ type PromptRequest struct {
 	// ChannelID 非空表示这条 prompt 来自群聊，回复要写回该频道。
 	// 不再依赖从文本里猜 [channel:xxx] 标记。
 	ChannelID string `json:"channelId,omitempty"`
+	// Done 在这条消息执行结束后关闭。ask_agent 用它等待对方回复。
+	Done chan struct{} `json:"-"`
+	// outcome 非空时，结束原因写在这里再关闭 Done。只关闭 Done 时，等待方分不清正常回复和异常退出。
+	outcome *promptOutcome `json:"-"`
+}
+
+// promptOutcome 是主 agent 等子 agent 时拿到的那一次信号。
+// finish 只会发生一次：正常回复、报错、停止、会话退出都走这里。
+type promptOutcome struct {
+	once sync.Once
+	done chan struct{}
+	base int
+	text string
+	err  string
+}
+
+func (o *promptOutcome) finish(text, err string) {
+	if o == nil {
+		return
+	}
+	o.once.Do(func() {
+		o.text = text
+		o.err = err
+		close(o.done)
+	})
+}
+
+func complete(req PromptRequest, text, err string) {
+	if req.outcome != nil {
+		req.outcome.finish(text, err)
+		return
+	}
+	if req.Done != nil {
+		close(req.Done)
+	}
 }
 
 // Prompt 给某个 agent 发一条消息。如果 agent 空闲立即执行，否则排队。
@@ -536,32 +576,28 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 		return fmt.Errorf("agent %s not found", req.AgentID)
 	}
 
-	// 入队
-	select {
-	case a.queue <- req:
-		a.mu.Lock()
-		a.QueueLen = len(a.queue)
-		queued := a.Status == StatusIdle
-		if queued {
-			a.Status = StatusQueued
-			// 记下进入排队的时刻：界面靠它区分「刚排队」和「卡住了」。
-			// 两者长得一样，但处置方式完全不同。
-			a.QueuedAt = time.Now().Unix()
-		}
-		a.mu.Unlock()
-		// emit 必须在解锁之后。
-		//
-		// 订阅者（main.go 的 emitToWindow、以及将来任何想知道
-		// 「这个 agent 现在什么状态」的回调）会调 Get/Snapshot，
-		// 那是要拿 a.mu 的。持锁调用就是自己锁自己：
-		// 整个 agent 永久停在 queued，界面显示「排队中」但 worker 再也动不了。
-		if queued {
-			m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusQueued})
-		}
-		return nil
-	default:
-		return fmt.Errorf("agent %s queue full", req.AgentID)
+	if err := a.enqueue(req); err != nil {
+		return fmt.Errorf("agent %s: %w", req.AgentID, err)
 	}
+	a.mu.Lock()
+	queued := a.Status == StatusIdle
+	if queued {
+		a.Status = StatusQueued
+		// 记下进入排队的时刻：界面靠它区分「刚排队」和「卡住了」。
+		// 两者长得一样，但处置方式完全不同。
+		a.QueuedAt = time.Now().Unix()
+	}
+	a.mu.Unlock()
+	// emit 必须在解锁之后。
+	//
+	// 订阅者（main.go 的 emitToWindow、以及将来任何想知道
+	// 「这个 agent 现在什么状态」的回调）会调 Get/Snapshot，
+	// 那是要拿 a.mu 的。持锁调用就是自己锁自己：
+	// 整个 agent 永久停在 queued，界面显示「排队中」但 worker 再也动不了。
+	if queued {
+		m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusQueued})
+	}
+	return nil
 }
 
 // Stop 取消一个 agent 的当前执行并清空队列。
@@ -575,26 +611,77 @@ func (m *Manager) Stop(id string) bool {
 	return true
 }
 
-// Route 从一个 agent 发消息给另一个 agent（agent 主动协作）。
+// Route 把一段原文转给另一个会话。
+// 发给对方的是「来自谁的转发」，不在发送方历史里再塞一条假的用户消息。
 func (m *Manager) Route(fromId, toId, text string) error {
 	from, ok := m.Get(fromId)
 	if !ok {
 		return fmt.Errorf("agent %s not found", fromId)
 	}
+	to, ok := m.Get(toId)
+	if !ok {
+		return fmt.Errorf("agent %s not found", toId)
+	}
 
-	// 记录 from 的消息（作为上下文）
+	note := llm.Message{
+		Role:      "assistant",
+		Content:   fmt.Sprintf("已转给「%s」：%s", to.Name, text),
+		Timestamp: time.Now().Unix(),
+	}
 	from.mu.Lock()
-	from.Messages = append(from.Messages, llm.Message{
-		Role:    "user",
-		Content: fmt.Sprintf("[to %s] %s", toId, text),
-	})
+	from.Messages = append(from.Messages, note)
 	from.mu.Unlock()
+	m.emit("agent.message", map[string]any{"id": from.ID, "message": note})
+	m.goSave()
 
-	// 触发 to 的执行
 	return m.Prompt(context.Background(), PromptRequest{
 		AgentID: toId,
-		Text:    fmt.Sprintf("[from %s] %s", fromId, text),
+		Text:    fmt.Sprintf("来自会话「%s」的转发，只针对下面这段内容回复：\n%s", from.Name, text),
 	})
+}
+
+// FindByName 按会话名字找 agent。重名时返回错误，避免问错人。
+func (m *Manager) FindByName(name string) (*Agent, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("agent name is empty")
+	}
+	var hit *Agent
+	for _, a := range m.List() {
+		if a.Name != name && a.ID != name {
+			continue
+		}
+		if hit != nil {
+			return nil, fmt.Errorf("多个会话都叫 %s", name)
+		}
+		hit = a
+	}
+	if hit == nil {
+		return nil, fmt.Errorf("没有叫 %s 的会话", name)
+	}
+	return hit, nil
+}
+
+// beginAsk 记下 from 正在等 to。已经形成环就拒绝。
+func (m *Manager) beginAsk(from, to string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.waiting == nil {
+		m.waiting = map[string]string{}
+	}
+	for cur := to; cur != ""; cur = m.waiting[cur] {
+		if cur == from {
+			return fmt.Errorf("对方正在等你回复，不能再反过来问")
+		}
+	}
+	m.waiting[from] = to
+	return nil
+}
+
+func (m *Manager) endAsk(from string) {
+	m.mu.Lock()
+	delete(m.waiting, from)
+	m.mu.Unlock()
 }
 
 // workerLoop 每个 agent 一个，循环消费队列。
@@ -607,12 +694,14 @@ func (m *Manager) Route(fromId, toId, text string) error {
 //
 // 宁可让这一条消息失败并报错，也不能让 worker 消失。
 func (a *Agent) workerLoop(m *Manager) {
+	defer a.abandon()
 	for {
 		select {
 		case <-a.done:
 			return
 		case req := <-a.queue:
 			a.runSafely(m, req)
+			a.settle(req)
 		}
 	}
 }
@@ -632,9 +721,14 @@ func (a *Agent) runSafely(m *Manager, req PromptRequest) {
 
 // drainQueue 丢弃排队中的消息并把队列长度同步给界面。
 func (a *Agent) drainQueue() {
+	a.failQueued("执行时发生内部错误")
+}
+
+func (a *Agent) failQueued(reason string) {
 	for {
 		select {
-		case <-a.queue:
+		case req := <-a.queue:
+			complete(req, "", reason)
 		default:
 			a.mu.Lock()
 			a.QueueLen = 0
@@ -650,6 +744,11 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 		a.testHookPanic()
 	}
 	a.mu.Lock()
+	if req.outcome != nil {
+		req.outcome.base = len(a.Messages)
+	}
+	a.turnKind = ""
+	a.turnReason = ""
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
@@ -664,6 +763,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 
 	m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusRunning})
 	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
+	m.goSave()
 
 	// 根据 backend 选择执行方式
 	backend := a.Backend
@@ -683,6 +783,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	}
 
 	cancel()
+	m.goSave()
 }
 
 // executeMock 用内置 mock LLM 执行。
@@ -724,6 +825,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID 
 	}
 
 	if runCtx.Err() != nil {
+		a.noteStop("已停止")
 		a.setIdleOrQueued(m)
 		return
 	}
@@ -798,7 +900,9 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text, ch
 
 	for ev := range events {
 		if runCtx.Err() != nil {
-			return // 用户停止
+			a.noteStop("已停止")
+			a.setIdleOrQueued(m)
+			return
 		}
 
 		switch ev.Type {
@@ -839,6 +943,7 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text, ch
 	}
 
 	if runCtx.Err() != nil {
+		a.noteStop("已停止")
 		a.setIdleOrQueued(m)
 		return
 	}
@@ -946,6 +1051,8 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 	a.cancel = nil
 	if st == StatusError {
 		a.LastError = msg
+		a.turnKind = "error"
+		a.turnReason = msg
 	} else {
 		a.LastError = ""
 	}
@@ -972,21 +1079,74 @@ func (a *Agent) stop() bool {
 // StopAll 取消当前执行并清空队列。
 func (a *Agent) StopAll() {
 	a.stop()
-	// 清空队列
-	for {
-		select {
-		case <-a.queue:
-		default:
-			goto emptied
-		}
-	}
-emptied:
+	a.failQueued("已停止")
 	a.mu.Lock()
-	a.QueueLen = 0
 	if a.Status != StatusIdle {
 		a.Status = StatusIdle
 	}
 	a.mu.Unlock()
+}
+
+func (a *Agent) enqueue(req PromptRequest) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.workerGone {
+		complete(req, "", "会话已结束")
+		return fmt.Errorf("会话已结束")
+	}
+	select {
+	case a.queue <- req:
+		a.QueueLen = len(a.queue)
+		return nil
+	default:
+		return fmt.Errorf("queue full")
+	}
+}
+
+func (a *Agent) abandon() {
+	a.mu.Lock()
+	a.workerGone = true
+	a.mu.Unlock()
+	a.failQueued("会话已结束")
+}
+
+func (a *Agent) noteStop(reason string) {
+	if reason == "" {
+		reason = "已停止"
+	}
+	a.mu.Lock()
+	a.turnKind = "stopped"
+	a.turnReason = reason
+	a.mu.Unlock()
+}
+
+func (a *Agent) settle(req PromptRequest) {
+	if req.outcome == nil {
+		if req.Done != nil {
+			close(req.Done)
+		}
+		return
+	}
+	sn := a.Snapshot()
+	text := lastAssistantTextSince(sn, req.outcome.base)
+	errMsg := ""
+	switch sn.turnKind {
+	case "error":
+		errMsg = sn.turnReason
+		if errMsg == "" {
+			errMsg = "异常结束"
+		}
+	case "stopped":
+		errMsg = sn.turnReason
+		if errMsg == "" {
+			errMsg = "已停止"
+		}
+	default:
+		if strings.TrimSpace(text) == "" {
+			errMsg = "没有给出文字回复"
+		}
+	}
+	complete(req, text, errMsg)
 }
 
 // Snapshot 在锁内返回 Agent 的一致性拷贝，供跨 goroutine 读取历史/状态。
@@ -1013,6 +1173,8 @@ func (a *Agent) Snapshot() *Agent {
 		LastTool:      a.LastTool,
 		Chars:         a.Chars,
 		LastError:     a.LastError,
+		turnKind:      a.turnKind,
+		turnReason:    a.turnReason,
 	}
 }
 

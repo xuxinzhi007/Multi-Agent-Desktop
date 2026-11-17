@@ -20,6 +20,8 @@ import (
 type Turn struct {
 	// Text 是本轮文字输出（可能为空，也可能是最终答案）。
 	Text string
+	// Reasoning 是思考模式返回的推理，和 Text 分开。
+	Reasoning string
 	// Calls 是模型想执行的工具。为空表示它认为任务已经完成。
 	Calls []tool.Call
 }
@@ -59,10 +61,11 @@ type wireFunction struct {
 }
 
 type wireMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type wireToolCall struct {
@@ -79,10 +82,12 @@ type wireToolCall struct {
 // 这里把 OpenAI 的 tool_calls 归一化成结构化的 Call，
 // 模型层的格式差异到此为止 —— 循环和工具层不需要知道协议细节。
 func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec) (Turn, error) {
+	echoReasoning := thinkingOn(c.cfg)
 	req := map[string]any{
 		"model":    c.cfg.Model,
-		"messages": toWire(msgs),
+		"messages": toWire(msgs, echoReasoning),
 	}
+	applyThinking(req, c.cfg)
 	if len(tools) > 0 {
 		wt := make([]wireTool, 0, len(tools))
 		for _, s := range tools {
@@ -138,8 +143,9 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 	var out struct {
 		Choices []struct {
 			Message struct {
-				Content   string         `json:"content"`
-				ToolCalls []wireToolCall `json:"tool_calls"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"`
+				ToolCalls        []wireToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Error *struct {
@@ -157,7 +163,7 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 	}
 
 	msg := out.Choices[0].Message
-	turn := Turn{Text: msg.Content}
+	turn := Turn{Text: msg.Content, Reasoning: msg.ReasoningContent}
 	for _, tc := range msg.ToolCalls {
 		args := tc.Function.Arguments
 		if strings.TrimSpace(args) == "" {
@@ -172,10 +178,29 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 	return turn, nil
 }
 
-func toWire(msgs []Message) []wireMessage {
+func thinkingOn(cfg Config) bool {
+	return cfg.Provider == "deepseek" && cfg.Thinking != "off"
+}
+
+func applyThinking(req map[string]any, cfg Config) {
+	if cfg.Provider != "deepseek" {
+		return
+	}
+	if cfg.Thinking == "off" {
+		req["thinking"] = map[string]string{"type": "disabled"}
+		return
+	}
+	req["thinking"] = map[string]string{"type": "enabled"}
+	req["reasoning_effort"] = "high"
+}
+
+func toWire(msgs []Message, echoReasoning bool) []wireMessage {
 	out := make([]wireMessage, 0, len(msgs))
 	for _, m := range msgs {
 		w := wireMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolID}
+		if echoReasoning {
+			w.ReasoningContent = m.Reasoning
+		}
 		for _, tc := range m.ToolCalls {
 			wtc := wireToolCall{ID: tc.ID, Type: "function"}
 			wtc.Function.Name = tc.Name
