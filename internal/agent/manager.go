@@ -590,6 +590,10 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	}
 
 	switch backend {
+	case "loop":
+		// 自持循环：停止、预算、去重、检查点都在进程内可控。
+		// CLI 的两种 backend 暂时保留，用来做新旧路径的对照。
+		a.executeLoop(m, runCtx, req.Text, req.ChannelID)
 	case "claude", "codex":
 		a.executeCLI(m, runCtx, backend, req.Text, req.ChannelID)
 	default:

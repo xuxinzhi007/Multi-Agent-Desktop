@@ -31,6 +31,7 @@ const LABEL_STYLE = {
 } as const
 
 const BACKENDS = [
+  { id: 'loop', label: 'Agent Loop', desc: '自持循环 · 可中断' },
   { id: 'mock', label: '内置', desc: '无需配置' },
   { id: 'claude', label: 'Claude', desc: 'code -p' },
   { id: 'codex', label: 'Codex', desc: 'exec --json' },

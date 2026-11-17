@@ -294,6 +294,35 @@
 
 ---
 
+## 15. 工具超时被误报成「退出码 -1」，模型会重试同一个命令
+
+- **现象**：`bash` 超时后返回 `status: ok` + `exit code -1`，而不是 `timeout`。集成测试 `TestBashTimeoutKillsProcessGroup` 断言 `StatusTimeout` 时第一次就红了。
+- **根因**：被 SIGKILL 杀掉时 `cmd.Run()` 返回 `signal: killed`，它**同样满足** `*exec.ExitError`。代码先判断 `ExitError` 再判断 `ctx.Err()`，于是走了「非零退出」分支。
+- **为什么危险**：`exit code -1` 会让模型以为命令写错了，于是重试同一个命令 —— 正好是「原地打转」的来源。控制点没被拿回来，只是换了个地方失效。
+- **解决方案**：`Execute` 里**先查 ctx 再查 ExitError**。
+  ```go
+  if execCtx.Err() == context.DeadlineExceeded { /* StatusTimeout */ }
+  if execCtx.Err() == context.Canceled { /* StatusTimeout */ }
+  if ee, ok := runErr.(*exec.ExitError); ok { /* 真·非零退出 */ }
+  ```
+- **预防措施与护栏**：`TestBashTimeoutKillsProcessGroup` 直接跑 `sleep 30 & sleep 30`，断言 `StatusTimeout` + 5s 内返回。同时验证了进程组 kill 真的生效。
+
+护栏：`internal/tool/builtin/builtin_test.go`
+
+---
+
+## 16. 停止时写了检查点，但写不进去
+
+- **现象**：停止后 `store.Load` 拿到的 phase 还是 `thinking`，没有落盘。`TestIntegrationStopPersistsReason` 抓到的。
+- **根因**：`checkpoint(ctx, st)` 传的是**已取消的 runCtx**，而 `FileStore.Save` 第一行就是 `if err := ctx.Err(); err != nil { return err }`，直接拒绝写入。**最需要写成功的时刻反而写不进去。**
+- **为什么危险**：用户按了停止，界面上停了，但没有任何记录说明停在哪、为什么停。下次 resume 时预算和进度全丢。
+- **解决方案**：`checkpoint` 不再接收运行时 ctx，内部用 `context.WithTimeout(context.Background(), 5s)`。落盘的生命周期与运行生命周期解耦。
+- **附带修正**：`Stop(reason)` 记录的**用户原因优先**。之前循环自己的 "cancelled during model call" 会覆盖用户说的「我不想要这个改法」，而这两句话的含义完全不同。
+
+护栏：`internal/loop/integration_test.go`（停止后断言 checkpoint 存在且 `StopReason` 含用户原因）
+
+---
+
 ## 待办：已知的护栏缺口
 
 按「补起来最划算」排序。补完把对应条目从这一节删掉。

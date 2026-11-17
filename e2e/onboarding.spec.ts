@@ -57,3 +57,12 @@ test('创建表单：角色预设应当可以一键选，而不是只能靠下�
   const n = await presetButtons.count()
   expect(n, '角色只能通过下拉选择，无法一键点选常用预设').toBeGreaterThan(0)
 })
+
+test('新建 agent 时能看到 Agent Loop 这个 backend', async ({ page }) => {
+  // 已有 beforeEach 导航，不要再 goto
+  await page.getByRole('button', { name: /新建 Agent/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  // 自持循环是唯一能真正中断的 backend，不能从界面上消失
+  await expect(dialog.getByText('Agent Loop')).toBeVisible()
+})

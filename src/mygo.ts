@@ -87,6 +87,8 @@ export interface ErrorEvent {
 export interface Message {
   role: string;
   content: string;
+  toolCalls?: ToolCall[];
+  toolId?: string;
   timestamp?: number;
 }
 
@@ -219,6 +221,12 @@ export interface SystemInfo {
   arch: string;
   goVersion: string;
   mygo: boolean;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: unknown;
 }
 
 /** ToolStartEvent 是工具调用开始。 */

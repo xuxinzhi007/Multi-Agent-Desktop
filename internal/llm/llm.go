@@ -2,15 +2,29 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
 
 // Message 是对话历史里的一条。
+//
+// ToolCalls / ToolID 让工具调用可以留在同一条历史里，
+// 而不是另建一套结构 —— 已有的 agents.json 里有几千条老消息，
+// 新字段带 omitempty 可平滑反序列化，不需要迁移脚本。
 type Message struct {
-	Role      string `json:"role"` // system | user | assistant
-	Content   string `json:"content"`
-	Timestamp int64  `json:"timestamp,omitempty"` // Unix 秒
+	Role      string     `json:"role"` // system | user | assistant | tool
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // role=assistant 时模型发起的调用
+	ToolID    string     `json:"toolId,omitempty"`    // role=tool 时对应哪个调用
+	Timestamp int64      `json:"timestamp,omitempty"` // Unix 秒
+}
+
+// ToolCall 是模型请求的一次工具调用。
+type ToolCall struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // Chunk 是流式返回的一个片段。
