@@ -53,6 +53,8 @@ type Config struct {
 	// Thinking 是会话上的思考模式。on 打开，off 关掉。
 	// 空值对 deepseek 按打开处理，其它厂商不带这个字段。
 	Thinking string `json:"thinking,omitempty"`
+	// ContextWindow 是这次请求能用的上下文长度。0 表示按 provider 的默认窗口。
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 var ErrNotConfigured = errors.New("llm: provider not configured")

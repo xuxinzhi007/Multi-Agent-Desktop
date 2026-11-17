@@ -147,6 +147,8 @@ type Runner struct {
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
+	// ContextLimit 是模型窗口。大于 0 时，发出去的历史会先压缩到窗口的七成左右。
+	ContextLimit int
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -239,8 +241,15 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		// 模型调用是最贵的一步，在它之后落盘意味着崩溃时钱白花了。
 		r.checkpoint(runCtx, st)
 
-		// ── 4. 调模型
-		turn, err := r.Model.Turn(runCtx, r.context(st), r.specs())
+		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
+		raw := r.context(st)
+		budget := r.promptBudget()
+		msgs := llm.Compact(raw, budget)
+		turn, err := r.Model.Turn(runCtx, msgs, r.specs())
+		if err != nil && budget > 0 && llm.IsContextOverflow(err.Error()) && runCtx.Err() == nil {
+			msgs = llm.Compact(raw, budget/2)
+			turn, err = r.Model.Turn(runCtx, msgs, r.specs())
+		}
 		if err != nil {
 			if runCtx.Err() != nil {
 				st.Phase = PhaseStopped
@@ -336,6 +345,18 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 //
 // 系统提示每次重新放，而不是只在第一条：模型在长对话里
 // 会逐渐「忘记」开头的约束，每轮重申是最省的缓解手段。
+func (r *Runner) promptBudget() int {
+	if r.ContextLimit <= 0 {
+		return 0
+	}
+	n := r.ContextLimit * 70 / 100
+	n -= 800
+	if n < 512 {
+		n = 512
+	}
+	return n
+}
+
 func (r *Runner) context(st *State) []llm.Message {
 	out := make([]llm.Message, 0, len(st.Messages)+1)
 	if r.System != "" {

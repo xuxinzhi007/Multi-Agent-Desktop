@@ -1,0 +1,808 @@
+[
+  {
+    "id": "ch-1794486860541966000",
+    "name": "测试",
+    "members": [
+      "agent-1794468530762089000"
+    ],
+    "messages": [
+      {
+        "id": "msg-1794486867574957000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "在吗",
+        "at": 1794486867
+      },
+      {
+        "id": "msg-1794486919980277000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas' insa",
+        "at": 1794486919
+      },
+      {
+        "id": "msg-1794486926845977000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna' @阿十八年；a' ansa",
+        "at": 1794486926
+      },
+      {
+        "id": "msg-1794488599225729000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "是博纳拉姆啊",
+        "at": 1794488599
+      },
+      {
+        "id": "msg-1794488603659721000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794470139568968000",
+        "fromName": "aosina",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: 是博纳拉姆啊\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488603
+      },
+      {
+        "id": "msg-1794488603659986000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: 是博纳拉姆啊\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488603
+      },
+      {
+        "id": "msg-1794488603660127000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: 是博纳拉姆啊\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488603
+      },
+      {
+        "id": "msg-1794488603683942000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: 是博纳拉姆啊\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488603
+      },
+      {
+        "id": "msg-1794488916303130000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas’  帮我啊看见撒了什么",
+        "at": 1794488916
+      },
+      {
+        "id": "msg-1794488920698127000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas’  帮我啊看见撒了什么\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488920
+      },
+      {
+        "id": "msg-1794488920698142000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas’  帮我啊看见撒了什么\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488920
+      },
+      {
+        "id": "msg-1794488920698147000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas’  帮我啊看见撒了什么\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488920
+      },
+      {
+        "id": "msg-1794488920698157000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794470139568968000",
+        "fromName": "aosina",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas’  帮我啊看见撒了什么\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794488920
+      },
+      {
+        "id": "msg-1794489504146807000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@阿十八年；a' 阿森纳什么",
+        "at": 1794489504
+      },
+      {
+        "id": "msg-1794489508477539000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @阿十八年；a' 阿森纳什么\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794489508
+      },
+      {
+        "id": "msg-1794489512053700000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "阿萨那算了；啊",
+        "at": 1794489512
+      },
+      {
+        "id": "msg-1794489513825676000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "那是；a's",
+        "at": 1794489513
+      },
+      {
+        "id": "msg-1794489524428086000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas'  ansas",
+        "at": 1794489524
+      },
+      {
+        "id": "msg-1794489528564540000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794489528
+      },
+      {
+        "id": "msg-1794489971236846000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "absnas'",
+        "at": 1794489971
+      },
+      {
+        "id": "msg-1794489976570137000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas’ 你啊啊是巴洛克式",
+        "at": 1794489976
+      },
+      {
+        "id": "msg-1794490150533455000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@aosina ajsma;",
+        "at": 1794490150
+      },
+      {
+        "id": "msg-1794490154672795000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794470139568968000",
+        "fromName": "aosina",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794490154
+      },
+      {
+        "id": "msg-1794490162543836000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@absna;’s",
+        "at": 1794490162
+      },
+      {
+        "id": "msg-1794490169162665000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "asnas;",
+        "at": 1794490169
+      },
+      {
+        "id": "msg-1794490182425264000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "asa’s,",
+        "at": 1794490182
+      },
+      {
+        "id": "msg-1794490186919681000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@aosina san;as'm",
+        "at": 1794490186
+      },
+      {
+        "id": "msg-1794490191051800000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794470139568968000",
+        "fromName": "aosina",
+        "text": "[React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794490191
+      },
+      {
+        "id": "msg-1794491446372805000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "asnla;s",
+        "at": 1794491446
+      },
+      {
+        "id": "msg-1794491450178812000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna’ sna;s'",
+        "at": 1794491450
+      },
+      {
+        "id": "msg-1794491452475541000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "nsa's",
+        "at": 1794491452
+      },
+      {
+        "id": "msg-1794491997262585000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "dfghj'",
+        "at": 1794491997
+      },
+      {
+        "id": "msg-1794555731709833000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas' sans",
+        "at": 1794555731,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468525453977000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468528763659000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794555737954747000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas' sbas",
+        "at": 1794555737,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468525453977000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468528763659000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794555742272044000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@jspas' 三",
+        "at": 1794555742,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468525453977000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468528763659000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794555751665949000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n\n[user] 你: @jspas' sans\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555751
+      },
+      {
+        "id": "msg-1794555751666005000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n\n[user] 你: @jspas' sans\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555751
+      },
+      {
+        "id": "msg-1794555751666031000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n\n[user] 你: @jspas' sans\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555751
+      },
+      {
+        "id": "msg-1794555771819214000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n\n[user] 你: @jspas' sbas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555771
+      },
+      {
+        "id": "msg-1794555771819233000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n\n[user] 你: @jspas' sbas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555771
+      },
+      {
+        "id": "msg-1794555771819245000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n\n[user] 你: @jspas' sbas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555771
+      },
+      {
+        "id": "msg-1794555792188889000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n你: @jspas' 三\n\n[user] 你: @jspas' 三\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555792
+      },
+      {
+        "id": "msg-1794555792188918000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468525453977000",
+        "fromName": "jspas'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n你: @jspas' 三\n\n[user] 你: @jspas' 三\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555792
+      },
+      {
+        "id": "msg-1794555792188934000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468528763659000",
+        "fromName": "阿十八年；a'",
+        "text": "[React / TypeScript 专家] 收到：## 群聊上下文\n你: 阿萨那算了；啊\n你: 那是；a's\n你: @jspas'  ansas\njspas': [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @jspas'  ansas\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: absnas'\n你: @jspas’ 你啊啊是巴洛克式\n你: @aosina ajsma;\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina ajsma;\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: @absna;’s\n你: asnas;\n你: asa’s,\n你: @aosina san;as'm\naosina: [React / TypeScript 专家] 收到：[channel:ch-1794486860541966000] 你: @aosina san;as'm\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n\n你: asnla;s\n你: @sna’ sna;s'\n你: nsa's\n你: dfghj'\n你: @jspas' sans\n你: @jspas' sbas\n你: @jspas' 三\n\n[user] 你: @jspas' 三\n\n这是 mock 模式的占位回复，不是真实分析。\n在「设置」里切到 Ollama / OpenAI / DeepSeek 后，这里会变成真实模型输出。\n\n现在这个 mock 只用来验证三件事：\n1. 多个 agent 能否并行流式输出\n2. 会话之间是否隔离\n3. 停止按钮能否中断\n",
+        "at": 1794555792
+      },
+      {
+        "id": "msg-1794557605943969000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@阿十八年；a' @sna'",
+        "at": 1794557605
+      },
+      {
+        "id": "msg-1794825899271974000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "法国红酒",
+        "at": 1794825899
+      },
+      {
+        "id": "msg-1794825905867150000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna' @过后就哭了",
+        "at": 1794825905
+      },
+      {
+        "id": "msg-1794899650437331000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna' 你在做什么",
+        "at": 1794899650
+      },
+      {
+        "id": "msg-1794907165509195000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna' 你在做什么",
+        "at": 1794907165,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907165909779000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我在阅读你提供的上下文。你似乎是在讨论关于红酒的话题，关于法国红酒的信息。如果你有其他问题或需要帮助，请随时告诉我。",
+        "at": 1794907165
+      },
+      {
+        "id": "msg-1794907174497582000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "没有吧",
+        "at": 1794907174,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907174893199000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文。你似乎在讨论关于红酒的话题，关于法国红酒的信息。如果你有其他问题或需要帮助，请随时告诉我。",
+        "at": 1794907174
+      },
+      {
+        "id": "msg-1794907190712780000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "进行整理一下上下文信息",
+        "at": 1794907190,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907191128428000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文，以便进行整理。你似乎在讨论关于红酒的话题，关于法国红酒的信息。如果你有其他问题或需要帮助，请随时告诉我。",
+        "at": 1794907191
+      },
+      {
+        "id": "msg-1794907198094318000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "给出建议",
+        "at": 1794907198,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907199239925000",
+        "channelId": "ch-1794486860541966000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文，以便进行整理。你似乎在讨论关于红酒的话题，关于法国红酒的信息。如果你有其他问题或需要帮助，请随时告诉我。\n\n我为你提供了以下建议：\n\n1. 对于法国红酒，你可以考虑将信息整理成一个总结文章，以便更全面地介绍这种红酒。\n2. 如果你希望在阅读过程中增加更多关于红酒的信息，可以尝试从不同的角度或来源获取信息。\n3. 如果你希望在阅读过程中增加更多的见解，可以考虑加入一些与红酒相关的话题，比如红酒的历史、文化价值等。\n\n你是否有其他问题或需要进一步的帮助？",
+        "at": 1794907199
+      }
+    ]
+  },
+  {
+    "id": "ch-1794555687541781000",
+    "name": "按那是",
+    "members": [],
+    "messages": [
+      {
+        "id": "msg-1794555698263869000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@Qqqq ama's",
+        "at": 1794555698,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476697022159000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794555715869106000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@是哪；",
+        "at": 1794555715,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476697022159000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907210228262000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "在吗",
+        "at": 1794907210,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907221998328000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "有人吗",
+        "at": 1794907221,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907232964465000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "123",
+        "at": 1794907232,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907233101861000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "agent-1794476703538762000",
+        "fromName": "Qqqq",
+        "text": "123",
+        "at": 1794907233
+      },
+      {
+        "id": "msg-1794907237478259000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "有人吗",
+        "at": 1794907237,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907237568714000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "agent-1794476703538762000",
+        "fromName": "Qqqq",
+        "text": "123",
+        "at": 1794907237
+      },
+      {
+        "id": "msg-1794907241468185000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "在做什么",
+        "at": 1794907241,
+        "deliveries": [
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476707022068000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907241583324000",
+        "channelId": "ch-1794555687541781000",
+        "fromId": "agent-1794476703538762000",
+        "fromName": "Qqqq",
+        "text": "你在做些什么？",
+        "at": 1794907241
+      }
+    ]
+  },
+  {
+    "id": "ch-1794830304177663000",
+    "name": "额哄骗我",
+    "members": [
+      "agent-1794468530762089000"
+    ],
+    "messages": [
+      {
+        "id": "msg-1794830308622139000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "撒",
+        "at": 1794830308
+      },
+      {
+        "id": "msg-1794907250777865000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "有人吗",
+        "at": 1794907250,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "skipped",
+            "reason": "discuss 模式 · 未被点名"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907251843083000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文，以便进行整理。你似乎在讨论关于红酒的话题，有人对红酒的看法。如果你有其他问题或需要帮助，请随时告诉我。\n\n我为你提供了以下建议：\n\n1. 对于法国红酒，你可以考虑将信息整理成一个总结文章，以便更全面地介绍这种红酒。\n2. 如果你希望在阅读过程中增加更多关于红酒的信息，可以尝试从不同的角度或来源获取信息。\n3. 如果你希望在阅读过程中增加更多的见解，可以考虑加入一些与红酒相关的话题，比如红酒的历史、文化价值等。\n\n你是否有其他问题或需要进一步的帮助？",
+        "at": 1794907251
+      },
+      {
+        "id": "msg-1794907273276904000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@sna' @Qqqq 在做什么",
+        "at": 1794907273,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794907273813239000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "agent-1794476703538762000",
+        "fromName": "Qqqq",
+        "text": "你在做什么？",
+        "at": 1794907273
+      },
+      {
+        "id": "msg-1794907274790933000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文，以便进行整理。你似乎在讨论关于红酒的话题，有人对红酒的看法。如果你有其他问题或需要帮助，请随时告诉我。\n\n我为你提供了以下建议：\n\n1. 对于法国红酒，你可以考虑将信息整理成一个总结文章，以便更全面地介绍这种红酒。\n2. 如果你希望在阅读过程中增加更多关于红酒的信息，可以尝试从不同的角度或来源获取信息。\n3. 如果你希望在阅读过程中增加更多的见解，可以考虑加入一些与红酒相关的话题，比如红酒的历史、文化价值等。\n\n你是否有其他问题或需要进一步的帮助？",
+        "at": 1794907274
+      },
+      {
+        "id": "msg-1794908069292092000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "user",
+        "fromName": "你",
+        "text": "@Qqqq @sna' 在做什么",
+        "at": 1794908069,
+        "deliveries": [
+          {
+            "agentId": "agent-1794468530762089000",
+            "status": "delivered"
+          },
+          {
+            "agentId": "agent-1794476703538762000",
+            "status": "delivered"
+          }
+        ]
+      },
+      {
+        "id": "msg-1794908070707975000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "agent-1794476703538762000",
+        "fromName": "Qqqq",
+        "text": "你: 在做什么？",
+        "at": 1794908070
+      },
+      {
+        "id": "msg-1794908071702992000",
+        "channelId": "ch-1794830304177663000",
+        "fromId": "agent-1794468530762089000",
+        "fromName": "sna'",
+        "text": "我明白了。现在我再次阅读你提供的上下文，以便进行整理。你似乎在讨论关于红酒的话题，有人对红酒的看法。如果你有其他问题或需要帮助，请随时告诉我。\n\n我为你提供了以下建议：\n\n1. 对于法国红酒，你可以考虑将信息整理成一个总结文章，以便更全面地介绍这种红酒。\n2. 如果你希望在阅读过程中增加更多关于红酒的信息，可以尝试从不同的角度或来源获取信息。\n3. 如果你希望在阅读过程中增加更多的见解，可以考虑加入一些与红酒相关的话题，比如红酒的历史、文化价值等。\n\n你是否有其他问题或需要进一步的帮助？",
+        "at": 1794908071
+      }
+    ],
+    "policy": "discuss"
+  }
+]

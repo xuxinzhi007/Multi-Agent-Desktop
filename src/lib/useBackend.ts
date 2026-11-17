@@ -455,7 +455,26 @@ export function useBackend() {
     [],
   )
 
-  return { ...state, send, approveTool, rejectTool, clearFocus }
+  const refreshNotes = useCallback(() => {
+    API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 })
+      .then((notes) => setState((s) => ({ ...s, notes: notes ?? [] })))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const pull = () => refreshNotes()
+    const onVis = () => {
+      if (document.visibilityState === 'visible') pull()
+    }
+    window.addEventListener('focus', pull)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.removeEventListener('focus', pull)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [refreshNotes])
+
+  return { ...state, send, approveTool, rejectTool, clearFocus, refreshNotes }
 }
 
 function omit<T extends Record<string, unknown>>(obj: T, key: string): T {

@@ -110,6 +110,7 @@ export interface Config {
   apiKey: string;
   model: string;
   thinking?: string;
+  contextWindow?: number;
 }
 
 /** CreateAgentRequest 是新建 agent 的参数。 */
@@ -461,15 +462,11 @@ export const API = {
     return call("API.IsAlwaysOnTop");
   },
   /**
-   * IslandResize 由灵动岛在展开/收起时调用。
-   *
-   * 关键：mygo 的 SetSize 是瞬时跳变。直接设目标尺寸会让窗口「啪」地变大变小，
-   * 而 CSS 过渡还在跑 —— 用户看到的就是「内容被压缩后弹回」。
-   * 所以这里逐帧推进窗口尺寸，用和前端相同的时长与缓动，
-   * 让「容器」和「内容」是同一个动作。
+   * IslandResize 保持悬浮窗为胶囊窗口。
+   * 历史版本会在这里把窗口拉到 392×468 的面板；那个形态已经去掉。
    */
-  islandResize(expanded: boolean): Promise<boolean> {
-    return call("API.IslandResize", expanded);
+  islandResize(arg0: boolean): Promise<boolean> {
+    return call("API.IslandResize", arg0);
   },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");

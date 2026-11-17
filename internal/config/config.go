@@ -27,7 +27,7 @@ type Settings struct {
 	LLM llm.Config `json:"llm"`
 	// Providers 是已保存的服务厂商。模型不在这里选，只存地址和 Key。
 	Providers []llm.Config `json:"providers,omitempty"`
-	// WorkDir 是新建会话的默认工作目录（空则用用户主目录）
+	// WorkDir 是新建会话的默认工作目录。空则用应用数据目录下的 workspace，不用用户主目录。
 	WorkDir string `json:"workDir,omitempty"`
 }
 

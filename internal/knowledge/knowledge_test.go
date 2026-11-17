@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTempFileStore 在临时目录创建 JSONL 知识库，并在清理时校验文件可读。
@@ -301,6 +302,29 @@ func TestConcurrentUpsertKeepsFileValid(t *testing.T) {
 	}
 	if got := len(s2.Query(Query{})); got != n {
 		t.Errorf("after %d concurrent Upserts: len = %d, want %d", n, got, n)
+	}
+}
+
+func TestQuerySeesExternalAppend(t *testing.T) {
+	s, path := newTempFileStore(t)
+	if _, err := s.Upsert(Note{ID: "old", Title: "旧", Body: "一条"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"id\":\"new\",\"title\":\"新笔记\",\"body\":\"外部写入\"}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	all := s.Query(Query{})
+	if len(all) != 2 || all[1].Title != "新笔记" {
+		t.Fatalf("notes=%v", all)
 	}
 }
 

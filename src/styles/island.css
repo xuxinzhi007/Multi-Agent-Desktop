@@ -1,768 +1,457 @@
-/* ============================================================
-   灵动岛 —— 多 Agent 协作面板
-   折叠态是「状态瞥一眼」，展开态是「操作与详情」。
-   两态共用同一套视觉语言：深色玻璃 + 低饱和高亮 + 细网格底。
-   ============================================================ */
+/* 胶囊岛。所有运动都发生在 180–252 × 46 的圆角里。 */
 
 :root {
-  /* 状态色：低饱和高亮，深底上不刺眼 */
-  --st-running: #34d399;
-  --st-thinking: #a78bfa;
-  --st-waiting: #fbbf24;
-  --st-done: #7c869e;
-  --st-error: #ff5a7a;
-  --st-stopped: #4b5468;
-
-  --island-w-collapsed: 252px;
-  --island-h-collapsed: 44px;
-  --island-w-expanded: 392px;
-  --island-h-expanded: 468px;
-  --island-r-collapsed: 22px;
-  --island-r-expanded: 26px;
-
-  /* 弹簧曲线：展开/收起统一用它，避免线性生硬 */
-  --spring: cubic-bezier(0.3, 0.9, 0.28, 1.06);
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ink: #151922;
+  --bg: #090b10;
+  --cyan: #54d9ff;
+  --violet: #a78bfa;
+  --ok: #43d9a3;
+  --warn: #f5b85c;
+  --err: #ff657a;
+  --muted: #8994a7;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html,
 body,
 #root {
   margin: 0;
-  padding: 0;
+  height: 100%;
+  overflow: hidden;
   background: transparent;
-  /* 不要 height:100% —— FitContent 测不到内容高度 */
-  /* 不要 overflow:hidden —— tooltip 会被裁 */
 }
 
 body {
   font-family: ui-sans-serif, -apple-system, 'Segoe UI', system-ui, sans-serif;
-  display: flex;
-  justify-content: center;
-  /* 顶部留一点间距，窗口贴边时视觉更舒服 */
-  padding: 0;
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-button {
-  font-family: inherit;
-  cursor: pointer;
-}
-
-/* ---------- 岛体 ---------- */
-.island {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(120% 90% at 50% -20%, rgba(120, 150, 255, 0.1), transparent 60%),
-    linear-gradient(180deg, rgba(22, 25, 34, 0.92), rgba(13, 15, 22, 0.96));
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.09);
   color: #e8ebf1;
-  /* 内侧高光：玻璃质感的关键，没有它就是一坨半透明灰 */
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
-    0 12px 40px -12px rgba(0, 0, 0, 0.72);
-  /* 与 Go 侧逐帧 resize 用同一时长和曲线 —— 容器和内容是同一个动作 */
-  transition:
-    width 380ms var(--spring),
-    height 380ms var(--spring),
-    border-radius 380ms var(--spring);
 }
 
-/* 细网格底：给深色面一点材质，几乎看不见但去掉就变平 */
-.island::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
-  background-size: 22px 22px;
-  mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 20%, transparent 80%);
+button,
+input {
+  font-family: inherit;
 }
 
-.island--collapsed {
-  width: var(--island-w-collapsed);
-  height: var(--island-h-collapsed);
-  border-radius: var(--island-r-collapsed);
-}
-
-.island--expanded {
-  width: min(var(--island-w-expanded), calc(100vw - 24px));
-  height: min(var(--island-h-expanded), calc(100vh - 16px));
-  border-radius: var(--island-r-expanded);
-}
-
-/* 展开时的「信封开口」高光线 */
-.island__seam {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  height: 1px;
-  width: 0;
-  transform: translateX(-50%);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(160, 190, 255, 0.55),
-    rgba(255, 255, 255, 0.8),
-    rgba(160, 190, 255, 0.55),
-    transparent
-  );
-  opacity: 0;
-  transition:
-    width 460ms var(--spring),
-    opacity 260ms ease;
-}
-.island--expanded .island__seam {
-  width: 64%;
-  opacity: 1;
-}
-
-/* ---------- 折叠态 ---------- */
-.island__pill {
-  position: relative;
+.mini-page,
+.demo-page {
   height: 100%;
-  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.demo-page {
+  flex-direction: column;
+  gap: 28px;
+  background: var(--bg);
+  padding: 28px 16px;
+}
+
+.island {
+  --speed: 1;
+  position: relative;
+  box-sizing: border-box;
+  height: 46px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 12px 0 9px;
-  border: none;
-  background: transparent;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 46%), var(--ink);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 6px 16px rgba(0, 0, 0, 0.28);
   color: inherit;
-  text-align: left;
-  /* 退场不立刻消失：跟随容器一起收，否则看起来是「内容先被抽掉」 */
-  transition:
-    opacity 240ms ease,
-    transform 380ms var(--spring);
-}
-.island--expanded .island__pill {
-  opacity: 0;
-  transform: scale(0.96);
-  pointer-events: none;
+  overflow: hidden;
+  transition: width 420ms var(--ease);
+  -webkit-app-region: drag;
 }
 
-/* 头像堆叠：轻浮动画让「它们活着」被感知到 */
-.avatars {
-  display: flex;
-  flex-shrink: 0;
+.island__rim {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  pointer-events: none;
+  opacity: 0.35;
 }
-.avatar {
-  width: 26px;
-  height: 26px;
-  border-radius: 9px;
+
+.mode-idle {
+  justify-content: center;
+  padding: 0;
+}
+
+.mode-idle .island__rim {
+  border-color: rgba(255, 255, 255, 0.04);
+}
+
+.mode-thinking .island__rim {
+  border-color: var(--cyan);
+  animation: rim calc(3.2s / var(--speed)) ease-in-out infinite;
+}
+
+.mode-communicating .island__rim,
+.mode-collaborating .island__rim {
+  border-color: rgba(84, 217, 255, 0.45);
+  opacity: 0.55;
+}
+
+.mode-completed .island__rim {
+  border-color: var(--ok);
+  animation: rim-once calc(1.3s / var(--speed)) ease-out 1;
+}
+
+.mode-error .island__rim {
+  border-color: var(--err);
+  opacity: 0.9;
+}
+
+.mode-error {
+  animation: nudge calc(460ms / var(--speed)) ease-out 1;
+}
+
+.home {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cyan);
   display: grid;
   place-items: center;
-  font-size: 11px;
-  font-weight: 700;
-  color: #0b0d12;
-  border: 2px solid rgba(13, 15, 22, 0.92);
-  margin-left: -8px;
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.core,
+.mark {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.core__ring {
+  fill: none;
+  stroke: rgba(84, 217, 255, 0.45);
+  stroke-width: 1.2;
+}
+
+.core__heart {
+  fill: var(--cyan);
+  transform-origin: 12px 12px;
+  animation: breath calc(3.6s / var(--speed)) ease-in-out infinite;
+}
+
+.mode-thinking .core__ring {
+  stroke: var(--cyan);
+  stroke-dasharray: 14 40;
+  transform-origin: 12px 12px;
+  animation: spin calc(2.8s / var(--speed)) linear infinite;
+}
+
+.mode-thinking .core__heart {
+  animation-duration: calc(2.2s / var(--speed));
+}
+
+.mark {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mark--err {
+  stroke: var(--err);
+}
+
+.sparks {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.sparks i {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.3;
+  animation: spark calc(1.8s / var(--speed)) ease-in-out infinite;
+}
+
+.sparks i:nth-child(2) {
+  animation-delay: 0.25s;
+}
+.sparks i:nth-child(3) {
+  animation-delay: 0.5s;
+}
+
+.track {
   position: relative;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-  animation: float 3.4s ease-in-out infinite;
-}
-.avatar:first-child {
-  margin-left: 0;
-}
-.avatar:nth-child(2) {
-  animation-delay: 0.4s;
-}
-.avatar:nth-child(3) {
-  animation-delay: 0.8s;
+  height: 18px;
+  flex: 0 0 auto;
 }
 
-@keyframes float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-2px);
-  }
-}
-
-/* 头像上的状态角标 */
-.avatar__badge {
+.dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
+  left: 0;
+  top: 50%;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  border: 2px solid rgba(13, 15, 22, 0.95);
+  transition: transform 640ms var(--ease);
 }
 
-.island__meta {
-  min-width: 0;
-  flex: 1;
+.dot__core {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: inherit;
+  background: inherit;
+}
+
+.mode-thinking .dot--run .dot__core,
+.mode-collaborating .dot--run .dot__core,
+.mode-communicating .dot--run .dot__core {
+  animation: dim calc(2.4s / var(--speed)) ease-in-out infinite;
+}
+
+.dot--wait .dot__core {
+  box-shadow: 0 0 0 1px var(--warn);
+}
+
+.dot--bad .dot__core {
+  box-shadow: 0 0 0 1px var(--err);
+}
+
+.dot__core.is-hit {
+  animation: hit calc(420ms / var(--speed)) ease-out 1;
+}
+
+.mode-completed .dot {
+  opacity: 0.2;
+}
+
+.bead {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.8;
+  animation: bead-move calc(2.2s / var(--speed)) ease-in-out infinite alternate;
+}
+
+.envelope {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 9px;
+  height: 6px;
+  margin: 0;
+  border-radius: 1.5px;
+  background: var(--c);
+  animation: env-fly calc(880ms / var(--speed)) cubic-bezier(0.33, 0.1, 0.2, 1) both;
+}
+
+.envelope::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 1px;
+  height: 2px;
+  border-top: 1px solid rgba(9, 11, 16, 0.45);
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+}
+
+.envelope::after {
+  content: '';
+  position: absolute;
+  right: 100%;
+  top: 1px;
+  width: 10px;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, var(--c));
+  opacity: 0.55;
+}
+
+.is-paused,
+.is-paused * {
+  animation-play-state: paused !important;
+}
+
+.demo {
+  width: min(760px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 1px;
-}
-.island__title {
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.island__sub {
-  font-size: 10px;
-  color: #8b93a6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+
+.demo__row {
   display: flex;
-  gap: 7px;
-}
-.island__sub b {
-  font-weight: 600;
-}
-.island__sub .is-run {
-  color: var(--st-running);
-}
-.island__sub .is-wait {
-  color: var(--st-waiting);
-}
-.island__sub .is-err {
-  color: var(--st-error);
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
 }
 
-/* ---------- 进度环 ---------- */
-.ring {
-  flex-shrink: 0;
-  transform: rotate(-90deg);
-}
-.ring__track {
-  stroke: rgba(255, 255, 255, 0.09);
-}
-.ring__fill {
-  transition:
-    stroke-dashoffset 600ms var(--spring),
-    stroke 300ms ease;
-  stroke-linecap: round;
-}
-.ring__label {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: 9px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: #c9d2e3;
-}
-.ring-wrap {
-  position: relative;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
+.demo button {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #d5dbe8;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
-/* ---------- 展开态 ---------- */
-.island__panel {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  opacity: 0;
-  /* 入场：从下方稍微淡入，等容器张开到一定程度才开始，避免挤在一起 */
-  transform: translateY(10px) scale(0.99);
-  transition:
-    opacity 260ms ease 90ms,
-    transform 420ms var(--spring) 70ms;
-  pointer-events: none;
-  /* 内容超出时裁掉，收起到一半不会看到内容溢出容器 */
-  overflow: hidden;
-}
-.island--expanded .island__panel {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  pointer-events: auto;
+.demo button:hover {
+  border-color: rgba(84, 217, 255, 0.45);
+  color: white;
 }
 
-.panel__head {
+.demo__slider {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 16px 10px;
-  flex-shrink: 0;
-}
-.panel__title {
-  font-size: 13px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-}
-.panel__count {
-  font-size: 10px;
-  color: #8b93a6;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-}
-.panel__close {
-  margin-left: auto;
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  color: #98a2b6;
-  font-size: 12px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-  transition:
-    background 140ms ease,
-    color 140ms ease;
-}
-.panel__close:hover {
-  background: rgba(255, 255, 255, 0.09);
-  color: #e8ebf1;
-}
-
-/* 总进度条 */
-.panel__bar {
-  margin: 0 16px 10px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.panel__bar-fill {
-  height: 100%;
-  border-radius: 999px;
-  transition:
-    width 620ms var(--spring),
-    background 300ms ease;
-}
-
-/* 卡片列表 */
-.panel__list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 0 10px 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  overscroll-behavior: contain;
-}
-.panel__list::-webkit-scrollbar {
-  width: 6px;
-}
-.panel__list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 3px;
-}
-
-/* ---------- Agent 卡片 ---------- */
-.card {
-  border-radius: 13px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background: linear-gradient(
-    165deg,
-    rgba(255, 255, 255, 0.045),
-    rgba(255, 255, 255, 0.015)
-  );
-  padding: 8px 10px;
-  text-align: left;
-  color: inherit;
-  width: 100%;
-  border-width: 1px;
-  /* 依次入场：延迟由内联 --i 控制 */
-  opacity: 0;
-  transform: translateY(8px);
-  animation: card-in 380ms var(--spring) forwards;
-  animation-delay: calc(var(--i, 0) * 40ms + 120ms);
-  transition: border-color 180ms ease, background 180ms ease;
-}
-.card:hover {
-  border-color: rgba(255, 255, 255, 0.13);
-}
-.card--expanded {
-  border-color: rgba(255, 255, 255, 0.16);
-}
-
-@keyframes card-in {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.card__top {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-
-.card__avatar {
-  position: relative;
-  width: 28px;
-  height: 28px;
-  border-radius: 9px;
-  display: grid;
-  place-items: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: #0b0d12;
-  flex-shrink: 0;
-}
-
-.card__body {
-  min-width: 0;
-  flex: 1;
-}
-.card__name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-.card__role {
-  font-size: 10px;
-  color: #7c869e;
-  margin-top: 1px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card__task {
-  font-size: 11px;
-  color: #aab3c5;
-  margin-top: 5px;
-  line-height: 1.45;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.card__task--waiting {
-  color: var(--st-waiting);
-}
-.card__dep {
-  font-size: 9.5px;
-  color: var(--st-waiting);
-  opacity: 0.85;
-  margin-top: 2px;
-}
-
-/* 状态徽章 */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 9px;
-  font-weight: 600;
-  border: 1px solid currentColor;
-  opacity: 0.95;
-  flex-shrink: 0;
-}
-.badge__dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* 呼吸/闪烁：不同状态节奏不同，让「紧急程度」一眼可辨 */
-.dot--breath {
-  animation: breath 2s ease-in-out infinite;
-}
-.dot--fast {
-  animation: breath 0.7s ease-in-out infinite;
 }
 
 @keyframes breath {
   0%,
   100% {
-    opacity: 1;
+    opacity: 0.65;
+    transform: scale(1);
   }
   50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spark {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: translateY(1px);
+  }
+  50% {
+    opacity: 0.9;
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes dim {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes hit {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.7);
+    filter: brightness(1.35);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes bead-move {
+  from {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.15;
+  }
+  to {
+    transform: translate3d(calc(var(--span) * 1px), 0, 0);
+    opacity: 0.9;
+  }
+}
+
+@keyframes env-fly {
+  0% {
+    opacity: 0;
+    transform: translate3d(calc(var(--x0) * 1px), -50%, 0) scale(0.7);
+  }
+  16% {
+    opacity: 1;
+    transform: translate3d(calc(var(--x0) * 1px), -50%, 0) scale(1);
+  }
+  84% {
+    opacity: 1;
+    transform: translate3d(calc(var(--x1) * 1px), -50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(var(--x1) * 1px), -70%, 0) scale(0.86);
+  }
+}
+
+@keyframes rim {
+  0%,
+  100% {
     opacity: 0.28;
   }
+  50% {
+    opacity: 0.85;
+  }
 }
 
-/* 卡片进度条 */
-.card__progress {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 7px;
-}
-.card__track {
-  flex: 1;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-}
-.card__fill {
-  height: 100%;
-  border-radius: 999px;
-  transition:
-    width 520ms var(--spring),
-    background 260ms ease;
-}
-.card__pct {
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  color: #7c869e;
-  min-width: 26px;
-  text-align: right;
-}
-
-/* 日志时间线：高度过渡，内部滚动 */
-.card__logs {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 320ms var(--spring);
-}
-.card__logs--open {
-  max-height: 148px;
-}
-.card__logs-inner {
-  margin-top: 8px;
-  padding-top: 7px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  max-height: 138px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  overscroll-behavior: contain;
-}
-.log-row {
-  display: flex;
-  gap: 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9.5px;
-  line-height: 1.5;
-  color: #8b93a6;
-  word-break: break-word;
-}
-.log-row__time {
-  color: #4b5468;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-.log-row--error {
-  color: var(--st-error);
-}
-.log-row--tool {
-  color: #9fb0cc;
-}
-
-/* ---------- 底部控制 ---------- */
-.panel__foot {
-  display: flex;
-  gap: 6px;
-  padding: 9px 12px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  flex-shrink: 0;
-}
-.btn {
-  flex: 1;
-  padding: 7px 8px;
-  border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(255, 255, 255, 0.04);
-  color: #c9d2e3;
-  font-size: 11px;
-  font-weight: 550;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease;
-}
-.btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e8ebf1;
-}
-.btn--warn {
-  color: var(--st-waiting);
-  border-color: rgba(251, 191, 36, 0.3);
-}
-.btn--warn:hover {
-  background: rgba(251, 191, 36, 0.12);
-}
-.btn--danger {
-  color: var(--st-error);
-  border-color: rgba(255, 90, 122, 0.3);
-}
-.btn--danger:hover {
-  background: rgba(255, 90, 122, 0.12);
-}
-
-/* ---------- Toast ---------- */
-.toast-layer {
-  position: fixed;
-  left: 50%;
-  bottom: 12px;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  pointer-events: none;
-  z-index: 100;
-}
-.toast {
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: rgba(24, 28, 38, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #d6dcea;
-  font-size: 10.5px;
-  white-space: nowrap;
-  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
-  animation: toast-in 220ms var(--ease-out);
-}
-@keyframes toast-in {
-  from {
+@keyframes rim-once {
+  0% {
     opacity: 0;
-    transform: translateY(6px);
   }
-  to {
+  28% {
     opacity: 1;
-    transform: translateY(0);
+  }
+  100% {
+    opacity: 0.3;
   }
 }
 
-/* ---------- 空态 ---------- */
-.panel__empty {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  text-align: center;
-  color: #6b7488;
-  font-size: 11px;
-  line-height: 1.7;
-  padding: 0 24px;
-}
-
-/* ---------- 无障碍 ---------- */
-/* ---------- 收起过程：内容先「收上去」，容器再合上 ----------
-   直接把 panel 的 opacity 归零会让内容像被抽走。
-   这里让它整体向上位移 + 轻微缩小 + 淡出，配合容器同步变小，
-   视觉上是「内容缩回胶囊里」，而不是「内容被裁掉」。 */
-.island--phase-closing .island__panel {
-  opacity: 0;
-  transform: translateY(-10px) scale(0.985);
-  transition:
-    opacity 260ms ease,
-    transform 400ms var(--spring);
-  pointer-events: none;
-}
-
-/* 收起时卡片依次退场（与入场相反的顺序），有「一层层收进去」的层次。
-   注意：入场用的是 animation，会锁住 opacity；退场要先把 animation 清掉，
-   否则 transition 根本不生效 —— 上一版就是这样，卡片瞬间消失。 */
-.island--phase-closing .card {
-  /* 关键：入场用的是 `animation: forwards`，它把 opacity 维持在 1。
-     如果这里只写 `animation: none`，卡片会立刻回落到基础值 opacity:0
-     —— 看起来就是「内容被抽走」。
-     所以退场必须用另一条 animation 接管，而不是靠 transition。 */
-  animation: card-out 260ms ease forwards;
-  animation-delay: calc(var(--i, 0) * 26ms + 40ms);
-}
-
-@keyframes card-out {
-  from {
-    opacity: 1;
-    transform: translateY(0);
+@keyframes nudge {
+  0%,
+  100% {
+    transform: translateX(0);
   }
-  to {
-    opacity: 0;
-    transform: translateY(-5px);
+  30% {
+    transform: translateX(-1.5px);
   }
-}
-
-/* 收起时折叠态内容还不能出现，等窗口合上再说 */
-.island--phase-closing .island__pill {
-  opacity: 0;
-  transform: scale(0.97);
-  transition:
-    opacity 160ms ease 220ms,
-    transform 300ms var(--spring) 200ms;
-  pointer-events: none;
-}
-
-/* 完全折叠时的胶囊态 */
-.island--collapsed .island__pill {
-  opacity: 1;
-  transform: scale(1);
-}
-
-/* 收起过程中胶囊最后才出现：内容和容器收完了，胶囊才「浮出来」。
-   选择器带上 .island--phase-closing 组合，压过 .island--collapsed 的单类规则。 */
-.island--collapsed.island--phase-closing .island__pill {
-  opacity: 0;
-  transform: scale(0.97);
-  transition:
-    opacity 160ms ease 240ms,
-    transform 300ms var(--spring) 220ms;
+  70% {
+    transform: translateX(1.5px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .island,
-  .island__panel,
-  .card,
-  .avatar,
-  .dot--breath,
-  .dot--fast,
-  .toast {
+  .island *,
+  .island__rim {
     animation: none !important;
-    transition-duration: 0.01ms !important;
+    transition: none !important;
   }
-  .card {
-    opacity: 1;
-    transform: none;
+  .envelope {
+    display: none;
   }
-  .island--expanded .island__panel {
-    transform: none;
-  }
-}
-
-/* 回到主窗：标题栏里唯一的出口，视觉上要能被找到但不抢焦点 */
-.panel__back {
-  margin-left: auto;
-  padding: 3px 9px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: #a9b3c7;
-  font-size: 10px;
-  font-weight: 550;
-  transition:
-    background 140ms ease,
-    color 140ms ease,
-    border-color 140ms ease;
-}
-.panel__back:hover {
-  background: rgba(120, 160, 255, 0.16);
-  border-color: rgba(120, 160, 255, 0.4);
-  color: #dbe6ff;
-}
-/* 有关闭按钮时 back 不再顶到最右 */
-.panel__back + .panel__close {
-  margin-left: 6px;
 }

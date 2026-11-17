@@ -1534,6 +1534,7 @@
   padding: 10px 9px;
   color: var(--text-tertiary);
   font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .c-providers {
@@ -1609,8 +1610,4 @@
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
-}
-  color: var(--text-tertiary);
-  font-size: var(--text-xs);
-  line-height: 1.5;
 }

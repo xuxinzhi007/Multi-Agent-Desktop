@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -555,8 +554,8 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		return err
 	}
 
-	// 2. 推消息到前端
-	ChannelMessage.Emit(s.win, msg)
+	// 2. 推消息到前端。悬浮岛也要收到，才能把投递画成胶囊里的信封。
+	emitChannelMessage(msg, s.win, miniWindowRef)
 
 	// 3. 取频道快照
 	ch, ok := s.channels.Get(channelId)
@@ -642,7 +641,7 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		log.Printf("set deliveries: %v", err)
 	} else {
 		// 重发同一 ID 的事件；前端按 ID 去重并覆盖旧记录
-		ChannelMessage.Emit(s.win, msg)
+		emitChannelMessage(msg, s.win, miniWindowRef)
 	}
 
 	if len(errs) > 0 {
@@ -993,7 +992,13 @@ func (s *API) GetWorkDir() string {
 
 // SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。
 func (s *API) SetWorkDir(dir string) string {
+	if broadDir(dir) {
+		return s.runner.Dir()
+	}
 	s.runner.SetDir(dir)
+	if s.mgr != nil {
+		s.mgr.SetWorkDir(dir)
+	}
 	if s.settings != nil {
 		if err := s.settings.SetWorkDir(dir); err != nil {
 			log.Printf("persist workdir: %v", err)
@@ -1014,6 +1019,9 @@ func (s *API) SettingsPath() string {
 
 // SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。
 func (s *API) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
+	if dir != "" && broadDir(dir) {
+		return AgentView{}, fmt.Errorf("工作目录不能是整个磁盘或用户主目录")
+	}
 	if err := s.mgr.SetAgentWorkDir(agentId, dir); err != nil {
 		return AgentView{}, err
 	}
@@ -1186,8 +1194,18 @@ func StaleBuild() (bool, int64) {
 	}
 	exeTime := exeInfo.ModTime()
 
+	wd, err := os.Getwd()
+	if err != nil {
+		return false, 0
+	}
+	// 打包后的 GUI 进程工作目录经常是 / 或用户主目录。
+	// 从那里往下走会撞上桌面、文稿、下载，系统按文件夹逐个弹权限。
+	if !sourceTree(wd) {
+		return false, 0
+	}
+
 	var newest time.Time
-	_ = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(wd, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -1211,6 +1229,20 @@ func StaleBuild() (bool, int64) {
 		return false, 0
 	}
 	return newest.After(exeTime), newest.UnixMilli()
+}
+
+// sourceTree 只认开发时的源码目录。安装后的进程停在 / 或主目录时返回 false，
+// 避免为了比对 .go 修改时间去扫用户的桌面和文稿。
+func sourceTree(dir string) bool {
+	if dir == "" || dir == "/" || dir == "." {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && dir == home {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil
 }
 
 // Info 返回系统信息。
@@ -1534,85 +1566,44 @@ func (s *API) ToggleMiniWindow(show bool) bool {
 	return show
 }
 
-// 灵动岛两态的尺寸。
+// 灵动岛只有胶囊一种尺寸。宽度变化发生在窗口内部，窗口本身不再展开成面板。
 const (
-	islandWCollapsed = 252
-	islandHCollapsed = 44
-	islandWExpanded  = 392
-	islandHExpanded  = 468
+	islandW = 260
+	islandH = 64
 )
 
-// islandAnim 串行化尺寸动画，避免连续点击时两个 goroutine 抢着改窗口。
-var islandAnim atomic.Pointer[chan struct{}]
-
-// IslandResize 由灵动岛在展开/收起时调用。
-//
-// 关键：mygo 的 SetSize 是瞬时跳变。直接设目标尺寸会让窗口「啪」地变大变小，
-// 而 CSS 过渡还在跑 —— 用户看到的就是「内容被压缩后弹回」。
-// 所以这里逐帧推进窗口尺寸，用和前端相同的时长与缓动，
-// 让「容器」和「内容」是同一个动作。
-func (s *API) IslandResize(expanded bool) bool {
+// IslandResize 保持悬浮窗为胶囊窗口。
+// 历史版本会在这里把窗口拉到 392×468 的面板；那个形态已经去掉。
+func (s *API) IslandResize(_ bool) bool {
 	w := miniWindowRef
 	if w == nil || w.IsDestroyed() {
 		return false
 	}
-
-	// 取消上一次动画
-	if prev := islandAnim.Swap(nil); prev != nil {
-		close(*prev)
-	}
-	done := make(chan struct{})
-	islandAnim.Store(&done)
-
-	tw, th := islandWCollapsed, islandHCollapsed
-	if expanded {
-		tw, th = islandWExpanded, islandHExpanded
-	}
-	fw, fh := w.Size()
-
-	go func() {
-		const dur = 380 * time.Millisecond
-		start := time.Now()
-		tick := time.NewTicker(10 * time.Millisecond)
-		defer tick.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-tick.C:
-				if w.IsDestroyed() {
-					return
-				}
-				t := time.Since(start)
-				if t >= dur {
-					w.SetSize(tw, th)
-					return
-				}
-				// 与前端 island.css 用同一条 spring 曲线
-				k := easeSpring(float64(t) / float64(dur))
-				w.SetSize(
-					fw+int(float64(tw-fw)*k),
-					fh+int(float64(th-fh)*k),
-				)
-			}
-		}
-	}()
+	w.SetSize(islandW, islandH)
 	return true
 }
 
-// easeSpring 近似 cubic-bezier(.3,.9,.28,1.06)：先快后慢，末端轻微过冲。
-func easeSpring(t float64) float64 {
-	if t <= 0 {
-		return 0
+// emitChannelMessage 把频道消息同时送给主窗和悬浮岛。
+// 岛上的信封只认这个事件，不在前端编造通信。
+func emitChannelMessage(msg channel.Message, wins ...*mygo.Window) {
+	sent := make([]*mygo.Window, 0, len(wins))
+	for _, w := range wins {
+		if w == nil || w.IsDestroyed() {
+			continue
+		}
+		dup := false
+		for _, prev := range sent {
+			if prev == w {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		sent = append(sent, w)
+		ChannelMessage.Emit(w, msg)
 	}
-	if t >= 1 {
-		return 1
-	}
-	// 1 - (1-t)^3 是 ease-out 主体，再叠加一点过冲让它有「弹」的手感
-	base := 1 - math.Pow(1-t, 3)
-	bump := math.Sin(t*math.Pi) * 0.045
-	return base + bump
 }
 
 // FocusAgent 聚焦主窗口并切换到指定 agent。
@@ -1963,12 +1954,16 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 			if v, ok := toAgentStopped(data); ok {
 				AgentStopped.Emit(win, v)
 			}
+		case "knowledge.changed":
+			if n, ok := noteFromEvent(data); ok {
+				KnowledgeChanged.Emit(win, n)
+			}
 		case "agent.channel.reply":
 			if v, ok := toAgentChannelReply(data); ok {
 				// 把 agent 回复写入频道历史
 				if chMgr != nil {
 					if msg, err := chMgr.AddMessage(v.ChannelID, v.AgentID, v.AgentName, v.Text); err == nil {
-						ChannelMessage.Emit(win, msg)
+						emitChannelMessage(msg, win, miniWin)
 					}
 				}
 			}
@@ -2018,11 +2013,13 @@ func main() {
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
 	mgr.SetProviders(effective.Providers)
-	homeDir := mustHome()
-	if effective.WorkDir != "" {
-		homeDir = effective.WorkDir
+	workDir := defaultWorkDir(dataDir)
+	if effective.WorkDir != "" && !broadDir(effective.WorkDir) {
+		workDir = effective.WorkDir
 	}
-	runner := pty.NewRunner(homeDir)
+	stayInAppDir()
+	runner := pty.NewRunner(workDir)
+	mgr.SetWorkDir(workDir)
 	channels := channel.NewManager()
 	chMgr = channels
 
@@ -2051,7 +2048,8 @@ func main() {
 
 	mygo.Bind(api)
 
-	notificationsEnabled = true
+	// 不在启动时申请通知授权。系统通知会弹出「通知」权限，
+	// 而阻塞和报错已经在界面里可见。
 
 	mygo.App.WhenReady(func() {
 		win = mygo.NewWindow(mygo.WindowOptions{
@@ -2072,15 +2070,13 @@ func main() {
 		// StateKey 记住位置，重启后回到原处。
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
 			Title: "Agent 舰队",
-			// 宽度锁死：FitContent 只让高度跟着内容走，
-			// MinWidth == MaxWidth 时宽度被夹死，窗口不再自己缩放。
-			// 初始为折叠态尺寸；展开时前端调 IslandResize 让窗口跟着变大。
-			Width:     252,
-			Height:    44,
-			MinWidth:  252,
-			MaxWidth:  392,
-			MinHeight: 44,
-			MaxHeight: 468,
+			// 窗口锁死为胶囊外框。岛体宽度在这 260px 里变化，不再撑成面板。
+			Width:     islandW,
+			Height:    islandH,
+			MinWidth:  islandW,
+			MaxWidth:  islandW,
+			MinHeight: islandH,
+			MaxHeight: islandH,
 			// 不要 FitContent：折叠/展开两态尺寸是设计值，自动撑会抖
 			FitContent:      false,
 			Panel:           true, // 跨 Space / 全屏应用常驻，不进任务栏和 Dock
@@ -2095,6 +2091,11 @@ func main() {
 		})
 		miniWindowRef = miniWin
 
+		// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
+		// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。
+		denyPagePermissions(win)
+		denyPagePermissions(miniWin)
+
 		// 初始隐藏悬浮窗，主窗口点击「缩小」才显示
 		miniWin.Hide()
 	})
@@ -2102,6 +2103,53 @@ func main() {
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func denyPagePermissions(w *mygo.Window) {
+	if w == nil {
+		return
+	}
+	p := w.Page()
+	if p == nil {
+		return
+	}
+	p.SetPermissionHandler(func(mygo.PermissionRequest) bool { return false })
+}
+
+// defaultWorkDir 是没指定项目时的工作目录，落在应用自己的数据目录里。
+// 不用用户主目录：从主目录跑命令会碰到桌面、文稿、下载，每处各弹一次权限。
+func defaultWorkDir(dataDir string) string {
+	dir := filepath.Join(dataDir, "workspace")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return dataDir
+	}
+	return dir
+}
+
+// broadDir 表示这个目录一进去就会覆盖整台机器或整个用户目录。
+func broadDir(dir string) bool {
+	if dir == "" || dir == "." || dir == "/" {
+		return true
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	return err == nil && abs == home
+}
+
+// stayInAppDir 在进程停在 / 或主目录时切到应用数据目录。
+// 开发时工作目录是源码树，保持不动，过期检查才能看到 .go 文件。
+func stayInAppDir() {
+	wd, err := os.Getwd()
+	if err == nil && sourceTree(wd) {
+		return
+	}
+	if err == nil && wd != "" && wd != "/" && wd != "." && !broadDir(wd) {
+		return
+	}
+	_ = os.Chdir(mustDataDir())
 }
 
 func mustHome() string {
@@ -2166,6 +2214,48 @@ func (k *knowledgeProvider) NotesForSystemPrompt() []string {
 }
 
 // View 实现 agent.KnowledgeProvider 接口。
+func (k *knowledgeProvider) SaveNote(title, body string, tags []string) (map[string]any, error) {
+	if k == nil || k.store == nil {
+		return nil, fmt.Errorf("知识库未初始化")
+	}
+	saved, err := k.store.Upsert(knowledge.Note{Title: title, Body: body, Tags: tags, Source: "auto"})
+	if err != nil {
+		return nil, err
+	}
+	return noteToMap(saved), nil
+}
+
+func (k *knowledgeProvider) ListNotes() []map[string]any {
+	if k == nil || k.store == nil {
+		return nil
+	}
+	notes := k.store.Query(knowledge.Query{})
+	out := make([]map[string]any, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, noteToMap(n))
+	}
+	return out
+}
+
+func noteToMap(n knowledge.Note) map[string]any {
+	return map[string]any{
+		"id": n.ID, "title": n.Title, "body": n.Body, "tags": n.Tags,
+		"scope": n.Scope, "source": n.Source, "at": n.At, "updatedAt": n.UpdatedAt,
+	}
+}
+
+func noteFromEvent(data any) (knowledge.Note, bool) {
+	buf, err := json.Marshal(data)
+	if err != nil {
+		return knowledge.Note{}, false
+	}
+	var n knowledge.Note
+	if json.Unmarshal(buf, &n) != nil || n.ID == "" {
+		return knowledge.Note{}, false
+	}
+	return n, true
+}
+
 func (k *knowledgeProvider) View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (string, []string) {
 	if k == nil || k.store == nil {
 		return "", nil

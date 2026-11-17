@@ -68,6 +68,13 @@ type KnowledgeProvider interface {
 	View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (block string, ids []string)
 }
 
+// NoteBook 是可选的知识库写入面。实现它的存储会让 save_note 写进正在运行的进程，
+// 界面才能收到更新。直接改 JSONL 文件只会落在磁盘上，页面仍是旧的。
+type NoteBook interface {
+	SaveNote(title, body string, tags []string) (map[string]any, error)
+	ListNotes() []map[string]any
+}
+
 // Emitter 把事件推给前端。由 server 层注入，避免 agent 直连 WS。
 type Emitter func(event string, data any)
 
@@ -112,6 +119,19 @@ func (m *Manager) SetKnowledge(k KnowledgeProvider) {
 	m.mu.Lock()
 	m.knowledge = k
 	m.mu.Unlock()
+}
+
+func (m *Manager) NoteBook() NoteBook {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	nb, _ := m.knowledge.(NoteBook)
+	return nb
+}
+
+func (m *Manager) Emit(event string, data any) {
+	if m.emit != nil {
+		m.emit(event, data)
+	}
 }
 
 // buildSystemPrompt 生成会话 system message，前置知识库要点。

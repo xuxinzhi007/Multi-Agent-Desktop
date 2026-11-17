@@ -52,10 +52,11 @@ type Store interface {
 
 // fileStore 用 JSONL 落盘：追加是 O(1) 且崩溃安全；删除时整体重写。
 type fileStore struct {
-	mu    sync.Mutex
-	path  string
-	notes map[string]Note
-	order []string
+	mu      sync.Mutex
+	path    string
+	notes   map[string]Note
+	order   []string
+	modTime time.Time
 }
 
 // NewFileStore 打开（或创建）一个 JSONL 知识库文件。
@@ -64,6 +65,7 @@ func NewFileStore(path string) (Store, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	s.touch()
 	return s, nil
 }
 
@@ -114,6 +116,7 @@ func (s *fileStore) load() error {
 func (s *fileStore) Upsert(n Note) (Note, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 
 	if n.ID == "" {
 		n.ID = fmt.Sprintf("note-%d", time.Now().UnixNano())
@@ -143,6 +146,7 @@ func (s *fileStore) Upsert(n Note) (Note, error) {
 		if err := f.Close(); err != nil {
 			return Note{}, fmt.Errorf("knowledge: close: %w", err)
 		}
+		s.touch()
 	}
 	return n, nil
 }
@@ -151,6 +155,7 @@ func (s *fileStore) Upsert(n Note) (Note, error) {
 func (s *fileStore) Query(q Query) []Note {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 
 	needle := strings.ToLower(strings.TrimSpace(q.Text))
 	out := make([]Note, 0, len(s.order))
@@ -183,6 +188,7 @@ func (s *fileStore) Query(q Query) []Note {
 func (s *fileStore) Delete(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 
 	if _, ok := s.notes[id]; !ok {
 		return false
@@ -229,7 +235,44 @@ func (s *fileStore) rewriteLocked() error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("knowledge: close temp: %w", err)
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	s.touch()
+	return nil
+}
+
+// refreshLocked 在文件比内存新时重新读入。
+// 进程外直接改 JSONL 时，界面下一次查询才能看到，而不是一直拿着启动时的副本。
+func (s *fileStore) refreshLocked() {
+	if s.path == "" {
+		return
+	}
+	st, err := os.Stat(s.path)
+	if err != nil {
+		return
+	}
+	if !s.modTime.IsZero() && !st.ModTime().After(s.modTime) {
+		return
+	}
+	next := &fileStore{path: s.path, notes: make(map[string]Note)}
+	if err := next.load(); err != nil {
+		return
+	}
+	s.notes = next.notes
+	s.order = next.order
+	s.modTime = st.ModTime()
+}
+
+func (s *fileStore) touch() {
+	if s.path == "" {
+		return
+	}
+	st, err := os.Stat(s.path)
+	if err != nil {
+		return
+	}
+	s.modTime = st.ModTime()
 }
 
 func hasAllTags(have, want []string) bool {

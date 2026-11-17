@@ -44,6 +44,10 @@ export default function App() {
     }
   }, [s.agents, s.channels, active])
 
+  useEffect(() => {
+    if (inspectorOpen && tab === 'knowledge') s.refreshNotes()
+  }, [inspectorOpen, tab, s.refreshNotes])
+
   // 悬浮窗点了某个 agent：切过去并清掉请求（否则会反复抢焦点）
   useEffect(() => {
     const id = s.focusAgentId

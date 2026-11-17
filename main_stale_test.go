@@ -21,6 +21,9 @@ func TestStaleBuildDetectsNewerSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	src := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(src, []byte("package main"), 0o644); err != nil {
 		t.Fatal(err)
@@ -49,6 +52,7 @@ func TestStaleBuildNoFalsePositive(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o644)
 	src := filepath.Join(dir, "main.go")
 	os.WriteFile(src, []byte("package main"), 0o644)
 	past := time.Now().Add(-48 * time.Hour)
@@ -57,5 +61,26 @@ func TestStaleBuildNoFalsePositive(t *testing.T) {
 	stale, _ := StaleBuild()
 	if stale {
 		t.Fatal("源码更旧却报告 stale，会导致假警报")
+	}
+}
+
+func TestStaleBuildSkipsNonModule(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, _ := os.Getwd()
+	defer os.Chdir(oldwd)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(src, future, future); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := StaleBuild()
+	if stale {
+		t.Fatal("没有 go.mod 的目录不应被扫描")
 	}
 }
