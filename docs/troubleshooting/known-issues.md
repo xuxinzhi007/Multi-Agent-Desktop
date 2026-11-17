@@ -323,6 +323,43 @@
 
 ---
 
+## 17. 发出去的消息一直「排队中」，永远没回复
+
+- **现象**：桌面端发消息后状态停在 `queued`，不前进也不报错，看起来像卡死。
+- **根因**（两层）：
+  1. **worker goroutine 没有 recover**。`internal/cli/runner.go` 里写的是无检查的类型断言 `block["text"].(string)` —— CLI 输出格式一变（`text` 为 `null`、或换成数字）就 panic。
+  2. panic 发生在**后台 goroutine** 里，没人 recover → **worker 永久死亡**。之后 `queue` 还在收消息但再没人消费，界面永远是「排队中」，且**没有任何错误提示**（panic 不在用户可见的路径上）。
+- **为什么难发现**：mock backend 不经过 CLI 解析，走不到这条路径；而真实 CLI 的输出格式取决于外部工具版本，本地复现不了。
+- **解决方案**：
+  - 所有类型断言改成带 `ok` 的形式；
+  - `workerLoop` 里加 `runSafely`，recover 后转成 `StatusError` 并把原因写进 `LastError`；
+  - recover 后 `drainQueue()` 清空队列，避免后续消息重复触发同一个 panic。
+- **预防措施与护栏**：**护栏的护栏** —— `TestWorkerSurvivesPanic` 在 `execute` 入口注入 panic，然后断言**第二条消息还能正常跑完**。我验证过：移除 recover 后这条测试立刻红。
+  ```go
+  // 第一轮 panic → 状态变 error
+  // 第二轮必须能正常走到 idle —— 证明 worker 活着
+  ```
+
+护栏：`internal/agent/worker_recover_test.go`
+
+**通用教训**：后台 goroutine 必须有 recover。它的 panic 用户看不见，症状会伪装成完全不同的问题（这里是"卡住"而不是"崩溃"）。
+
+---
+
+## 18. 群聊白屏：`Cannot read properties of undefined (reading 'slice')`
+
+- **现象**：点进群聊直接白屏。报错位置 `ChannelBubble` 的 `name.slice(0, 1)`。
+- **根因**：旧版本写入 `channels.json` 的消息缺 `fromName` / `fromId`。字段声明是 `string`，但 JSON 反序列化后是 `undefined`。渲染层照类型声明信了它。
+- **为什么难发现**：类型声明说 `fromName: string`，TypeScript 编译期完全正确；只有真实旧数据才会触发。
+- **解决方案**（两层，缺一不可）：
+  - **渲染层兜底**：`msg.fromName || agent?.name || msg.fromId || '?'`。类型声明不代表运行时一定有值。
+  - **加载层补齐**：`channel.Load` 时给缺失字段填默认值，让"缺字段"只在一个地方被处理。
+- **预防措施与护栏**：`e2e/channel.spec.ts` 造一条只有 `text` 字段的 legacy 消息，断言页面不出现 `Cannot read properties` 且消息仍能显示。我验证过：回退渲染层兜底后这条立刻红，且报错与用户报告完全一致。
+
+护栏：`e2e/channel.spec.ts`（旧数据缺 fromName / fromId 时不白屏）
+
+---
+
 ## 待办：已知的护栏缺口
 
 按「补起来最划算」排序。补完把对应条目从这一节删掉。

@@ -123,3 +123,32 @@ test('频道里的成员被删除后，成员计数不崩溃', async ({ page }) 
   await expect(page.getByText('0 成员 · 0 消息')).toBeVisible()
   expect(errors, `页面抛异常: ${errors.join(' | ')}`).toEqual([])
 })
+
+test('旧数据缺 fromName / fromId 时不白屏', async ({ page }) => {
+  // 老版本写进 channels.json 的消息缺这些字段，
+  // 反序列化后是 undefined，渲染层 .slice(0,1) 直接 throw。
+  await mockRuntime(page, {
+    agents: [],
+    notes: [],
+    channels: [
+      {
+        id: 'ch-legacy',
+        name: '历史群',
+        members: [],
+        messages: [
+          { id: 'm1', channelId: 'ch-legacy', text: '来自旧版本的消息', at: Date.now() / 1000 },
+          { id: 'm2', text: '连 channelId 都没有' },
+        ],
+      },
+    ],
+  })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await page.getByText('历史群').first().click()
+  await page.waitForTimeout(400)
+
+  const body = await page.locator('body').innerText()
+  expect(body, '缺字段的历史消息让整个页面崩了').not.toContain('Cannot read properties')
+  // 消息本身还是要显示出来
+  await expect(page.getByText('来自旧版本的消息')).toBeVisible()
+})

@@ -168,6 +168,21 @@ func (m *Manager) Load() error {
 		if saved.Members == nil {
 			saved.Members = []string{}
 		}
+		// 老版本写入的消息可能缺 fromId / fromName / channelId。
+		// 这些字段是 string，反序列化后是空串，前端拿它做 .slice(0,1)
+		// 就会崩。在加载时就补齐，让“缺字段”只在一个地方被处理。
+		for i := range saved.Messages {
+			msg := &saved.Messages[i]
+			if msg.ChannelID == "" {
+				msg.ChannelID = saved.ID
+			}
+			if msg.FromID == "" {
+				msg.FromID = "unknown"
+			}
+			if msg.FromName == "" {
+				msg.FromName = msg.FromID
+			}
+		}
 		m.channels[saved.ID] = saved
 		m.order = append(m.order, saved.ID)
 	}

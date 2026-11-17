@@ -369,7 +369,10 @@ function ChannelBubble({
   mentionTargets: MentionTarget[]
 }) {
   const color = agent?.color ?? 'var(--text-tertiary)'
-  const name = msg.fromName || agent?.name || msg.fromId
+  // 老版本写进 channels.json 的消息缺 fromName / fromId，
+  // 反序列化后是 undefined。渲染层必须兜底：
+  // 类型声明写成 string 不代表运行时一定有值。
+  const name = msg.fromName || agent?.name || msg.fromId || '?'
   const isUser = msg.fromId === 'user'
 
   return (
@@ -458,7 +461,7 @@ function DeliveryRow({ msg }: { msg: ChannelMessage }) {
             style={{ color: meta.color, display: 'inline-flex', alignItems: 'center', gap: 3 }}
           >
             <span>{meta.icon}</span>
-            <span>{d.agentId.slice(0, 8)}</span>
+            <span>{(d.agentId ?? '?').slice(0, 8)}</span>
             <span style={{ color: 'var(--text-disabled)' }}>{meta.label}</span>
           </span>
         )

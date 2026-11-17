@@ -74,15 +74,24 @@ export function useBackend() {
       unsubs.push(evt.on((p) => alive && cb(p)))
     }
 
-    API.listAgents().then((agents) => alive && setState((s) => ({ ...s, agents })))
-    API.listChannels().then(
-      (channels) => alive && setState((s) => ({ ...s, channels: channels ?? [] })),
+    // 每个初始请求都必须 catch。
+    // 之前的版本没有，于是任何一次失败（含在浏览器里直接打开时
+    // 根本没有 mygo runtime）都会变成未处理的 Promise 拒绝，
+    // 冒到 ErrorBoundary 把整个应用渲染成错误页。
+    // 单个数据源失败应该只让那一块为空，不该让整页崩掉。
+    const load = <T,>(p: Promise<T>, apply: (v: T) => void) => {
+      p.then((v) => alive && apply(v)).catch(() => {
+        /* 保底：这一块留空，其余照常渲染 */
+      })
+    }
+
+    load(API.listAgents(), (agents) => setState((s) => ({ ...s, agents: agents ?? [] })))
+    load(API.listChannels(), (channels) => setState((s) => ({ ...s, channels: channels ?? [] })))
+    load(API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }), (notes) =>
+      setState((s) => ({ ...s, notes: notes ?? [] })),
     )
-    API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }).then(
-      (notes) => alive && setState((s) => ({ ...s, notes: notes ?? [] })),
-    )
-    API.getLLMConfig().then((llm) => alive && setState((s) => ({ ...s, llm })))
-    API.getWorkDir().then((workDir) => alive && setState((s) => ({ ...s, workDir })))
+    load(API.getLLMConfig(), (llm) => setState((s) => ({ ...s, llm })))
+    load(API.getWorkDir(), (workDir) => setState((s) => ({ ...s, workDir })))
 
     sub(events.agentCreated, (a) =>
       setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, a] })),

@@ -53,6 +53,9 @@ type Agent struct {
 	cancel context.CancelFunc `json:"-"`
 	queue  chan PromptRequest `json:"-"` // 待处理消息队列
 	done   chan struct{}      `json:"-"` // worker 退出信号
+	// testHookPanic 仅测试用：在 execute 入口注入 panic，
+	// 验证 worker 的 recover 真的让 goroutine 活下来。
+	testHookPanic func()
 }
 
 // KnowledgeProvider 是 agent 包对知识库的最小依赖（避免反向依赖具体存储实现）。
@@ -555,19 +558,57 @@ func (m *Manager) Route(fromId, toId, text string) error {
 }
 
 // workerLoop 每个 agent 一个，循环消费队列。
+//
+// 每次 execute 都必须有 recover。
+// 没有的话，任何一处 panic（比如 CLI 输出格式变化导致的无检查类型断言）
+// 都会让这个 goroutine 直接死掉：queue 还在收消息，但再没人消费，
+// 界面上表现为「发出去一直排队，永远不动」——
+// 而且没有任何错误提示，因为 panic 发生在后台，用户看不到。
+//
+// 宁可让这一条消息失败并报错，也不能让 worker 消失。
 func (a *Agent) workerLoop(m *Manager) {
 	for {
 		select {
 		case <-a.done:
 			return
 		case req := <-a.queue:
-			a.execute(m, req)
+			a.runSafely(m, req)
+		}
+	}
+}
+
+// runSafely 执行一条消息，panic 转成可见的错误。
+func (a *Agent) runSafely(m *Manager, req PromptRequest) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.finish(a, StatusError, fmt.Sprintf(
+				"执行时发生内部错误（worker 已恢复）：%v", r))
+			// 清空队列，避免后续消息重复触发同一个 panic
+			a.drainQueue()
+		}
+	}()
+	a.execute(m, req)
+}
+
+// drainQueue 丢弃排队中的消息并把队列长度同步给界面。
+func (a *Agent) drainQueue() {
+	for {
+		select {
+		case <-a.queue:
+		default:
+			a.mu.Lock()
+			a.QueueLen = 0
+			a.mu.Unlock()
+			return
 		}
 	}
 }
 
 // execute 执行一条消息（阻塞，完成后取下一个）。
 func (a *Agent) execute(m *Manager, req PromptRequest) {
+	if a.testHookPanic != nil {
+		a.testHookPanic()
+	}
 	a.mu.Lock()
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
 	a.Status = StatusRunning

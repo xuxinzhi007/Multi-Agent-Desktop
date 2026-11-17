@@ -151,12 +151,26 @@ func parseClaudeEvent(raw map[string]any) Event {
 		var tool, toolInput string
 
 		for _, c := range content {
-			block, _ := c.(map[string]any)
-			switch block["type"] {
+			block, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			// 一律用带 ok 的断言。
+			// 之前写的是 block["text"].(string) —— CLI 输出格式一变
+			// （text 为 null、或被换成数字）就 panic，
+			// 而 panic 发生在 worker goroutine 里，没人 recover，
+			// worker 直接死掉：之后所有消息入队但再没人消费，
+			// 界面永远停在「排队中」。
+			typ, _ := block["type"].(string)
+			switch typ {
 			case "text":
-				text += block["text"].(string)
+				if v, ok := block["text"].(string); ok {
+					text += v
+				}
 			case "tool_use":
-				tool = block["name"].(string)
+				if v, ok := block["name"].(string); ok {
+					tool = v
+				}
 				input, _ := json.Marshal(block["input"])
 				toolInput = string(input)
 			}
