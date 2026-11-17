@@ -34,6 +34,28 @@ export default function DiagnosePanel() {
 
   return (
     <>
+      {/* 源码比进程新时，先说这一件事。
+          其它诊断结果都可能是旧代码产生的，不先讲清楚会误导排查方向。 */}
+      {d?.staleBuild && (
+        <section
+          className="c-settings__card"
+          style={{ borderColor: 'var(--c-danger, #ff5a7a)' }}
+          role="alert"
+        >
+          <div className="c-settings__card-head">
+            <div>
+              <div className="c-settings__card-title" style={{ color: 'var(--c-danger, #ff5a7a)' }}>
+                ⚠ 后端是旧版本
+              </div>
+              <div className="c-settings__card-sub">
+                源码有改动但进程没有重新编译。现在看到的现象不代表最新代码 ——
+                请完全退出应用后重新 <code className="c-settings__code">npm run dev</code>。
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="c-settings__card">
         <div className="c-settings__card-head">
           <div>

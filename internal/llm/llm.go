@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 )
 
@@ -67,10 +68,17 @@ const StreamTimeout = 120 * time.Second
 // DefaultLlamaCppBaseURL 是 llama-server 的默认监听地址。
 const DefaultLlamaCppBaseURL = "http://127.0.0.1:8080"
 
+// DefaultOllamaBaseURL 是 ollama 的默认监听地址。
+//
+// 必须和前端 presets 里的默认值一致（src/lib/presets.ts）。
+// 两边不一致时，用户点「Ollama」选完模型什么也不需要填，
+// 但发出去的请求会打到空 baseUrl 上。
+const DefaultOllamaBaseURL = "http://127.0.0.1:11434"
+
 // IsLocalProvider 表示服务跑在本机、不需要 API Key。
 // 鉴权检查靠它短路，否则本地服务会被误判成「Key 未填写」而直接拒绝。
 func IsLocalProvider(name string) bool {
-	return name == "llamacpp"
+	return name == "llamacpp" || name == "ollama"
 }
 
 // ApplyDefaults 补齐 provider 的默认 BaseURL / Model / Provider 本身。
@@ -83,18 +91,33 @@ func ApplyDefaults(cfg Config) Config {
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = DefaultLlamaCppBaseURL
 		}
+	case "ollama":
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = DefaultOllamaBaseURL
+		}
 	}
 	return cfg
 }
 
+// httpClient 是所有 provider 共用的连接池。
+//
+// 必须共用：executeMock 每轮都 New 一个 client，如果每个实例自带
+// 一个 *http.Client，连接池仍然每轮重建，服务端主动关掉旧连接后
+// 下一条请求就可能撞上 `server closed idle connection`。
+// 池只有一份，才能跨会话、跨轮次复用已经建好的连接。
+var httpClient = &http.Client{}
+
 // New 按配置造 client。provider 为空时回落到 mock，保证永远可用。
 func New(cfg Config) Client {
 	switch cfg.Provider {
-	case "llamacpp":
+	case "llamacpp", "ollama":
+		// 两者都是本地 openai 兼容服务，只差默认端口。
+		// 曾经 ollama 掉进 default 分支变成 mock：
+		// 用户以为在用本地模型，看到的却是内置假回复。
 		cfg = ApplyDefaults(cfg)
-		return &openAICompat{name: cfg.Provider, cfg: cfg}
+		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
 	case "openai", "deepseek", "claude":
-		return &openAICompat{name: cfg.Provider, cfg: cfg}
+		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
 	default:
 		return &mockClient{}
 	}

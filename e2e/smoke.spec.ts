@@ -157,3 +157,19 @@ test('模型列表：点一下就切换，不需要先选 provider 再填凭据'
     `点选模型后没有保存，实际调用: ${calls.join(',')}`,
   ).toBe(true)
 })
+
+test('源码比进程新时，诊断页必须警告「后端是旧版本」', async ({ page }) => {
+  // 这条踩过太多次：改完代码没重启，看到的现象还是旧的，
+  // 于是以为修复无效。界面必须自己说清楚。
+  await mockRuntime(page, { agents: [], channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+
+  await page.getByRole('button', { name: '设置' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: /诊断/ }).click()
+
+  // 默认 mock 是 fresh，不应出现警告
+  await expect(dialog.getByText('链路自检')).toBeVisible()
+  await expect(dialog.getByText('后端是旧版本')).toHaveCount(0)
+})

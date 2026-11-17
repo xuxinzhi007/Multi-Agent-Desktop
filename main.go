@@ -185,6 +185,7 @@ type MiniAgentStatus struct {
 	Status        string `json:"status"`
 	Task          string `json:"task,omitempty"`          // 当前任务摘要
 	StartedAt     int64  `json:"startedAt,omitempty"`     // 本轮开始时间（Unix 秒）
+	QueuedAt      int64  `json:"queuedAt,omitempty"`      // 进入排队的时刻，0 表示没在排队
 	LastTool      string `json:"lastTool,omitempty"`      // 最近一次工具调用
 	Chars         int    `json:"chars,omitempty"`         // 本轮已生成字符数
 	Progress      int    `json:"progress"`                // 0-100，由状态与产出推算
@@ -221,6 +222,7 @@ func buildMiniStatus(mgr *agent.Manager) MiniStatus {
 			Status:        st,
 			Task:          extractTask(a),
 			StartedAt:     sn.StartedAt,
+			QueuedAt:      sn.QueuedAt,
 			LastTool:      sn.LastTool,
 			Chars:         sn.Chars,
 			Progress:      miniProgress(st, sn.Chars, sn.QueueLen),
@@ -349,9 +351,12 @@ type AgentView struct {
 	BlockedReason string `json:"blockedReason,omitempty"`
 
 	// 以下为本轮运行时指标，监控台据此显示「跑了多久 / 产出多少 / 在用什么工具」。
-	StartedAt int64  `json:"startedAt,omitempty"`
-	LastTool  string `json:"lastTool,omitempty"`
-	Chars     int    `json:"chars,omitempty"`
+	StartedAt int64 `json:"startedAt,omitempty"`
+	// QueuedAt 是进入排队的时刻。界面靠它区分「刚排队」和「卡住了」——
+	// 两者长得一样，但前者等就行，后者必须重启。
+	QueuedAt int64  `json:"queuedAt,omitempty"`
+	LastTool string `json:"lastTool,omitempty"`
+	Chars    int    `json:"chars,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -959,6 +964,10 @@ type SystemInfo struct {
 	GoVersion  string `json:"goVersion"`
 	MyGo       bool   `json:"mygo"`
 	BuildStamp string `json:"buildStamp"`
+	// StaleBuild 为 true 表示源码比运行中的进程新：
+	// 用户的改动还没生效，必须重启，否则看到的现象不代表当前代码。
+	StaleBuild bool  `json:"staleBuild"`
+	SourceTime int64 `json:"sourceTime,omitempty"`
 }
 
 var processStartedAt = time.Now().Unix()
@@ -972,18 +981,68 @@ var processStartedAt = time.Now().Unix()
 // 开发时默认取进程启动时间也算一个可比较的参照。
 var BuildStamp = "dev"
 
+// StaleBuild 检查源码是否比本进程更新。
+//
+// 反复出现「代码改了但现象没变」：`mygo dev` 只热重载前端，
+// Go 改动要重启进程才会重新编译。没有这个检查时，唯一的判断办法
+// 是让用户手动重启碰运气，而重启后现象若仍然存在，
+// 又分不清是「修复无效」还是「还是旧版」。
+//
+// 只比 .go 文件的修改时间，不碰二进制本身：开发时二进制在
+// 临时目录，路径不稳定；源码是本进程正在跑的这份代码的源头。
+func StaleBuild() (bool, int64) {
+	self, err := os.Executable()
+	if err != nil {
+		return false, 0
+	}
+	exeInfo, err := os.Stat(self)
+	if err != nil {
+		return false, 0
+	}
+	exeTime := exeInfo.ModTime()
+
+	var newest time.Time
+	_ = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		// 只看源码树，跳过 node_modules / .mygo / .git 这些噪音目录
+		if d.IsDir() {
+			name := d.Name()
+			if name == "node_modules" || name == ".git" || name == ".mygo" || name == "test-results" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil && fi.ModTime().After(newest) {
+			newest = fi.ModTime()
+		}
+		return nil
+	})
+	if newest.IsZero() {
+		return false, 0
+	}
+	return newest.After(exeTime), newest.UnixMilli()
+}
+
 // Info 返回系统信息。
 func (s *API) Info() SystemInfo {
 	stamp := BuildStamp
 	if stamp == "dev" {
 		stamp = fmt.Sprintf("dev@%d", processStartedAt)
 	}
+	stale, srcTime := StaleBuild()
 	return SystemInfo{
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
 		GoVersion:  runtime.Version(),
 		MyGo:       true,
 		BuildStamp: stamp,
+		StaleBuild: stale,
+		SourceTime: srcTime,
 	}
 }
 
@@ -994,13 +1053,15 @@ func (s *API) Info() SystemInfo {
 // 光看界面分不出是哪一种，只能靠猜和反复重启。
 // 这里把每一项直接测出来摆在一起。
 type Diagnostics struct {
-	BuildStamp string      `json:"buildStamp"`
-	Provider   string      `json:"provider"`
-	Model      string      `json:"model"`
-	HasKey     bool        `json:"hasKey"`
-	ModelOK    bool        `json:"modelOk"`
-	ModelErr   string      `json:"modelErr,omitempty"`
-	ModelReply string      `json:"modelReply,omitempty"`
+	BuildStamp string `json:"buildStamp"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	HasKey     bool   `json:"hasKey"`
+	ModelOK    bool   `json:"modelOk"`
+	ModelErr   string `json:"modelErr,omitempty"`
+	ModelReply string `json:"modelReply,omitempty"`
+	// StaleBuild 表示源码比运行中的进程新 —— 这时看到的现象不代表当前代码
+	StaleBuild bool        `json:"staleBuild"`
 	Agents     []AgentDiag `json:"agents"`
 	Loops      []LoopDiag  `json:"loops"`
 	CheckedAt  int64       `json:"checkedAt"`
@@ -1038,7 +1099,9 @@ func (s *API) Diagnose(ctx context.Context) Diagnostics {
 		HasKey:    cfg.APIKey != "",
 		CheckedAt: time.Now().Unix(),
 	}
-	out.BuildStamp = s.Info().BuildStamp
+	info := s.Info()
+	out.BuildStamp = info.BuildStamp
+	out.StaleBuild = info.StaleBuild
 
 	// 用一个极短的真实调用确认模型可用。
 	// 这是唯一能区分「配置看着对但实际连不上」的办法。

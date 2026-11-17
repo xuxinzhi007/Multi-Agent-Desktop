@@ -293,7 +293,11 @@ export default function AgentView(p: Props) {
               停止
             </button>
           )}
-          <StatusBadge status={p.agent.status} queueLen={p.agent.queueLen} />
+          <StatusBadge
+            status={p.agent.status}
+            queueLen={p.agent.queueLen}
+            since={p.agent.queuedAt ? p.agent.queuedAt * 1000 : undefined}
+          />
           <button
             className={`c-icon-btn ${p.inspectorOpen ? 'c-icon-btn--active' : ''}`}
             onClick={p.onToggleInspector}
@@ -768,17 +772,69 @@ function ModeBtn({
   )
 }
 
-function StatusBadge({ status, queueLen }: { status: string; queueLen?: number }) {
-  const map: Record<string, { cls: string; t: string }> = {
-    idle: { cls: '', t: '空闲' },
-    blocked: { cls: 'c-badge--danger', t: '等你处理' },
-    running: { cls: 'c-badge--warning', t: '运行中' },
-    queued: { cls: 'c-badge--accent', t: queueLen ? `排队 ${queueLen}` : '排队' },
-    done: { cls: 'c-badge--success', t: '完成' },
-    error: { cls: 'c-badge--danger', t: '出错' },
+const STATUS_MAP: Record<string, { cls: string; t: string }> = {
+  idle: { cls: '', t: '空闲' },
+  blocked: { cls: 'c-badge--danger', t: '等你处理' },
+  running: { cls: 'c-badge--warning', t: '运行中' },
+  queued: { cls: 'c-badge--accent', t: '排队' },
+  done: { cls: 'c-badge--success', t: '完成' },
+  error: { cls: 'c-badge--danger', t: '出错' },
+}
+
+/** 一个 agent 卡在排队多久算「卡住了」。 */
+const STUCK_MS = 20_000
+
+function StatusBadge({
+  status,
+  queueLen,
+  since,
+}: {
+  status: string
+  queueLen?: number
+  /** 进入排队的时刻（ms）。用来区分「刚排队」和「卡住了」。 */
+  since?: number
+}) {
+  // 「排队」和「卡住」在界面上长得一样，但处置方式完全不同：
+  // 前者等着就好，后者必须重启。
+  //
+  // 判断交给 useStuckSinceHook 里的定时器，不在渲染时算 Date.now()：
+  // 流式输出时这个组件每帧都渲染，读时钟既不产生新信息，
+  // 又让组件无法被 memo 跳过。
+  const stuck = useStuck(since)
+  if (stuck) {
+    return (
+      <span className="c-badge c-badge--danger" title="长时间没有推进，后端可能已停止处理队列">
+        卡住了
+      </span>
+    )
   }
-  const s = map[status] ?? map.idle
-  return <span className={`c-badge ${s.cls}`}>{s.t}</span>
+  const s = STATUS_MAP[status] ?? STATUS_MAP.idle
+  const label = status === 'queued' && queueLen ? `排队 ${queueLen}` : s.t
+  return <span className={`c-badge ${s.cls}`}>{label}</span>
+}
+
+/**
+ * useStuck 判断「进入 since 时刻后是否已经超过阈值」。
+ *
+ * 只在排队时开一个低频定时器（每 5 秒探一次），而不是每帧读时钟。
+ * 排队是有尽头的，所以定时器会在状态变化时自动停掉。
+ */
+function useStuck(since?: number): boolean {
+  const [stuck, setStuck] = useState(false)
+
+  useEffect(() => {
+    if (!since) {
+      setStuck(false)
+      return
+    }
+    const check = () => setStuck(Date.now() - since > STUCK_MS)
+    check()
+    // 5 秒一次足够：阈值是 20 秒，界面不需要秒级精度
+    const id = setInterval(check, 5000)
+    return () => clearInterval(id)
+  }, [since])
+
+  return stuck
 }
 
 /**

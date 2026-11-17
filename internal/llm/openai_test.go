@@ -202,3 +202,98 @@ func TestStreamRejectsMissingAPIKey(t *testing.T) {
 		t.Error("缺少 API Key 时不应该发出请求")
 	}
 }
+
+// 回归：调用方没给 deadline 时，Stream 必须仍然能把流读完。
+//
+// 这个缺陷的实际表现是「发了消息没有任何回应」，且不报错 ——
+// 因为 Stream 一返回（把 channel 交给调用方）就执行了 defer cancel()，
+// 那一刻 body 才刚开始读，请求 ctx 被取消，后续 Scan 全部失败，
+// 结果是一个 delta 都没有、内容为空、状态却是正常的 idle。
+//
+// 为什么长期没被发现：真实 app 传的是 context.WithCancel(Background())，
+// 没有 deadline，会走进内部 WithTimeout 分支；而所有已有测试
+// （TestLlamaCppStream 等）都传了一个带 deadline 的 ctx，
+// 恰好绕开这个分支，于是测试全绿而真实使用全坏。
+// 这条用例固定住「无 deadline」这个入口条件。
+func TestStreamCompletesWithoutDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		// 先让出一小段时间：真实模型的首 token 也不是立刻到的。
+		// 没有这个间隔，goroutine 可能在 cancel 生效前就把数据读完了，
+		// 缺陷会变成偶发而不是必现。
+		time.Sleep(80 * time.Millisecond)
+		for _, s := range []string{"收", "到"} {
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"" + s + "\"}}]}\n\n"))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	c := New(Config{Provider: "llamacpp", BaseURL: srv.URL, Model: "m"})
+
+	// 关键：不带 deadline，和 internal/agent 里 runCtx 的构造方式一致
+	ch, err := c.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var b strings.Builder
+	done := false
+	for chunk := range ch {
+		b.WriteString(chunk.Delta)
+		if chunk.Done {
+			done = true
+		}
+	}
+	if got := b.String(); got != "收到" {
+		t.Fatalf("流式内容丢失：得到 %q，期望 %q（ctx 被提前取消会导致空串）", got, "收到")
+	}
+	if !done {
+		t.Error("没有收到 Done 标记")
+	}
+}
+
+// 回归：连接被服务端关掉时应当重试一次，而不是把错误直接抛给用户。
+// 用 httptest 造一个「第一次请求直接断开、第二次正常」的服务端。
+func TestStreamRetriesStaleConnection(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			// 直接掐断连接，模拟 keep-alive 连接被服务端回收
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := New(Config{Provider: "llamacpp", BaseURL: srv.URL, Model: "m"})
+	ch, err := c.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("连接层抖动不应该直接失败，应重试一次：%v", err)
+	}
+	var b strings.Builder
+	for chunk := range ch {
+		b.WriteString(chunk.Delta)
+	}
+	if b.String() != "ok" {
+		t.Fatalf("重试后应拿到完整内容，实际 %q", b.String())
+	}
+	if n := atomic.LoadInt32(&hits); n != 2 {
+		t.Fatalf("应当正好重试一次，实际请求数 %d", n)
+	}
+}

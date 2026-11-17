@@ -19,6 +19,7 @@
 | 11 | `nil` 切片 → `null` → 前端 `.length` 崩溃 | e2e |
 | 12 | Hooks 顺序不一致导致白屏（两次） | 无（见待办） |
 | 13 | `sync.Mutex` 值拷贝（`go vet` 报 copies lock） | `go vet` |
+| 19 | 聊天发出去没有任何回应：`Stream` 的 `defer cancel()` 在返回瞬间取消读流 | Go test |
 
 ---
 
@@ -370,3 +371,37 @@
 4. **乐观更新的 pending 收尾**（第 7 条）。成功路径依赖后端事件清 pending；需要一条「后端不回推时 UI 也不能永远 pending」的用例。
 5. **动画时序只在 Web 环境验证**（第 14 条）。真机上 `Window.SetSize` 逐帧调用的平滑度、与 CSS 的帧同步没法在浏览器里复现，需要人工在 `npm run dev` 下确认。
 6. **`e2e/mock-runtime.ts` 与真实后端行为漂移**。mock 是手写的（`API.ListAgents` 等都返回空数据），真实接口签名变了 mock 不会报错。建议定期用真实后端跑一遍关键路径。
+
+---
+
+## 19. 聊天发出去没有任何回应（空回复、无报错、状态还是 idle）
+
+- **现象**：给 agent 发一条消息，自己的话显示出来了，然后**永远没有任何回应** —— 没有回复、没有报错、状态很快回到「空闲」。看起来像「模型没听见」，实际是回复被丢掉了。用 `loop` backend 时正常，只有普通聊天这条路坏，所以很容易被误判成「这个 provider 不行」。
+- **根因**（`internal/llm/openai.go` 的 `Stream`）：调用方没给 deadline 时，函数内部套了 `context.WithTimeout(ctx, StreamTimeout)`，然后 **`defer cancel()`**。`defer` 是**函数返回时**执行，而 `Stream` 的返回值是一个 channel —— 它一返回就等于告诉调用方「流给你了」，此时后台 goroutine 才刚开始读 `resp.Body`。`cancel()` 立刻把请求 ctx 取消，`bufio.Scanner` 随之失败，一个 delta 都没读出来。
+  结果是：`executeMock` 收到一条 delta 为空、只有 `Done` 的流 → 把空字符串追加进历史 → 状态正常回到 `idle`，**全程没有任何 error**。`internal/agent/manager.go:625` 传的正是 `context.WithCancel(context.Background())`，没有 deadline，必然走进这个分支。
+- **为什么没被及早发现**：**所有已有测试都在用另一种 ctx。** `internal/llm/llamacpp_test.go` 的 `TestLlamaCppStream` 传的是 `context.WithTimeout(..., 60s)`，有 deadline，走的是 `else` 分支，`defer` 根本不存在；`TestStreamTimesOutOnHangingUpstream` 测的是超时，天然不关心内容。于是「测试全绿」与「真实使用全坏」同时成立 —— 真实 app 的入口条件（无 deadline）**从来没有被任何用例扮演过**。另外这条 bug 不崩溃、不报错、状态机自洽，所以状态机护栏和 e2e（走 mock runtime）也抓不到。
+- **解决方案**（`internal/llm/openai.go` 的 `Stream`）：
+  - `cancel` 交给读 body 的 goroutine 释放（`defer cancel()` 移进 goroutine），保证「流读完了才取消」，而不是「返回就取消」；
+  - 调用方已给 deadline 时用一个空 cancel，两条路径保持一致；
+  - `Do` 失败 / 非 200 时显式 `cancel()`，避免在没有 goroutine 的场景下泄漏。
+- **预防措施与护栏**：
+  - `internal/llm/openai_test.go` → `TestStreamCompletesWithoutDeadline`：用 httptest 造一个「先延迟 80ms 再吐两个 delta」的服务端，**传 `context.Background()`**，断言拼出来必须是 `收到`。延迟是为了让缺陷从偶发变成必现。
+    已按「护栏的护栏」验证过：把修复回退后这条立刻红，报错正是 `流式内容丢失：得到 ""，期望 "收到"` —— 和用户看到的症状一致。
+  - 规则：**测试一个流式接口时，必须至少有一条用例用「和生产完全一样的方式」构造 ctx**（这里是 `WithCancel(Background())`），不要所有用例都顺手加 deadline。
+
+护栏：`internal/llm/openai_test.go`（`TestStreamCompletesWithoutDeadline`）
+
+---
+
+## 20. 偶发「发一条就没反应」：每次请求 new 一个 `http.Client`
+
+- **现象**：多数消息正常，偶尔一条直接没反应（或要重发一次才好）。日志里是 `http: server closed idle connection` 或 `EOF`。
+- **根因**（`internal/llm/openai.go` 的 `Stream`）：每次调用都 `httpClient := &http.Client{}`。`executeMock` 又是**每轮都 `llm.New(cfg)`**，于是连接池每轮重建：上一条连接的空闲池被丢在服务端，服务端超时关掉它，下一条请求恰好复用到这条已死的连接上就失败。Go 只对幂等的 GET 自动重试，**POST 不会重试**，所以这个抖动直接暴露给用户。
+- **为什么没被及早发现**：单次请求几乎必然成功，只有「连续多轮 + 服务端刚好回收连接」才出现。功能测试每条都新建环境，e2e 走 mock（根本不发 HTTP），所以没人连续发过几十条。
+- **解决方案**：
+  - `llm.httpClient` 提成包级共享连接池，`openAICompat` 复用它（跨会话、跨轮次复用同一份连接）；
+  - 新增 `(*openAICompat).do`：只对**连接层**错误（`EOF` / `ECONNRESET` / `server closed idle connection` / `connection reset by peer`）**重试一次**，并用 `req.GetBody` 重建请求体。流一旦建立就不再重试，避免重复输出。
+  - 重试的安全性有实测依据：这些错误发生时服务端计数不增长（实测 60 并发请求里 1 次 `EOF`，服务端只处理了 59 次），即模型没有被真正调用，不会重复生成或重复计费。
+- **预防措施与护栏**：`internal/llm/openai_test.go` → `TestStreamRetriesStaleConnection`：httptest 第一次请求 hijack 后直接 `Close()`，第二次正常返回，断言「不报错、内容完整、服务端恰好被请求 2 次」（既验证重试生效，也验证只重试一次）。
+
+护栏：`internal/llm/openai_test.go`（`TestStreamRetriesStaleConnection`）

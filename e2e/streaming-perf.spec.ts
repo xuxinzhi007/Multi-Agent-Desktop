@@ -65,6 +65,9 @@ test('高频 delta 下界面不应掉帧', async ({ page }) => {
   // 60fps 的预算是 16.7ms。修 Bubble memo 前最差帧是 62ms（明显卡顿），
   // 修后稳定在 18ms 左右。这里把阈值设在 40ms —— 留足 CI 抖动余量，
   // 但能挡住「整棵树重渲染」这类回归。
+  // 注意：本机跑着本地模型服务（llama-server 等重负载）时，
+  // 帧间隔会被系统调度拖到 50ms+ 而没有代码问题。
+  // 判定回归前先确认机器是空的，否则会把 CPU 竞争误诊成性能回归。
   expect(result.worst, `最差帧 ${result.worst}ms（样本 ${result.samples}）`).toBeLessThan(40)
   expect(result.p95, `p95 帧间隔 ${result.p95}ms`).toBeLessThan(30)
 })

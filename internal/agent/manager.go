@@ -45,6 +45,7 @@ type Agent struct {
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt int64  `json:"-"` // 本轮开始的 Unix 秒
+	QueuedAt  int64  `json:"-"` // 进入排队的 Unix 秒，0 表示当前没在排队
 	LastTool  string `json:"-"` // 最近一次工具调用名
 	Chars     int    `json:"-"` // 本轮已生成字符数
 	LastError string `json:"-"` // 最近一次错误内容（供悬浮岛显示真实原因）
@@ -513,11 +514,23 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 	case a.queue <- req:
 		a.mu.Lock()
 		a.QueueLen = len(a.queue)
-		if a.Status == StatusIdle {
+		queued := a.Status == StatusIdle
+		if queued {
 			a.Status = StatusQueued
-			m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusQueued})
+			// 记下进入排队的时刻：界面靠它区分「刚排队」和「卡住了」。
+			// 两者长得一样，但处置方式完全不同。
+			a.QueuedAt = time.Now().Unix()
 		}
 		a.mu.Unlock()
+		// emit 必须在解锁之后。
+		//
+		// 订阅者（main.go 的 emitToWindow、以及将来任何想知道
+		// 「这个 agent 现在什么状态」的回调）会调 Get/Snapshot，
+		// 那是要拿 a.mu 的。持锁调用就是自己锁自己：
+		// 整个 agent 永久停在 queued，界面显示「排队中」但 worker 再也动不了。
+		if queued {
+			m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusQueued})
+		}
 		return nil
 	default:
 		return fmt.Errorf("agent %s queue full", req.AgentID)
@@ -613,6 +626,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
+	a.QueuedAt = 0 // 已经开始执行，不再处于排队
 	// 本轮指标：开始时间与计数器，供悬浮岛显示，不依赖前端猜
 	a.StartedAt = time.Now().Unix()
 	a.Chars = 0
@@ -937,6 +951,7 @@ func (a *Agent) Snapshot() *Agent {
 		Knowledge:     append([]string(nil), a.Knowledge...),
 		BlockedReason: a.BlockedReason,
 		StartedAt:     a.StartedAt,
+		QueuedAt:      a.QueuedAt,
 		LastTool:      a.LastTool,
 		Chars:         a.Chars,
 		LastError:     a.LastError,

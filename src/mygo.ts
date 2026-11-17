@@ -70,6 +70,11 @@ export interface AgentView {
   blockedReason?: string;
   /** 以下为本轮运行时指标，监控台据此显示「跑了多久 / 产出多少 / 在用什么工具」。 */
   startedAt?: number;
+  /**
+   * QueuedAt 是进入排队的时刻。界面靠它区分「刚排队」和「卡住了」——
+   * 两者长得一样，但前者等就行，后者必须重启。
+   */
+  queuedAt?: number;
   lastTool?: string;
   chars?: number;
 }
@@ -134,6 +139,8 @@ export interface Diagnostics {
   modelOk: boolean;
   modelErr?: string;
   modelReply?: string;
+  /** StaleBuild 表示源码比运行中的进程新 —— 这时看到的现象不代表当前代码 */
+  staleBuild: boolean;
   agents: AgentDiag[];
   loops: LoopDiag[];
   checkedAt: number;
@@ -183,6 +190,8 @@ export interface MiniAgentStatus {
   task?: string;
   /** 本轮开始时间（Unix 秒） */
   startedAt?: number;
+  /** 进入排队的时刻，0 表示没在排队 */
+  queuedAt?: number;
   /** 最近一次工具调用 */
   lastTool?: string;
   /** 本轮已生成字符数 */
@@ -313,6 +322,12 @@ export interface SystemInfo {
   goVersion: string;
   mygo: boolean;
   buildStamp: string;
+  /**
+   * StaleBuild 为 true 表示源码比运行中的进程新：
+   * 用户的改动还没生效，必须重启，否则看到的现象不代表当前代码。
+   */
+  staleBuild: boolean;
+  sourceTime?: number;
 }
 
 export interface ToolCall {

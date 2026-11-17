@@ -50,6 +50,7 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         hasKey: true,
         modelOk: true,
         modelReply: '通了',
+        staleBuild: false,
         agents: [],
         loops: [],
         checkedAt: Math.floor(Date.now() / 1000),
