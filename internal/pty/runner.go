@@ -2,6 +2,7 @@ package pty
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"sync"
 
 	"multi-agent-desktop/internal/proc"
+	"multi-agent-desktop/internal/workdir"
 )
 
 // Result 是一次命令执行的产出。
@@ -40,22 +42,30 @@ func (r *Runner) Dir() string {
 	return r.dir
 }
 
+// shellFor 选一个不读登录脚本的 shell。
+//
+// zsh -lc 会加载 .zprofile / .zshrc。这些脚本经常去碰桌面、文稿、下载，
+// macOS 就按文件夹各弹一次权限，而且每条命令都会再走一遍。
+// -df 关掉全局和用户的启动文件。Windows 用 -NoProfile，同一件事。
 func shellFor() (string, []string) {
 	if runtime.GOOS == "windows" {
 		return "powershell.exe", []string{"-NoProfile", "-Command"}
 	}
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "/bin/zsh"
+	if _, err := os.Stat("/bin/zsh"); err == nil {
+		return "/bin/zsh", []string{"-dfc"}
 	}
-	return sh, []string{"-lc"}
+	return "/bin/sh", []string{"-c"}
 }
 
 // Run 执行一条命令并等待完成。ctx 取消会杀整个进程组。
 func (r *Runner) Run(ctx context.Context, command string) Result {
+	dir := r.Dir()
+	if workdir.TooBroad(dir) {
+		return Result{Stderr: workdir.RejectReason + "\n", ExitCode: -1}
+	}
 	name, args := shellFor()
 	cmd := exec.CommandContext(ctx, name, append(args, command)...)
-	cmd.Dir = r.Dir()
+	cmd.Dir = dir
 	proc.Setup(cmd)
 
 	var stdout, stderr syncBuffer
@@ -66,7 +76,7 @@ func (r *Runner) Run(ctx context.Context, command string) Result {
 	code := 0
 	if err != nil {
 		var ee *exec.ExitError
-		if ok := proc.Exited(err); ok {
+		if errors.As(err, &ee) {
 			code = ee.ExitCode()
 		} else {
 			code = -1

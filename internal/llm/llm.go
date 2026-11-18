@@ -101,6 +101,13 @@ func ApplyDefaults(cfg Config) Config {
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = DefaultOllamaBaseURL
 		}
+	case "qoder":
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = DefaultQoderBaseURL
+		}
+		if cfg.Model == "" {
+			cfg.Model = DefaultQoderModel
+		}
 	}
 	return cfg
 }
@@ -124,6 +131,9 @@ func New(cfg Config) Client {
 		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
 	case "openai", "deepseek", "claude":
 		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
+	case "qoder":
+		cfg = ApplyDefaults(cfg)
+		return &qoderClient{cfg: cfg, client: httpClient}
 	default:
 		return &mockClient{}
 	}

@@ -14,9 +14,9 @@ type Props = {
   onSave: (cfg: LLMConfig) => void
 }
 
-const VENDORS: { id: string; label: string; local: boolean; baseUrl: string }[] = [
+const VENDORS: { id: string; label: string; local: boolean; baseUrl: string; login?: boolean }[] = [
   { id: 'llamacpp', label: '本地 llama.cpp', local: true, baseUrl: 'http://127.0.0.1:8080' },
-  { id: 'ollama', label: 'Ollama', local: true, baseUrl: 'http://127.0.0.1:11434' },
+  { id: 'qoder', label: 'Qoder', local: false, baseUrl: 'https://api3.qoder.sh', login: true },
   { id: 'deepseek', label: 'DeepSeek', local: false, baseUrl: 'https://api.deepseek.com' },
   { id: 'openai', label: 'OpenAI', local: false, baseUrl: 'https://api.openai.com' },
   { id: 'claude', label: 'Claude', local: false, baseUrl: 'https://api.anthropic.com' },
@@ -68,6 +68,25 @@ function ProviderBoard() {
     setBaseUrl(row?.baseUrl || preset?.baseUrl || '')
     setApiKey('')
     setFormErr('')
+  }
+
+  const loginQoder = async () => {
+    setBusy(true)
+    setFormErr('')
+    try {
+      const ep = await API.loginQoder()
+      setRows((cur) => {
+        const next = cur.some((r) => r.provider === ep.provider)
+          ? cur.map((r) => (r.provider === ep.provider ? ep : r))
+          : [...cur, ep]
+        return next
+      })
+      setEditing('')
+    } catch (e) {
+      setFormErr(errText(e))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const save = async () => {
@@ -185,9 +204,13 @@ function ProviderBoard() {
                     placeholder={
                       current?.local
                         ? '本地服务可以留空'
-                        : editingRow?.hasKey
-                          ? '已保存，留空则不修改'
-                          : 'sk-…'
+                        : editing === 'qoder'
+                          ? editingRow?.hasKey
+                            ? '已登录，留空则不修改'
+                            : 'pt-…'
+                          : editingRow?.hasKey
+                            ? '已保存，留空则不修改'
+                            : 'sk-…'
                     }
                     onChange={(e) => setApiKey(e.target.value)}
                   />
@@ -196,6 +219,16 @@ function ProviderBoard() {
                   </button>
                 </span>
               </label>
+              {editing === 'qoder' && (
+                <div className="c-settings__field">
+                  <p className="c-settings__hint">
+                    可以在浏览器里授权，也可以填写 Personal Access Token（pt- 开头）或访问令牌。
+                  </p>
+                  <button type="button" className="c-btn" disabled={busy} onClick={() => void loginQoder()}>
+                    {busy ? '正在等待浏览器授权…' : '授权登录'}
+                  </button>
+                </div>
+              )}
               <div className="c-settings__field">
                 <button type="button" className="c-btn c-btn--primary" disabled={busy} onClick={() => void save()}>
                   {busy ? '正在检查…' : '保存并检查'}

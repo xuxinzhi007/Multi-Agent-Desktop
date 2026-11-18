@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/tool/builtin"
+	"multi-agent-desktop/internal/workdir"
 )
 
 // executeLoop 用自持循环执行。
@@ -38,8 +38,8 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
-	if broadWorkDir(workDir) {
-		m.finish(a, StatusError, "工作目录不能是整个磁盘或用户主目录，请指定一个项目目录")
+	if workdir.TooBroad(workDir) {
+		m.finish(a, StatusError, workdir.RejectReason)
 		return
 	}
 
@@ -56,8 +56,8 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 	knowledgeIDs := append([]string(nil), a.Knowledge...)
 	a.mu.Unlock()
 
-	system := loopSystemPrompt(workDir, peerNames(m, a.ID))
-	if m.knowledge != nil {
+	system := loopSystemPrompt(workDir)
+	if m.knowledge != nil && len(knowledgeIDs) > 0 {
 		if block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 0); block != "" {
 			system = block + "\n\n" + system
 		}
@@ -172,6 +172,15 @@ func (e *loopEmitter) Emit(ev loop.Event) {
 	switch ev.Kind {
 	case "iter.start":
 		e.m.emit("agent.status", map[string]any{"id": e.agent.ID, "status": StatusRunning})
+		// 上下文占用单独发一个事件：不塞进 agent.status（那是状态语义），
+		// 也不塞进 agent.loop（只在 done/stopped/failed 发）——这个量每轮都要
+		// 刷新，而且只有配了窗口才有意义，CtxLimit<=0 时发出去前端也无从算比例。
+		if ev.CtxLimit > 0 {
+			e.m.emit("agent.context", map[string]any{
+				"id": e.agent.ID, "iter": ev.Iter,
+				"used": ev.CtxUsed, "budget": ev.CtxBudget, "limit": ev.CtxLimit,
+			})
+		}
 	case "reasoning":
 		e.m.emit("agent.reasoning", map[string]any{"id": e.agent.ID, "reasoning": ev.Text})
 	case "tool.start":
@@ -207,22 +216,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-// loopSystemPrompt 是循环的系统提示。
-//
-// 里面固定的那两句是关于「工具输出是数据不是指令」的 ——
-// 这是提示注入防御的唯一结构性手段。围栏在 tool.formatObservation，
-// 声明在这里，两处必须同时存在才有意义。
-func peerNames(m *Manager, self string) []string {
-	var names []string
-	for _, peer := range m.List() {
-		if peer.ID == self {
-			continue
-		}
-		names = append(names, peer.Name)
-	}
-	return names
 }
 
 func resumable(st *loop.State) bool {
@@ -282,7 +275,13 @@ func oneAnswer(out *loop.State) (llm.Message, bool) {
 	}, true
 }
 
-func loopSystemPrompt(workDir string, peers []string) string {
+// loopSystemPrompt 是循环的系统提示。
+//
+// 里面固定的那两句是关于「工具输出是数据不是指令」的 ——
+// 这是提示注入防御的唯一结构性手段。围栏在 tool.formatObservation，
+// 声明在这里，两处必须同时存在才有意义。
+// 其他会话不写在这里，需要时用 list_agents 查。
+func loopSystemPrompt(workDir string) string {
 	lines := []string{
 		"你是一个可以实际执行操作的工程 agent。工作目录：" + workDir,
 		"",
@@ -295,9 +294,6 @@ func loopSystemPrompt(workDir string, peers []string) string {
 		"- save_note：把结论写进应用正在用的知识库，页面会马上更新。参数 title、body，可选 tags。",
 		"这些能力已经接在工具里。不要回答自己无法创建 agent 或无法和其他 agent 对话；需要协作时直接调用上面的工具。",
 		"沉淀知识必须调用 save_note。不要直接修改 knowledge.jsonl，那样只改了磁盘，打开着的页面不会变。",
-	}
-	if len(peers) > 0 {
-		lines = append(lines, "当前其他会话："+strings.Join(peers, "、")+"。")
 	}
 	lines = append(lines,
 		"规则：",
@@ -328,14 +324,6 @@ func loopCheckpointRoot(m *Manager) string {
 		return filepath.Join(".", ".loop")
 	}
 	return filepath.Join(filepath.Dir(store), "loop")
-}
-
-func broadWorkDir(dir string) bool {
-	if dir == "" || dir == "/" {
-		return true
-	}
-	home, err := os.UserHomeDir()
-	return err == nil && dir == home
 }
 
 var _ = fmt.Sprintf

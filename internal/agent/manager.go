@@ -134,26 +134,15 @@ func (m *Manager) Emit(event string, data any) {
 	}
 }
 
-// buildSystemPrompt 生成会话 system message，前置知识库要点。
-// 注意：必须在持有 m.mu 之前调用（它会自己取 RLock）。
+// buildSystemPrompt 生成会话首条 system。知识库不在这里注入。
 func (m *Manager) buildSystemPrompt(role string) string {
-	m.mu.RLock()
-	kb := m.knowledge
-	m.mu.RUnlock()
-	return systemPromptFor(role, kb)
+	return systemPromptFor(role)
 }
 
 // systemPromptFor 是无锁的纯函数，供 Create 在持锁时调用。
-func systemPromptFor(role string, kb KnowledgeProvider) string {
-	base := "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"
-	if kb == nil {
-		return base
-	}
-	block, _ := kb.View("", role, nil, "", 0)
-	if block == "" {
-		return base
-	}
-	return block + "\n" + base
+// 首条 system 只写角色。已挂到会话上的笔记由当轮循环按 knowledgeIDs 带上。
+func systemPromptFor(role string) string {
+	return "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"
 }
 
 // SetStore 设置持久化文件路径，并尝试加载。
@@ -220,6 +209,23 @@ func (m *Manager) goSave() {
 
 // waitSaves 阻塞直到所有异步落盘结束（测试用）。
 func (m *Manager) waitSaves() { m.saveWG.Wait() }
+
+// Shutdown 停掉进行中的请求并等落盘结束。进程收到退出信号后调用。
+func (m *Manager) Shutdown() {
+	m.mu.RLock()
+	list := make([]*Agent, 0, len(m.order))
+	for _, id := range m.order {
+		if a, ok := m.agents[id]; ok {
+			list = append(list, a)
+		}
+	}
+	m.mu.RUnlock()
+	for _, a := range list {
+		a.StopAll()
+	}
+	_ = m.Save()
+	m.waitSaves()
+}
 
 // writeFileAtomic 先写同目录临时文件再 rename，避免并发/崩溃留下半个文件。
 func writeFileAtomic(path string, buf []byte) error {
@@ -449,10 +455,6 @@ func (m *Manager) Unblock(id string) error {
 var palette = []string{"#5b9dff", "#3ecf8e", "#e8a33d", "#c47aff", "#ff7a8a", "#4dd0e1"}
 
 func (m *Manager) Create(id, name, role string) *Agent {
-	m.mu.RLock()
-	kb := m.knowledge
-	m.mu.RUnlock()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -474,7 +476,7 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Status:    StatusIdle,
 		CreatedAt: time.Now().Unix(),
 		Messages: []llm.Message{
-			{Role: "system", Content: systemPromptFor(role, kb)},
+			{Role: "system", Content: systemPromptFor(role)},
 		},
 		Backend: "loop",
 		queue:   make(chan PromptRequest, 32),
@@ -896,9 +898,8 @@ func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text, ch
 	knowledgeIDs := append([]string(nil), a.Knowledge...)
 	a.mu.Unlock()
 
-	// 获取知识库 system prompt
 	systemPrompt := ""
-	if m.knowledge != nil {
+	if m.knowledge != nil && len(knowledgeIDs) > 0 {
 		block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 0)
 		systemPrompt = block
 	}

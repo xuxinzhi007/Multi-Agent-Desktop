@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentView as Agent, Note } from '../mygo'
 import Select from './Select'
 
@@ -14,10 +14,10 @@ type Props = {
 /**
  * KnowledgePanel 是多 agent 共享的知识库：人类写的约定 / 术语 / 偏好。
  *
- * 「沉淀」的关键是能看见东西被谁用了 —— 所以每条笔记都显示
- * 引用它的 agent，而不是给每条笔记挂一个「注入到会话」下拉框
- * （那会变成一屏下拉，既吵又看不出状态）。
+ * 标签超过 12 个就收成一行，其余放进抽屉，避免把列表挤出首屏。
+ * 笔记默认是 72px 的紧凑卡片，引用情况在右下角胶囊里。
  */
+const TAG_CAP = 12
 export default function KnowledgePanel({
   notes,
   agents,
@@ -28,6 +28,8 @@ export default function KnowledgePanel({
 }: Props) {
   const [query, setQuery] = useState('')
   const [tag, setTag] = useState('')
+  const [tagsOpen, setTagsOpen] = useState(false)
+  const tagBox = useRef<HTMLDivElement>(null)
   const [composing, setComposing] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
 
@@ -90,6 +92,21 @@ export default function KnowledgePanel({
   }
 
   const referenced = notes.filter((n) => (usersByNote.get(n.id) ?? []).length > 0).length
+  const crowded = allTags.length > TAG_CAP
+
+  useEffect(() => {
+    if (!tagsOpen) return
+    const close = (e: MouseEvent) => {
+      if (!tagBox.current?.contains(e.target as Node)) setTagsOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [tagsOpen])
+
+  const pickTag = (next: string) => {
+    setTag(next)
+    setTagsOpen(false)
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -130,15 +147,44 @@ export default function KnowledgePanel({
         />
 
         {allTags.length > 0 && (
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
-            <TagChip active={!tag} onClick={() => setTag('')}>
-              全部
-            </TagChip>
-            {allTags.map((t) => (
-              <TagChip key={t} active={tag === t} onClick={() => setTag(tag === t ? '' : t)}>
-                #{t}
+          <div className="c-kb-tagbox" ref={tagBox}>
+            <div className="c-kb-tags">
+              <TagChip active={!tag} onClick={() => pickTag('')}>
+                全部
               </TagChip>
-            ))}
+              {crowded ? (
+                <>
+                  {tag && (
+                    <TagChip active onClick={() => pickTag('')}>
+                      #{tag}
+                    </TagChip>
+                  )}
+                  <button
+                    type="button"
+                    className="c-kb-tags__more"
+                    aria-expanded={tagsOpen}
+                    onClick={() => setTagsOpen((v) => !v)}
+                  >
+                    {tagsOpen ? '收起' : `全部 ${allTags.length} 个标签`}
+                  </button>
+                </>
+              ) : (
+                allTags.map((t) => (
+                  <TagChip key={t} active={tag === t} onClick={() => pickTag(tag === t ? '' : t)}>
+                    #{t}
+                  </TagChip>
+                ))
+              )}
+            </div>
+            {crowded && tagsOpen && (
+              <div className="c-kb-tags__drawer">
+                {allTags.map((t) => (
+                  <TagChip key={t} active={tag === t} onClick={() => pickTag(tag === t ? '' : t)}>
+                    #{t}
+                  </TagChip>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -240,145 +286,128 @@ function NoteCard({
   onDetach?: (noteId: string, agentId: string) => void
 }) {
   const body = note.body ?? ''
-  const long = body.length > 160
+  const cited =
+    users.length === 0
+      ? '未引用'
+      : users.length <= 2
+        ? users.map((a) => a.name).join(' · ')
+        : `${users.length} 个 Agent`
 
   return (
     <div
-      style={{
-        background: 'var(--bg-surface)',
-        border: `1px solid ${users.length > 0 ? 'var(--border-default)' : 'var(--border-subtle)'}`,
-        borderRadius: 'var(--radius-md)',
-        padding: '9px 11px',
-        marginBottom: 'var(--space-2)',
+      className={open ? 'c-compact-card c-compact-card--open' : 'c-compact-card'}
+      style={users.length > 0 ? { borderColor: 'var(--border-default)' } : undefined}
+      onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onToggle()
+        }
       }}
+      role="button"
+      tabIndex={0}
+      aria-expanded={open}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span
-          style={{
-            fontSize: 'var(--text-sm)',
-            fontWeight: 600,
-            color: 'var(--text-primary)',
-            minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-          title={note.title}
-        >
-          {note.title || '(无标题)'}
-        </span>
-        <button
-          className="c-icon-btn c-icon-btn--danger"
-          style={{ marginLeft: 'auto', width: 18, height: 18, fontSize: 12, flexShrink: 0 }}
-          onClick={onDelete}
-          title="删除笔记"
-        >
-          ×
-        </button>
+      <div className="c-compact-card__title" title={note.title}>
+        {note.title || '(无标题)'}
       </div>
-
-      {body && (
-        <div
-          style={{
-            marginTop: 4,
-            fontSize: 'var(--text-xs)',
-            color: 'var(--text-secondary)',
-            lineHeight: 1.65,
-            whiteSpace: 'pre-wrap',
-            ...(long && !open
-              ? {
-                  display: '-webkit-box',
-                  WebkitLineClamp: 3,
-                  WebkitBoxOrient: 'vertical' as const,
-                  overflow: 'hidden',
-                }
-              : {}),
-          }}
-        >
-          {body}
+      {body && !open && (
+        <div className="c-compact-card__body" title={body}>
+          {body.replace(/\s+/g, ' ')}
         </div>
       )}
-      {long && (
-        <button
-          className="c-link-btn"
-          onClick={onToggle}
-          style={{ fontSize: 'var(--text-xs)', marginTop: 2 }}
-        >
-          {open ? '收起' : '展开全文'}
-        </button>
-      )}
-
-      {(note.tags ?? []).length > 0 && (
-        <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-          {(note.tags ?? []).map((t) => (
-            <span
-              key={t}
-              className="mono"
-              style={{
-                fontSize: 9,
-                color: 'var(--text-disabled)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: 'var(--radius-full)',
-                padding: '0 6px',
-              }}
-            >
-              #{t}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* 引用情况：这才是「沉淀」的可见证据 */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 4,
-          marginTop: 7,
-          flexWrap: 'wrap',
-          paddingTop: 6,
-          borderTop: '1px solid var(--border-subtle)',
+      <button
+        className="c-icon-btn c-icon-btn--danger c-compact-card__x"
+        style={{ width: 18, height: 18, fontSize: 12 }}
+        onClick={(e) => {
+          e.stopPropagation()
+          onDelete()
         }}
+        title="删除笔记"
       >
-        {users.length === 0 ? (
-          <span style={{ fontSize: 10, color: 'var(--text-disabled)' }}>暂无 agent 引用</span>
-        ) : (
-          users.map((a) => (
-            <span
-              key={a.id}
-              title={`${a.name} 正在引用${onDetach ? '，点击取消' : ''}`}
-              onClick={onDetach ? () => onDetach(note.id, a.id) : undefined}
+        ×
+      </button>
+      <span
+        className="c-compact-card__cap"
+        title={users.length ? users.map((a) => a.name).join('、') : '暂无 agent 引用'}
+        style={
+          users.length > 0
+            ? {
+                color: users[0].color,
+                borderColor: `color-mix(in srgb, ${users[0].color} 40%, transparent)`,
+                background: `color-mix(in srgb, ${users[0].color} 10%, transparent)`,
+              }
+            : undefined
+        }
+      >
+        {cited}
+      </span>
+
+      {open && (
+        <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8 }}>
+          {body && (
+            <div
               style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 3,
-                fontSize: 10,
-                color: a.color,
-                border: `1px solid color-mix(in srgb, ${a.color} 40%, transparent)`,
-                background: `color-mix(in srgb, ${a.color} 10%, transparent)`,
-                borderRadius: 'var(--radius-full)',
-                padding: '0 6px',
-                cursor: onDetach ? 'pointer' : 'default',
+                fontSize: 'var(--text-xs)',
+                color: 'var(--text-secondary)',
+                lineHeight: 1.65,
+                whiteSpace: 'pre-wrap',
               }}
             >
-              {a.name}
-            </span>
-          ))
-        )}
-
-        {onAttach && agents.length > users.length && (
-          <div style={{ marginLeft: 'auto', width: 96 }}>
-            <Select
-              value=""
-              placeholder="+ 引用"
-              options={agents
-                .filter((a) => !users.some((u) => u.id === a.id))
-                .map((a) => ({ value: a.id, label: a.name }))}
-              onChange={(id) => id && onAttach(note.id, id)}
-            />
+              {body}
+            </div>
+          )}
+          {(note.tags ?? []).length > 0 && (
+            <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+              {(note.tags ?? []).map((t) => (
+                <span key={t} className="c-kb-chip">
+                  #{t}
+                </span>
+              ))}
+            </div>
+          )}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              marginTop: 8,
+              flexWrap: 'wrap',
+            }}
+          >
+            {users.map((a) => (
+              <span
+                key={a.id}
+                title={onDetach ? `${a.name}，点击取消引用` : a.name}
+                onClick={onDetach ? () => onDetach(note.id, a.id) : undefined}
+                style={{
+                  fontSize: 10,
+                  color: a.color,
+                  border: `1px solid color-mix(in srgb, ${a.color} 40%, transparent)`,
+                  background: `color-mix(in srgb, ${a.color} 10%, transparent)`,
+                  borderRadius: 'var(--radius-full)',
+                  padding: '0 6px',
+                  cursor: onDetach ? 'pointer' : 'default',
+                }}
+              >
+                {a.name}
+              </span>
+            ))}
+            {onAttach && agents.length > users.length && (
+              <div style={{ marginLeft: 'auto', width: 96 }}>
+                <Select
+                  value=""
+                  placeholder="+ 引用"
+                  options={agents
+                    .filter((a) => !users.some((u) => u.id === a.id))
+                    .map((a) => ({ value: a.id, label: a.name }))}
+                  onChange={(id) => id && onAttach(note.id, id)}
+                />
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -395,17 +424,8 @@ function TagChip({
   return (
     <button
       type="button"
+      className={active ? 'c-kb-chip c-kb-chip--on' : 'c-kb-chip'}
       onClick={onClick}
-      style={{
-        fontFamily: 'inherit',
-        fontSize: 10,
-        padding: '1px 7px',
-        borderRadius: 'var(--radius-full)',
-        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
-        background: active ? 'var(--accent-dim)' : 'transparent',
-        color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
-        cursor: 'pointer',
-      }}
     >
       {children}
     </button>

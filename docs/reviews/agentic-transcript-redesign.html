@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>对话流重构 · 改造前 / 改造后</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['"IBM Plex Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
+        },
+      },
+    },
+  }
+</script>
+<style>
+  :root {
+    --ink: #e7edf5;
+    --muted: #93a0b4;
+    --line: rgba(226, 232, 240, 0.1);
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    background:
+      radial-gradient(980px 460px at 8% -12%, rgba(56, 189, 248, 0.09), transparent 58%),
+      radial-gradient(760px 420px at 100% 0%, rgba(99, 102, 241, 0.12), transparent 52%),
+      #070b10;
+    color: var(--ink);
+  }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .pulse-ring {
+    box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.28), 0 0 28px rgba(56, 189, 248, 0.12);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.22), 0 0 18px rgba(56, 189, 248, 0.08); }
+    50% { box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.45), 0 0 32px rgba(56, 189, 248, 0.2); }
+  }
+  .dot-pulse { animation: blink 1.1s steps(2, end) infinite; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: -2px;
+    background: #7dd3fc;
+    animation: blink 1s steps(2, end) infinite;
+  }
+  /* 改造前：summary 与正文叠在一起，overflow 把首行上沿切掉 */
+  .clip-bug {
+    height: 72px;
+    overflow: hidden;
+  }
+  .clip-bug-inner {
+    margin-top: -7px;
+    line-height: 1.45;
+  }
+  .stamp-clip {
+    max-width: 38px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: clip;
+  }
+  .drawer {
+    transform: translateX(100%);
+    transition: transform 220ms cubic-bezier(.2,.8,.2,1);
+  }
+  .drawer.open { transform: translateX(0); }
+  .scrim { opacity: 0; pointer-events: none; transition: opacity 180ms ease; }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+  button:focus-visible, summary:focus-visible {
+    outline: 2px solid #7dd3fc;
+    outline-offset: 2px;
+  }
+</style>
+</head>
+<body class="min-h-full">
+  <div class="mx-auto flex min-h-full max-w-6xl flex-col px-4 pb-16 pt-6 sm:px-6">
+    <header class="flex flex-wrap items-end justify-between gap-4 border-b border-white/10 pb-5">
+      <div class="min-w-0">
+        <p class="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-500">Agent transcript · AgentView</p>
+        <h1 class="mt-1 text-xl font-medium tracking-tight text-slate-100 sm:text-2xl">对话流层级重构</h1>
+        <p class="mt-1 max-w-xl text-sm leading-relaxed text-slate-400">同一段会话。用上面的开关在现在的平铺和卡片流之间切换。</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="inline-flex rounded-full border border-white/10 bg-slate-900/80 p-1" role="tablist" aria-label="视图">
+          <button id="tab-before" type="button" role="tab" class="rounded-full px-3 py-1.5 text-xs font-medium text-slate-300" aria-selected="false">改造前</button>
+          <button id="tab-after" type="button" role="tab" class="rounded-full px-3 py-1.5 text-xs font-medium" aria-selected="true">改造后</button>
+        </div>
+        <button id="replay" type="button" class="rounded-full border border-white/10 bg-slate-900/80 px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-sky-400/40">重放流式</button>
+        <div class="rounded-full border border-white/10 bg-slate-950/70 px-3 py-1.5 text-xs text-slate-300">
+          <span id="phase-label">就绪</span>
+          <span class="mx-1 text-slate-600">·</span>
+          <span id="clock" class="tabular text-sky-200">0.0s</span>
+        </div>
+        <button id="open-spec" type="button" class="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-900">设计规范</button>
+      </div>
+    </header>
+
+    <div class="mt-6 grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <section id="stage" class="min-w-0" aria-live="polite"></section>
+
+      <aside class="space-y-3 lg:sticky lg:top-6">
+        <article class="rounded-2xl border border-white/10 bg-slate-900/70 p-4">
+          <h2 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">对照</h2>
+          <ul id="diff-list" class="mt-3 space-y-3 text-sm leading-snug text-slate-300"></ul>
+        </article>
+        <article class="rounded-2xl border border-white/10 bg-slate-900/40 p-4 text-xs leading-relaxed text-slate-400">
+          <p>诊断来自 <span class="font-mono text-slate-300">ReasoningText</span> 与 <span class="font-mono text-slate-300">ShellEntry</span>。思考区 <span class="font-mono">maxHeight: 160</span> 且与 summary 贴在一起；命令原文直接进对话流。</p>
+        </article>
+      </aside>
+    </div>
+
+    <section class="mt-10 overflow-hidden rounded-2xl border border-white/10">
+      <div class="border-b border-white/10 px-4 py-3 text-xs font-medium uppercase tracking-[0.14em] text-slate-500">重构前后</div>
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[640px] text-left text-sm">
+          <thead class="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-4 py-3 font-medium">面</th>
+              <th class="px-4 py-3 font-medium">现在</th>
+              <th class="px-4 py-3 font-medium">改造后</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-white/5 text-slate-300">
+            <tr>
+              <td class="px-4 py-3 text-slate-100">层级</td>
+              <td class="px-4 py-3">用户、思考、命令、回答共用一条无容器的列</td>
+              <td class="px-4 py-3">四类卡片：提问、思考、工具、回答，边框和光晕分开</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 text-slate-100">思考</td>
+              <td class="px-4 py-3"><span class="font-mono text-xs">details</span> 默认展开，首行被 overflow 裁切</td>
+              <td class="px-4 py-3">脉冲卡片。标题与正文分离，内层滚动，首行完整</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 text-slate-100">日志</td>
+              <td class="px-4 py-3">重复 <span class="font-mono text-xs">cd</span> 逐条铺开，Bearer 明文</td>
+              <td class="px-4 py-3">重复目录收成一组，密钥默认打码，展开后仍是脱敏文本</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 text-slate-100">时间</td>
+              <td class="px-4 py-3">时间戳挤在行尾，窄宽度被切成半截</td>
+              <td class="px-4 py-3"><span class="tabular">HH:mm:ss</span> 不收缩、不省略</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div id="scrim" class="scrim fixed inset-0 z-30 bg-black/50"></div>
+  <aside id="drawer" class="drawer fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-white/10 bg-slate-950/95 backdrop-blur" aria-hidden="true">
+    <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
+      <div>
+        <p class="text-[11px] uppercase tracking-[0.16em] text-slate-500">Spec</p>
+        <h2 class="text-base font-medium text-slate-100">侧边栏设计规范</h2>
+      </div>
+      <button id="close-spec" type="button" class="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-300">关闭</button>
+    </div>
+    <div class="flex-1 space-y-6 overflow-y-auto px-5 py-5 text-sm leading-relaxed text-slate-300">
+      <section>
+        <h3 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">表面</h3>
+        <ul class="mt-2 space-y-2">
+          <li>底：<span class="font-mono text-xs text-sky-200">#070b10</span>，顶部两团低透明度光晕，不做大面积纯平色。</li>
+          <li>卡片：<span class="font-mono text-xs text-sky-200">slate-900/80</span>，1px <span class="font-mono text-xs">white/10</span>，圆角 16。</li>
+          <li>思考进行中才加脉冲光晕。结束后光晕停，卡片可折叠。</li>
+        </ul>
+      </section>
+      <section>
+        <h3 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">四类区块</h3>
+        <ol class="mt-2 list-decimal space-y-2 pl-4">
+          <li>用户提问靠右，浅色字在深卡片上，时间戳独立一列。</li>
+          <li>思考独白默认收起。展开后正文 <span class="font-mono text-xs">padding-top: 12px</span>，滚动容器不包住第一行的上沿。</li>
+          <li>工具调用先给摘要：条数、重复目录、脱敏处数。点开才看每条命令。</li>
+          <li>最终回答独占一张卡片，流式时末尾保留插入光标。</li>
+        </ol>
+      </section>
+      <section>
+        <h3 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">脱敏</h3>
+        <p class="mt-2">匹配 <span class="font-mono text-xs">Bearer</span>、<span class="font-mono text-xs">sk-</span>、<span class="font-mono text-xs">api_key=</span>。展示保留类型和末四位，例如 <span class="font-mono text-xs text-amber-200">Bearer ••••c2e9</span>。展开详情不还原原文。</p>
+      </section>
+      <section>
+        <h3 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">折叠</h3>
+        <p class="mt-2">连续相同的 <span class="font-mono text-xs">cd</span> 合成一条「进入目录 × N」。其他命令各自保留，长输出默认三行，点「展开输出」再看完。</p>
+      </section>
+      <section>
+        <h3 class="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">落地位置</h3>
+        <p class="mt-2 font-mono text-xs text-slate-400">src/components/AgentView.tsx<br/>ReasoningText · Thinking · ShellEntry · BubbleImpl</p>
+        <p class="mt-2">这一页是交互规格。接到产品里时，思考卡片替换 <span class="font-mono text-xs">details</span>，命令在进入 <span class="font-mono text-xs">ShellEntry</span> 之前先分组和脱敏。</p>
+      </section>
+    </div>
+  </aside>
+
+<script>
+const THINK = `先确认请求从哪一层进来。Kratos 的 HTTP middleware 和 service 层的错误转换是两条线，不能混在一起看。
+
+鉴权如果写在 service 里，流式接口和普通接口会各写一遍。先看 server 组装，再决定 token 是在中间件剥掉还是传到 biz。`
+
+const ANSWER = `鉴权应放在 HTTP 中间件，不放进每个 service 方法。
+
+中间件读取 Authorization，校验失败直接返回 Kratos 未授权错误。service 只拿已经验证过的主体。本地把服务拉起来之后，用脱敏后的令牌打一次 /v1/agents，确认 401 和 200 两条路径。`
+
+const COMMANDS = [
+  { cmd: 'cd /Users/xuxinzhi/Documents/gowork/multi-agent-desktop', out: '' },
+  { cmd: 'cd /Users/xuxinzhi/Documents/gowork/multi-agent-desktop', out: '' },
+  { cmd: 'cd /Users/xuxinzhi/Documents/gowork/multi-agent-desktop', out: '' },
+  { cmd: 'curl -sS -H "Authorization: Bearer sk-live-7f3a91c2e9" http://127.0.0.1:8080/v1/agents', out: 'HTTP/1.1 200\n[{"id":"a1","name":"前端"}]' },
+  { cmd: 'cd /Users/xuxinzhi/Documents/gowork/multi-agent-desktop && rg -n "Authorization" internal/server', out: 'internal/server/http.go:48:  Authorization' },
+]
+
+const DIFF = {
+  before: [
+    ['思考', '▼ 思考 与正文叠在一起，第一行上沿被切掉。'],
+    ['日志', '三次 cd 和 Bearer sk-live-… 全文摊开。'],
+    ['时间', '14:32:08 在窄行里被切成 14:3。'],
+  ],
+  after: [
+    ['思考', '标题单独一行，正文从上沿完整开始，可折叠。'],
+    ['日志', '三次 cd 收成一组，令牌显示为 Bearer ••••c2e9。'],
+    ['时间', '14:32:08 固定宽度，不参与收缩。'],
+  ],
+}
+
+const $ = (id) => document.getElementById(id)
+let mode = 'after'
+let timer = null
+let started = 0
+let playing = false
+let runId = 0
+
+function redact(s) {
+  return s
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/g, (m) => 'Bearer ••••' + m.slice(-4))
+    .replace(/sk-[A-Za-z0-9]+/g, (m) => 'sk-••••' + m.slice(-4))
+}
+
+function clockText() {
+  const ms = playing ? Date.now() - started : ($('clock').dataset.frozen || 0)
+  return (Number(ms) / 1000).toFixed(1) + 's'
+}
+
+function setPhase(label) {
+  $('phase-label').textContent = label
+}
+
+function groupCommands(list) {
+  const out = []
+  for (const item of list) {
+    const cd = item.cmd.match(/^cd\s+(\S+)$/)
+    const prev = out[out.length - 1]
+    if (cd && prev && prev.kind === 'cd' && prev.path === cd[1]) {
+      prev.count += 1
+      continue
+    }
+    if (cd) out.push({ kind: 'cd', path: cd[1], count: 1, raw: item })
+    else out.push({ kind: 'cmd', raw: item })
+  }
+  return out
+}
+
+function userCard(after) {
+  const time = after
+    ? '<time class="tabular shrink-0 text-xs text-slate-400">14:32:08</time>'
+    : '<time class="stamp-clip text-xs text-slate-500">14:32:08</time>'
+  if (!after) {
+    return `
+      <div class="mb-4">
+        <div class="mb-1 flex items-center gap-2 text-xs text-slate-500">
+          <span class="font-medium">你</span>
+          ${time}
+        </div>
+        <p class="text-[15px] leading-7 text-slate-200">查一下这个服务的鉴权中间件，顺便把本地接口跑起来。令牌先用环境里的 Bearer。</p>
+      </div>`
+  }
+  return `
+    <article class="ml-auto w-full max-w-[32rem] rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 shadow-[0_0_40px_rgba(15,23,42,0.35)]">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <span class="text-xs font-medium text-slate-400">你的提问</span>
+        ${time}
+      </div>
+      <p class="text-[15px] leading-7 text-slate-100">查一下这个服务的鉴权中间件，顺便把本地接口跑起来。令牌先用环境里的 Bearer。</p>
+    </article>`
+}
+
+function thinkCard(after, text, open, live) {
+  const shown = text || ''
+  if (!after) {
+    return `
+      <div class="my-3 text-slate-400">
+        <div class="text-xs text-slate-500">▼ 思考</div>
+        <div class="clip-bug text-xs">
+          <div class="clip-bug-inner whitespace-pre-wrap">${escapeHtml(shown) || '…'}</div>
+        </div>
+      </div>`
+  }
+  const ring = live ? 'pulse-ring' : ''
+  const body = open ? `
+    <div class="max-h-48 overflow-auto border-t border-white/10 px-4 pb-3 pt-3 text-[13px] leading-6 text-slate-300">
+      <p class="whitespace-pre-wrap">${escapeHtml(shown) || '…'}</p>
+    </div>` : ''
+  return `
+    <article class="rounded-2xl border border-sky-400/20 bg-slate-900/80 ${ring}">
+      <button type="button" data-toggle="think" class="flex w-full items-center gap-2 px-4 py-3 text-left" aria-expanded="${open}">
+        <span class="dot-pulse inline-block h-1.5 w-1.5 rounded-full bg-sky-300 ${live ? '' : 'opacity-50'}"></span>
+        <span class="text-sm text-slate-100">思考</span>
+        <span class="text-xs text-slate-500">${live ? '进行中' : '已完成'}</span>
+        <span class="ml-auto text-xs text-slate-500">${open ? '收起' : '展开'}</span>
+      </button>
+      ${body}
+    </article>`
+}
+
+function toolsCard(after, count, open) {
+  const slice = COMMANDS.slice(0, count)
+  if (!slice.length) return ''
+  if (!after) {
+    return slice.map((c) => `
+      <div class="mb-3">
+        <div class="mb-1 flex gap-2 font-mono text-xs text-slate-500">
+          <span>$</span><span class="min-w-0 text-slate-300">${escapeHtml(c.cmd)}</span>
+        </div>
+        ${c.out ? `<pre class="rounded-md border border-white/5 bg-black/40 p-2 font-mono text-xs text-slate-400">${escapeHtml(c.out)}</pre>` : ''}
+      </div>`).join('')
+  }
+  const groups = groupCommands(slice)
+  const secretHits = slice.filter((c) => /Bearer|sk-/.test(c.cmd)).length
+  const cdRepeats = groups.filter((g) => g.kind === 'cd' && g.count > 1).reduce((n, g) => n + g.count - 1, 0)
+  const rows = groups.map((g) => {
+    if (g.kind === 'cd') {
+      return `<li class="flex items-start justify-between gap-3 border-t border-white/5 px-4 py-2 font-mono text-xs text-slate-300">
+        <span class="min-w-0">cd ${escapeHtml(g.path)}</span>
+        <span class="shrink-0 text-slate-500">× ${g.count}</span>
+      </li>`
+    }
+    const safe = redact(g.raw.cmd)
+    const out = g.raw.out
+      ? `<pre class="mt-2 max-h-24 overflow-auto font-mono text-[11px] leading-5 text-slate-500">${escapeHtml(g.raw.out)}</pre>`
+      : ''
+    return `<li class="border-t border-white/5 px-4 py-2 font-mono text-xs text-slate-300">
+      <div class="break-all">${escapeHtml(safe)}</div>${out}
+    </li>`
+  }).join('')
+  return `
+    <article class="rounded-2xl border border-amber-200/15 bg-slate-900/70">
+      <button type="button" data-toggle="tools" class="flex w-full items-center gap-2 px-4 py-3 text-left" aria-expanded="${open}">
+        <span class="text-sm text-slate-100">工具</span>
+        <span class="text-xs text-slate-500">${slice.length} 条命令</span>
+        ${cdRepeats ? `<span class="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-slate-400">重复 cd ${cdRepeats}</span>` : ''}
+        ${secretHits ? `<span class="rounded-full bg-amber-400/10 px-2 py-0.5 text-[11px] text-amber-200">已脱敏 ${secretHits}</span>` : ''}
+        <span class="ml-auto text-xs text-slate-500">${open ? '收起' : '展开'}</span>
+      </button>
+      ${open ? `<ul>${rows}</ul>` : ''}
+    </article>`
+}
+
+function answerCard(after, text, live) {
+  if (!text && !live) return ''
+  const body = escapeHtml(text) + (live ? '<span class="caret"></span>' : '')
+  if (!after) {
+    return `
+      <div class="mt-2 text-[15px] leading-7 text-slate-300">
+        <div class="mb-1 flex gap-2 text-xs text-slate-500"><span>Agent</span><span class="stamp-clip">14:32:21</span></div>
+        <div class="whitespace-pre-wrap">${body}</div>
+      </div>`
+  }
+  return `
+    <article class="rounded-2xl border border-white/10 bg-gradient-to-b from-slate-800/50 to-slate-900/80 px-4 py-3">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <span class="text-xs font-medium text-slate-400">回答</span>
+        <time class="tabular shrink-0 text-xs text-slate-400">14:32:21</time>
+      </div>
+      <div class="whitespace-pre-wrap text-[15px] leading-7 text-slate-100">${body}</div>
+    </article>`
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+const ui = {
+  thinkOpen: true,
+  toolsOpen: false,
+  thinkText: '',
+  toolCount: 0,
+  answer: '',
+  liveThink: false,
+  liveAnswer: false,
+}
+
+function render() {
+  const after = mode === 'after'
+  $('stage').innerHTML = `
+    <div class="${after ? 'space-y-3 rounded-[28px] border border-white/10 bg-slate-950/40 p-3 sm:p-5' : 'px-1 py-2'}">
+      <div class="mb-1 flex items-center justify-between gap-3 px-1">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-sky-300 text-xs font-semibold text-slate-950">前</span>
+          <div class="min-w-0">
+            <div class="truncate text-sm font-medium text-slate-100">前端</div>
+            <div class="truncate text-xs text-slate-500">React / TypeScript</div>
+          </div>
+        </div>
+        <span class="shrink-0 rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-slate-400">${after ? '卡片流' : '平铺流'}</span>
+      </div>
+      ${userCard(after)}
+      ${thinkCard(after, ui.thinkText, ui.thinkOpen, ui.liveThink)}
+      ${toolsCard(after, ui.toolCount, ui.toolsOpen)}
+      ${answerCard(after, ui.answer, ui.liveAnswer)}
+    </div>`
+  $('diff-list').innerHTML = DIFF[mode].map(([k, v]) =>
+    `<li><span class="text-slate-100">${k}</span><span class="mt-0.5 block text-slate-400">${v}</span></li>`
+  ).join('')
+  $('tab-before').setAttribute('aria-selected', String(mode === 'before'))
+  $('tab-after').setAttribute('aria-selected', String(mode === 'after'))
+  $('tab-before').className = 'rounded-full px-3 py-1.5 text-xs font-medium ' + (mode === 'before' ? 'bg-slate-100 text-slate-900' : 'text-slate-300')
+  $('tab-after').className = 'rounded-full px-3 py-1.5 text-xs font-medium ' + (mode === 'after' ? 'bg-slate-100 text-slate-900' : 'text-slate-300')
+}
+
+function stopTimer() {
+  if (timer) cancelAnimationFrame(timer)
+  timer = null
+  playing = false
+}
+
+function tickClock() {
+  $('clock').textContent = ((Date.now() - started) / 1000).toFixed(1) + 's'
+  if (playing) timer = requestAnimationFrame(tickClock)
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+async function play() {
+  const id = ++runId
+  stopTimer()
+  playing = true
+  started = Date.now()
+  ui.thinkOpen = true
+  ui.toolsOpen = mode === 'before'
+  ui.thinkText = ''
+  ui.toolCount = 0
+  ui.answer = ''
+  ui.liveThink = true
+  ui.liveAnswer = false
+  setPhase('思考')
+  tickClock()
+  render()
+  for (let i = 1; i <= THINK.length; i += 4) {
+    if (id !== runId) return
+    ui.thinkText = THINK.slice(0, i)
+    render()
+    await sleep(16)
+  }
+  ui.liveThink = false
+  setPhase('工具')
+  render()
+  for (let n = 1; n <= COMMANDS.length; n++) {
+    if (id !== runId) return
+    ui.toolCount = n
+    render()
+    await sleep(280)
+  }
+  ui.liveAnswer = true
+  setPhase('回答')
+  render()
+  for (let i = 1; i <= ANSWER.length; i += 3) {
+    if (id !== runId) return
+    ui.answer = ANSWER.slice(0, i)
+    render()
+    await sleep(14)
+  }
+  ui.liveAnswer = false
+  $('clock').dataset.frozen = String(Date.now() - started)
+  setPhase('完成')
+  stopTimer()
+  $('clock').textContent = (Number($('clock').dataset.frozen) / 1000).toFixed(1) + 's'
+  render()
+}
+
+function showDone() {
+  stopTimer()
+  ui.thinkText = THINK
+  ui.toolCount = COMMANDS.length
+  ui.answer = ANSWER
+  ui.liveThink = false
+  ui.liveAnswer = false
+  ui.thinkOpen = true
+  ui.toolsOpen = mode === 'before'
+  setPhase('完成')
+  $('clock').dataset.frozen = '12840'
+  $('clock').textContent = '12.8s'
+  render()
+}
+
+$('stage').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-toggle]')
+  if (!btn) return
+  if (btn.dataset.toggle === 'think') ui.thinkOpen = !ui.thinkOpen
+  if (btn.dataset.toggle === 'tools') ui.toolsOpen = !ui.toolsOpen
+  render()
+})
+
+function setMode(next) {
+  mode = next
+  if (!playing) {
+  ui.thinkOpen = true
+  ui.toolsOpen = mode === 'before'
+  }
+  render()
+}
+
+$('tab-before').onclick = () => setMode('before')
+$('tab-after').onclick = () => setMode('after')
+$('replay').onclick = () => play()
+
+function setDrawer(open) {
+  $('drawer').classList.toggle('open', open)
+  $('scrim').classList.toggle('open', open)
+  $('drawer').setAttribute('aria-hidden', String(!open))
+}
+$('open-spec').onclick = () => setDrawer(true)
+$('close-spec').onclick = () => setDrawer(false)
+$('scrim').onclick = () => setDrawer(false)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setDrawer(false)
+})
+
+showDone()
+</script>
+</body>
+</html>

@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react'
+
 export type DiffLine = {
   kind: 'add' | 'del' | 'ctx'
   text: string
@@ -57,6 +59,7 @@ export default function Inspector({
   tools,
   onClose,
   knowledge,
+  focusPath,
 }: {
   tab: Tab
   onTab: (t: Tab) => void
@@ -64,6 +67,7 @@ export default function Inspector({
   todos: TodoItem[]
   tools: ToolCall[]
   onClose: () => void
+  focusPath?: string | null
   /** 知识库面板内容；不传则不显示该 Tab */
   knowledge?: { count: number; node: React.ReactNode }
 }) {
@@ -163,7 +167,7 @@ export default function Inspector({
 
       {/* 内容 */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {tab === 'changes' && <ChangesList changes={changes} />}
+        {tab === 'changes' && <ChangesList changes={changes} focusPath={focusPath} />}
         {tab === 'todo' && <TodoList todos={todos} />}
         {tab === 'tools' && <ToolList tools={tools} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
@@ -218,7 +222,18 @@ function TabBtn({
   )
 }
 
-function ChangesList({ changes }: { changes: FileChange[] }) {
+function pathHit(path: string, focusPath?: string | null) {
+  if (!focusPath) return false
+  return path === focusPath || path.endsWith('/' + focusPath) || focusPath.endsWith(path)
+}
+
+function ChangesList({ changes, focusPath }: { changes: FileChange[]; focusPath?: string | null }) {
+  const root = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!focusPath) return
+    const el = root.current?.querySelector('[data-hit="1"]')
+    if (el instanceof HTMLElement) el.scrollIntoView({ block: 'nearest' })
+  }, [focusPath, changes])
   if (changes.length === 0) {
     return (
       <div className="c-empty">
@@ -232,13 +247,15 @@ function ChangesList({ changes }: { changes: FileChange[] }) {
   }
 
   return (
-    <div style={{ padding: 'var(--space-2)' }}>
+    <div ref={root} style={{ padding: 'var(--space-2)' }}>
       {changes.map((c, ci) => {
         const meta = STATUS_META[c.status]
+        const hit = pathHit(c.path, focusPath)
         return (
           <details
             key={c.path}
-            open={ci === 0}
+            data-hit={hit ? '1' : undefined}
+            open={hit || ci === 0}
             style={{
               background: 'var(--bg-surface)',
               border: '1px solid var(--border-subtle)',
@@ -403,32 +420,25 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
 
       {todos.map((t) => {
         const meta = TODO_META[t.status]
+        const label = t.status === 'done' ? '完成' : t.status === 'active' ? '进行中' : '待做'
         return (
-          <div
-            key={t.id}
-            style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: 'var(--space-2)',
-              padding: '7px 0',
-              borderBottom: '1px solid var(--border-subtle)',
-            }}
-          >
-            <span
-              style={{ color: meta.color, fontSize: 11, lineHeight: 1.6, flexShrink: 0 }}
-              className={t.status === 'active' ? 'blink' : ''}
-            >
-              {meta.icon}
-            </span>
-            <span
+          <div key={t.id} className="c-compact-card" style={{ cursor: 'default' }}>
+            <div
+              className="c-compact-card__title"
+              title={t.text}
               style={{
-                fontSize: 'var(--text-sm)',
-                lineHeight: 'var(--leading-normal)',
                 color: t.status === 'done' ? 'var(--text-disabled)' : 'var(--text-primary)',
                 textDecoration: t.status === 'done' ? 'line-through' : 'none',
+                paddingRight: 0,
               }}
             >
+              <span style={{ color: meta.color, marginRight: 6 }} className={t.status === 'active' ? 'blink' : ''}>
+                {meta.icon}
+              </span>
               {t.text}
+            </div>
+            <span className="c-compact-card__cap" style={{ color: meta.color, borderColor: meta.color }}>
+              {label}
             </span>
           </div>
         )

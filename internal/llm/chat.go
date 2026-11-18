@@ -82,6 +82,9 @@ type wireToolCall struct {
 // 这里把 OpenAI 的 tool_calls 归一化成结构化的 Call，
 // 模型层的格式差异到此为止 —— 循环和工具层不需要知道协议细节。
 func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec) (Turn, error) {
+	if c.cfg.Provider == "qoder" {
+		return qoderTurn(ctx, c.client, c.cfg, msgs, tools)
+	}
 	echoReasoning := thinkingOn(c.cfg)
 	req := map[string]any{
 		"model":    c.cfg.Model,

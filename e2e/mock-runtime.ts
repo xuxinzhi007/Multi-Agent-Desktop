@@ -99,7 +99,7 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
           hasKey: false,
           models: ['qwen2.5-0.5b'],
         },
-        { provider: 'ollama', saved: false, ok: false, reason: '未保存' },
+        { provider: 'qoder', saved: false, ok: false, reason: '未登录' },
         { provider: 'deepseek', saved: false, ok: false, reason: '未保存' },
         { provider: 'openai', saved: false, ok: false, reason: '未保存' },
         { provider: 'claude', saved: false, ok: false, reason: '未保存' },

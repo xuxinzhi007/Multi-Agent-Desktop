@@ -20,6 +20,12 @@ export type ShellLog = {
   result?: { stdout: string; stderr: string; exitCode: number }
 }
 
+/** 出错时该 agent 已有的消息条数。红条属于这一截之前的历史，不跟最新一句走。 */
+export type SessionError = {
+  text: string
+  after: number
+}
+
 type State = {
   connected: boolean
   version: string
@@ -29,7 +35,7 @@ type State = {
   channels: Channel[]
   notes: Note[]
   streaming: Record<string, string>
-  errors: Record<string, string>
+  errors: Record<string, SessionError>
   shell: ShellLog[]
   /** 每个 agent 执行过的命令，按 agentId 归集，直接渲染在对话流里 */
   shellByAgent: Record<string, ShellLog[]>
@@ -152,7 +158,7 @@ export function useBackend() {
       setState((s) => {
         return {
           ...s,
-          errors: { ...s.errors, [id]: error },
+          errors: rememberError(s, id, error),
           streaming: omit(s.streaming, id),
         }
       }),
@@ -181,11 +187,13 @@ export function useBackend() {
       // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
       // 未知状态一律当 ok —— 不要因为一个新状态值就让类型崩掉。
       const status: ToolCall['status'] =
-        e.phase === 'start'
-          ? 'running'
-          : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
-            ? 'error'
-            : 'ok'
+        e.status === 'waiting'
+          ? 'waiting'
+          : e.phase === 'start'
+            ? 'running'
+            : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
+              ? 'error'
+              : 'ok'
       setState((s) => {
         if (e.phase === 'start') {
           return {
@@ -198,7 +206,7 @@ export function useBackend() {
         }
         const tools = s.tools.slice()
         for (let i = tools.length - 1; i >= 0; i--) {
-          if (tools[i].id === e.id && tools[i].tool === e.tool && tools[i].status === 'running') {
+          if (tools[i].id === e.id && tools[i].tool === e.tool && (tools[i].status === 'running' || tools[i].status === 'waiting')) {
             tools[i] = { ...tools[i], status }
             break
           }
@@ -211,7 +219,7 @@ export function useBackend() {
     sub(events.agentLoop, (e) => {
       setState((s) => {
         if (e.kind !== 'failed') return s
-        return { ...s, errors: { ...s.errors, [e.id]: e.reason || '循环失败' } }
+        return { ...s, errors: rememberError(s, e.id, e.reason || '循环失败') }
       })
     })
     // 停止原因：用户按停止和预算用尽是两回事，必须能区分。
@@ -331,6 +339,9 @@ export function useBackend() {
         ),
         // 立刻进入「处理中」，否则用户不知道有没有发出去
         pending: { ...s.pending, [agentId]: true },
+        // 新一轮开始：上一轮的红条和思考步骤不再跟到这句下面
+        errors: omit(s.errors, agentId),
+        tools: s.tools.filter((t) => t.id !== agentId),
       }))
     },
     [],
@@ -475,6 +486,11 @@ export function useBackend() {
   }, [refreshNotes])
 
   return { ...state, send, approveTool, rejectTool, clearFocus, refreshNotes }
+}
+
+function rememberError(s: State, id: string, text: string): Record<string, SessionError> {
+  const after = s.agents.find((a) => a.id === id)?.messages?.length ?? 0
+  return { ...s.errors, [id]: { text, after } }
 }
 
 function omit<T extends Record<string, unknown>>(obj: T, key: string): T {

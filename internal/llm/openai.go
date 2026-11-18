@@ -100,6 +100,18 @@ type chatResp struct {
 
 // ListModels 调 OpenAI /models 接口获取可用模型列表。
 func ListModels(ctx context.Context, cfg Config) ([]string, error) {
+	if cfg.Provider == "qoder" {
+		cfg = ApplyDefaults(cfg)
+		if cfg.APIKey == "" {
+			if saved, ok := LocalQoder(); ok {
+				cfg.APIKey = saved.APIKey
+			}
+		}
+		if cfg.APIKey == "" {
+			return nil, fmt.Errorf("%w", ErrMissingAPIKey)
+		}
+		return QoderModelNames(), nil
+	}
 	base := strings.TrimSuffix(cfg.BaseURL, "/")
 	base = strings.TrimSuffix(base, "/v1")
 	url := base + "/v1/models"

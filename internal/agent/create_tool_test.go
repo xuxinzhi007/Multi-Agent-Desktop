@@ -46,6 +46,27 @@ func TestCreateAgentCopiesParent(t *testing.T) {
 	}
 }
 
+func TestCreateAgentDoesNotPinGlobalLLM(t *testing.T) {
+	global := llm.Config{Provider: "llamacpp", Model: "qwen2.5-0.5b", BaseURL: "http://127.0.0.1:8080"}
+	m := NewManager(global, func(string, any) {})
+	a := m.Create("a", "甲", "主")
+	res := (&createAgentTool{m: m, fromID: a.ID}).Execute(context.Background(), []byte(`{"name":"帮手","role":"审查"}`))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("status=%s content=%s", res.Status, res.Content)
+	}
+	b, err := m.FindByName("帮手")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.LLMCfg != nil {
+		t.Fatalf("LLMCfg=%+v", *b.LLMCfg)
+	}
+	got := b.EffectiveLLM(m)
+	if got.Provider != global.Provider || got.Model != global.Model || got.BaseURL != global.BaseURL {
+		t.Fatalf("effective=%+v", got)
+	}
+}
+
 func TestCreateAgentWithTaskDoesNotHang(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
 	a := m.Create("a", "甲", "r")

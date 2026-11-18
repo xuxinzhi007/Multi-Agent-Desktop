@@ -131,6 +131,19 @@ type Event struct {
 	Reason  string        `json:"reason,omitempty"`
 	Calls   []tool.Call   `json:"calls,omitempty"`
 	Msgs    []llm.Message `json:"msgs,omitempty"`
+
+	// 本轮的上下文占用，只在 iter.start 上填。
+	//
+	// CtxUsed   压缩前原始历史的估算 token
+	// CtxBudget 超过这个值就会触发 Compact（窗口七成再减 800）
+	// CtxLimit  模型窗口上限，0 表示未配置
+	//
+	// 三个值全部由后端算好下发，前端不许自己估：前端的 messages 既不含
+	// 每轮重申的 system 提示，也不含 loop 内部的 tool 轮次，自算必然偏小，
+	// 反而会把「快爆了」显示成「还很空」。
+	CtxUsed   int `json:"ctxUsed,omitempty"`
+	CtxBudget int `json:"ctxBudget,omitempty"`
+	CtxLimit  int `json:"ctxLimit,omitempty"`
 }
 
 // Runner 执行循环。只有一个公开方法 —— 所有治理逻辑在内部。
@@ -235,15 +248,22 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		st.Iteration++
 		st.Budget.UsedIterations++
 		st.Phase = PhaseThinking
-		r.emit(Event{Kind: "iter.start", Phase: st.Phase, Iter: st.Iteration})
+
+		// 先组装这一轮要发的历史：上下文占用在这一刻就确定了，必须和
+		// iter.start 一起报出去，Compact 才有机会被用户看见而不是静默发生。
+		// context / promptBudget 都是纯函数，提前调用不改变下面的检查点时机。
+		raw := r.context(st)
+		budget := r.promptBudget()
+		r.emit(Event{
+			Kind: "iter.start", Phase: st.Phase, Iter: st.Iteration,
+			CtxUsed: llm.EstMessages(raw), CtxBudget: budget, CtxLimit: r.ContextLimit,
+		})
 
 		// ── 3. 检查点必须在模型调用之前。
 		// 模型调用是最贵的一步，在它之后落盘意味着崩溃时钱白花了。
 		r.checkpoint(runCtx, st)
 
 		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
-		raw := r.context(st)
-		budget := r.promptBudget()
 		msgs := llm.Compact(raw, budget)
 		turn, err := r.Model.Turn(runCtx, msgs, r.specs())
 		if err != nil && budget > 0 && llm.IsContextOverflow(err.Error()) && runCtx.Err() == nil {

@@ -15,6 +15,8 @@ func ContextLimit(cfg Config) int {
 		return 4096
 	case "deepseek":
 		return 65536
+	case "qoder":
+		return 131072
 	case "openai", "claude":
 		return 32768
 	default:
@@ -218,3 +220,11 @@ func estMessages(msgs []Message) int {
 	}
 	return n
 }
+
+// EstMessages 是 estMessages 的导出包装。
+//
+// 为什么必须导出、而不是让调用方自己累加 EstTokens：loop 要把「这一轮
+// 会占用多少窗口」报给界面，用的必须和 Compact 内部完全同一套口径
+// （每条消息 4 token 的结构开销、reasoning、toolCalls 的 name+input）。
+// 两处各算一遍早晚对不上，而数字一旦不可信，这个显示就毫无价值。
+func EstMessages(msgs []Message) int { return estMessages(msgs) }

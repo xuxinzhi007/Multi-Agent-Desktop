@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/tool"
 )
 
@@ -186,11 +187,17 @@ func (t *createAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool
 	if !ok {
 		return tool.Fail("当前会话已经不存在")
 	}
-	cfg := from.EffectiveLLM(t.m)
+	from.mu.Lock()
+	var sessionLLM llm.Config
+	copyLLM := from.LLMCfg != nil && from.LLMCfg.Provider != ""
+	if copyLLM {
+		sessionLLM = *from.LLMCfg
+	}
+	from.mu.Unlock()
 	dir := from.EffectiveWorkDir(t.m)
 	created := t.m.Create("", in.Name, in.Role)
-	if cfg.Provider != "" {
-		_ = t.m.SetAgentLLM(created.ID, cfg)
+	if copyLLM {
+		_ = t.m.SetAgentLLM(created.ID, sessionLLM)
 	}
 	if dir != "" {
 		_ = t.m.SetAgentWorkDir(created.ID, dir)

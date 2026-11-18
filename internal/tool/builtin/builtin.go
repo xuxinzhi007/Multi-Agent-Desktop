@@ -13,6 +13,7 @@ import (
 
 	"multi-agent-desktop/internal/proc"
 	"multi-agent-desktop/internal/tool"
+	"multi-agent-desktop/internal/workdir"
 )
 
 // Bash 在指定工作目录执行 shell 命令。
@@ -62,6 +63,9 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return tool.Fail("command must not be empty")
+	}
+	if workdir.TooBroad(b.WorkDir) {
+		return tool.Fail("%s", workdir.RejectReason)
 	}
 
 	timeout := b.Timeout

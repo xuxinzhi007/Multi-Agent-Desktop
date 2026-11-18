@@ -510,6 +510,10 @@ export const API = {
   listProviderEndpoints(): Promise<ProviderEndpoint[]> {
     return call("API.ListProviderEndpoints");
   },
+  /** LoginQoder 用 Qoder 自己的浏览器授权。本机已经登录过就直接用，否则打开浏览器等用户确认。 */
+  loginQoder(): Promise<ProviderEndpoint> {
+    return call("API.LoginQoder");
+  },
   /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);

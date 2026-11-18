@@ -263,3 +263,70 @@ test('窄窗口下模型选择器让位，发送按钮必须仍可见', async ({
     expect(modeBox.width, '「对话」被压成竖排了').toBeGreaterThan(modeBox.height)
   }
 })
+
+test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器', async ({ page }) => {
+  await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+
+  await page.evaluate(() => {
+    const mygo = (window as unknown as { mygo: { emit: (n: string, d: unknown) => void } }).mygo
+    mygo.emit('agent.message', {
+      id: 'a1',
+      message: {
+        role: 'user',
+        content: '看下这段',
+        timestamp: 100,
+      },
+    })
+    mygo.emit('agent.message', {
+      id: 'a1',
+      message: {
+        role: 'assistant',
+        content: '问题在 internal/agent/loop.go:120-145。结论写在 workspace/inbox/plan.md，并 save_note "接口约定"。',
+        reasoning: '第一行先看循环退出条件\n第二行再看工具结果',
+        timestamp: 104,
+      },
+    })
+  })
+
+  const stream = page.locator('.c-transcript')
+  await expect(stream).toBeVisible()
+  const maxWidth = await stream.evaluate((el) => getComputedStyle(el).maxWidth)
+  expect(maxWidth).toBe('820px')
+
+  const agent = page.locator('.c-msg--agent').last()
+  const agentBorder = await agent.evaluate((el) => getComputedStyle(el).borderTopWidth)
+  expect(agentBorder).toBe('0px')
+  await expect(agent).toContainText('前端')
+
+  const user = page.locator('.c-user-bubble')
+  const userBg = await user.evaluate((el) => getComputedStyle(el).backgroundColor)
+  expect(userBg).not.toBe('rgba(0, 0, 0, 0)')
+  const userBox = await user.boundingBox()
+  const streamBox = await stream.boundingBox()
+  expect(userBox).not.toBeNull()
+  expect(streamBox).not.toBeNull()
+  if (userBox && streamBox) {
+    expect(userBox.x).toBeGreaterThan(streamBox.x + 24)
+  }
+
+  const rail = page.locator('.c-think').first()
+  const railBorder = await rail.evaluate((el) => getComputedStyle(el).borderLeftWidth)
+  const railTop = await rail.evaluate((el) => getComputedStyle(el).borderTopWidth)
+  expect(railBorder).toBe('2px')
+  expect(railTop).toBe('0px')
+  await rail.getByRole('button', { name: /展开/ }).click()
+  await expect(rail).toContainText('第一行先看循环退出条件')
+
+  const anchor = page.locator('.c-code-anchor', { hasText: 'loop.go:120-145' })
+  await expect(anchor).toBeVisible()
+  await anchor.click()
+  await expect(page.getByRole('button', { name: /改动/ })).toBeVisible()
+
+  await page.locator('.c-artifact', { hasText: '知识库' }).click()
+  const knowledgeColor = await page.getByRole('button', { name: '知识', exact: true }).evaluate((el) => getComputedStyle(el).color)
+  const changesColor = await page.getByRole('button', { name: /改动/ }).evaluate((el) => getComputedStyle(el).color)
+  expect(knowledgeColor).not.toBe(changesColor)
+})

@@ -1611,3 +1611,406 @@
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
 }
+
+.shell-card__row + .shell-card__row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ---------- 对话流 ---------- */
+.c-transcript {
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.c-msg--user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.c-user-bubble {
+  width: min(100%, 32rem);
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.c-msg--agent {
+  position: relative;
+  background: transparent;
+  border: 0;
+}
+
+.c-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.c-agent-avatar {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--tone);
+  color: var(--bg-base);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--tone);
+}
+
+.c-agent-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.c-agent-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--tone);
+}
+
+.c-agent-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-disabled);
+}
+
+.c-pill {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.c-msg-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 8px;
+  background: var(--bg-base);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.c-msg--agent:hover .c-msg-actions,
+.c-msg--agent:focus-within .c-msg-actions {
+  opacity: 1;
+}
+
+.c-msg-actions .c-icon-btn {
+  width: auto;
+  padding: 0 6px;
+  font-size: var(--text-xs);
+}
+
+.c-route {
+  position: relative;
+}
+
+.c-route__menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.c-think {
+  margin: 4px 0 8px;
+  padding: 4px 8px 4px 10px;
+  border: 0;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--bg-inset);
+}
+
+.c-think__bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.c-think__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-think__toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-disabled);
+}
+
+.c-think__body {
+  margin: 0;
+  padding: 4px 0 2px;
+  max-height: 180px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.c-think__pulse {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--text-disabled);
+}
+
+.c-think__pulse--live {
+  background: var(--warning);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+.c-code-anchor,
+.c-artifact,
+.c-secret {
+  display: inline;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.c-code-anchor:hover,
+.c-artifact:hover {
+  border-color: var(--border-strong);
+}
+
+.c-secret {
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
+.c-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.c-approval {
+  margin: 4px 0 8px;
+  padding: var(--space-3);
+  background: var(--warning-dim);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+}
+
+.c-approval__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.c-approval__cmd {
+  margin: 6px 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.c-approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-think__pulse--live {
+    animation: none;
+  }
+}
+
+/* ---------- 检查器密列表面板 ---------- */
+.c-kb-tagbox {
+  position: relative;
+}
+
+.c-kb-tags {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.c-kb-tags::-webkit-scrollbar {
+  display: none;
+}
+
+.c-kb-chip {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.c-kb-chip--on {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.c-kb-tags__more {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.c-kb-tags__drawer {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-base) 40%, transparent);
+}
+
+.c-compact-card {
+  position: relative;
+  box-sizing: border-box;
+  height: 72px;
+  padding: 8px 10px;
+  margin-bottom: var(--space-2);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.c-compact-card--open {
+  height: auto;
+  min-height: 72px;
+  overflow: visible;
+  cursor: default;
+}
+
+.c-compact-card__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 20px;
+}
+
+.c-compact-card__body {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 88px;
+}
+
+.c-compact-card__cap {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  max-width: 58%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  background: var(--bg-inset);
+}
+
+.c-compact-card__x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}

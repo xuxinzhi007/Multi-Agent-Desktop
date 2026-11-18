@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, cloneElement, isValidElement, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
 import ModelPicker from './ModelPicker'
@@ -7,14 +7,23 @@ import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
 import { type AgentView as Agent, type Config, type Message } from '../mygo'
-import type { ShellLog } from '../lib/useBackend'
+import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
+import { groupShellLogs, redactCommand, type ShellGroup } from '../lib/transcriptPresent'
+import {
+  agentTone,
+  elapsedBetween,
+  extractArtifacts,
+  prevUserStamp,
+  splitAnchors,
+  workLabel,
+} from '../lib/messagePresent'
 import DirectoryPicker from './DirectoryPicker'
 
 type Props = {
   agent: Agent | null
   streaming: string
-  error?: string
+  error?: SessionError
   workDir: string
   tokenUsage?: { in: number; out: number }
   onPrompt: (text: string) => void
@@ -38,6 +47,10 @@ type Props = {
   onQuickCreate?: (presetName: string, role: string) => void
   /** 空状态下打开「新建 Agent」弹窗 */
   onCreateRequest?: () => void
+  /** 正文里的代码锚点：打开检查器并定位文件 */
+  onOpenFile?: (path: string, line: number) => void
+  /** 知识库沉淀胶囊：打开检查器的知识库 */
+  onOpenKnowledge?: () => void
   /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
   connection?: { provider: string; baseUrl: string; apiKey: string; model: string }
 }
@@ -119,72 +132,70 @@ function presentTranscript(messages: Message[]): Message[] {
   return out
 }
 
-function ReasoningText({ text }: { text: string }) {
+function ThinkRail({
+  live,
+  title,
+  children,
+  defaultOpen,
+}: {
+  live?: boolean
+  title: string
+  children?: ReactNode
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? false)
+  const [secs, setSecs] = useState(0)
+  useEffect(() => {
+    if (!live) return
+    const t0 = Date.now()
+    const id = window.setInterval(() => setSecs((Date.now() - t0) / 1000), 200)
+    return () => window.clearInterval(id)
+  }, [live])
+  const hasBody = children != null && children !== false && children !== ''
+  const label = live ? `思考了 ${secs.toFixed(1)}s` : title
   return (
-    <details open style={{ margin: '4px 0 8px' }}>
-      <summary
-        style={{
-          cursor: 'pointer',
-          fontSize: 'var(--text-xs)',
-          color: 'var(--text-tertiary)',
-          userSelect: 'none',
-        }}
+    <div className="c-think">
+      <button
+        type="button"
+        className="c-think__bar"
+        onClick={() => hasBody && setOpen((v) => !v)}
+        aria-expanded={hasBody ? open : undefined}
       >
-        思考
-      </summary>
-      <div
-        style={{
-          marginTop: 4,
-          maxHeight: 160,
-          overflow: 'auto',
-          whiteSpace: 'pre-wrap',
-          fontSize: 'var(--text-xs)',
-          lineHeight: 'var(--leading-normal)',
-          color: 'var(--text-tertiary)',
-        }}
-      >
-        {text}
-      </div>
-    </details>
+        <span className={live ? 'c-think__pulse c-think__pulse--live' : 'c-think__pulse c-think__pulse--done'} />
+        <span className="c-think__title">{label}</span>
+        {hasBody && <span className="c-think__toggle">{open ? '收起' : '展开'}</span>}
+      </button>
+      {open && hasBody && <div className="c-think__body">{children}</div>}
+    </div>
+  )
+}
+
+function ReasoningCard({ text, live }: { text: string; live?: boolean }) {
+  return (
+    <ThinkRail live={live} title="思考" defaultOpen={!!live}>
+      {text}
+    </ThinkRail>
   )
 }
 
 function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; reasoning?: string }) {
   const current = [...steps].reverse().find((s) => s.status === 'running')
+  const detail = current ? stepText(current.tool, current.target) : ''
+  const has = !!reasoning || steps.length > 0
   return (
-    <div style={{ padding: '4px 0 8px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 7,
-          color: 'var(--text-tertiary)',
-          fontSize: 'var(--text-sm)',
-        }}
-      >
-        <span className="blink" style={{ color: 'var(--warning)' }}>
-          ●
-        </span>
-        {current ? stepText(current.tool, current.target) : '正在思考…'}
-      </div>
-      {reasoning && <ReasoningText text={reasoning} />}
-      {steps.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 14 }}>
+    <ThinkRail live title={detail || (has ? '思考' : '正在思考…')} defaultOpen={has}>
+      {has ? (
+        <>
+          {reasoning}
           {steps.map((s, i) => (
-            <div
-              key={`${s.tool}-${i}`}
-              style={{
-                fontSize: 'var(--text-xs)',
-                color: s.status === 'error' ? 'var(--danger)' : 'var(--text-tertiary)',
-                lineHeight: 'var(--leading-normal)',
-              }}
-            >
-              {s.status === 'running' ? '…' : s.status === 'error' ? '✕' : '✓'} {stepText(s.tool, s.target)}
+            <div key={`${s.tool}-${i}`} style={{ color: s.status === 'error' ? 'var(--danger)' : 'var(--text-tertiary)' }}>
+              {s.status === 'running' ? '…' : s.status === 'error' ? '✕' : s.status === 'waiting' ? '!' : '✓'}{' '}
+              {stepText(s.tool, s.target)}
             </div>
           ))}
-        </div>
-      )}
-    </div>
+        </>
+      ) : undefined}
+    </ThinkRail>
   )
 }
 
@@ -192,6 +203,7 @@ export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<'chat' | 'shell'>('chat')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null)
+  const [toolGrants, setToolGrants] = useState<{ always: string[]; done: string[] }>({ always: [], done: [] })
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const pinnedToBottom = useRef(true)
@@ -238,11 +250,15 @@ export default function AgentView(p: Props) {
     if (el && pinnedToBottom.current) {
       el.scrollTop = el.scrollHeight
     }
-  }, [p.agent?.messages.length, p.streaming])
+  }, [p.agent?.messages.length, p.streaming, p.error?.text, p.error?.after])
 
   useEffect(() => {
     taRef.current?.focus()
   }, [p.agent?.id, mode])
+
+  useEffect(() => {
+    setToolGrants({ always: [], done: [] })
+  }, [p.agent?.id])
 
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
@@ -260,6 +276,10 @@ export default function AgentView(p: Props) {
         role: a.role,
       })),
     [mentionKey],
+  )
+  const peers = useMemo(
+    () => agentsForPicker.filter((a) => a.id !== p.agent?.id),
+    [agentsForPicker, p.agent?.id],
   )
 
 
@@ -375,8 +395,52 @@ export default function AgentView(p: Props) {
     taRef.current?.focus()
   }
 
-  const running = p.agent.status === 'running'
-  const visible = presentTranscript(p.agent.messages)
+  const agent = p.agent
+  const running = agent.status === 'running'
+  const rawMessages = p.agent.messages ?? []
+  const visible = presentTranscript(rawMessages)
+  // 错误记的是出错时的原始条数。按同一套折叠规则数出可见气泡，红条跟在那一截后面。
+  // 之后又多出来的气泡（新一轮）排在红条之下，红条不会贴到最新一句后面。
+  const errorAt = p.error
+    ? presentTranscript(rawMessages.slice(0, p.error.after)).length
+    : visible.length
+  const tone = agentTone((p.agents ?? []).findIndex((a) => a.id === agent.id))
+  const modelName = agent.llm?.model || p.connection?.model || ''
+  const place = workLabel(agent.workDir || p.workDir)
+  const head = {
+    tone,
+    name: agent.name,
+    model: modelName,
+    workLabel: place,
+    peers,
+  }
+  const pendingTools = (p.steps ?? []).filter((s) => {
+    if (s.status !== 'waiting') return false
+    if (toolGrants.always.includes(s.tool)) return false
+    return !toolGrants.done.includes(`${s.tool}\0${s.target}`)
+  })
+  const settleTool = (tool: string, target: string, kind: 'allow' | 'deny' | 'always') => {
+    setToolGrants((g) => ({
+      always: kind === 'always' ? [...g.always, tool] : g.always,
+      done: [...g.done, `${tool}\0${target}`],
+    }))
+  }
+  const renderMsg = (m: Message, idx: number) => (
+    <Bubble
+      key={idx}
+      m={m}
+      {...head}
+      elapsed={m.role === 'assistant' ? elapsedBetween(prevUserStamp(visible, idx), m.timestamp) : ''}
+      agents={agentsForPicker}
+      tokens={idx === visible.length - 1 && m.role === 'assistant' ? p.tokenUsage : undefined}
+      onContextMenu={handleContextMenu}
+      onCopy={(text) => navigator.clipboard.writeText(text)}
+      onRegenerate={(msg) => p.onPrompt(msg.content)}
+      onRoute={p.onRoute}
+      onOpenFile={p.onOpenFile}
+      onOpenKnowledge={p.onOpenKnowledge}
+    />
+  )
 
   return (
     <div className="c-col" style={{ flex: 1 }}>
@@ -453,6 +517,7 @@ export default function AgentView(p: Props) {
         onScroll={handleScroll}
         style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-2)' }}
       >
+        <div className="c-transcript">
         {visible.length === 0 && !p.streaming && (
           <EmptyChat
             color={p.agent.color}
@@ -464,24 +529,7 @@ export default function AgentView(p: Props) {
           />
         )}
 
-        {visible.map((m, i) => (
-          <Bubble
-            key={i}
-            m={m}
-            color={p.agent!.color}
-            agents={agentsForPicker}
-            tokens={i === visible.length - 1 && m.role === 'assistant' ? p.tokenUsage : undefined}
-            onContextMenu={handleContextMenu}
-          />
-        ))}
-
-        {p.streaming && <Bubble m={{ role: 'assistant', content: p.streaming }} color={p.agent.color} live />}
-
-        {running && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
-
-        {(p.shellLogs ?? []).map((log) => (
-          <ShellEntry key={log.id} log={log} />
-        ))}
+        {visible.slice(0, errorAt).map((m, i) => renderMsg(m, i))}
 
         {p.error && (
           <div
@@ -496,9 +544,36 @@ export default function AgentView(p: Props) {
               lineHeight: 'var(--leading-normal)',
             }}
           >
-            {p.error}
+            {p.error.text}
           </div>
         )}
+
+        {visible.slice(errorAt).map((m, i) => renderMsg(m, errorAt + i))}
+
+        {p.streaming && (
+          <Bubble
+            m={{ role: 'assistant', content: p.streaming }}
+            {...head}
+            live
+            onCopy={(text) => navigator.clipboard.writeText(text)}
+            onOpenFile={p.onOpenFile}
+            onOpenKnowledge={p.onOpenKnowledge}
+          />
+        )}
+
+        {running && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
+
+        {pendingTools.map((s, i) => (
+          <ApprovalCard
+            key={`${s.tool}-${i}`}
+            tool={s.tool}
+            target={s.target}
+            onDecide={(kind) => settleTool(s.tool, s.target, kind)}
+          />
+        ))}
+
+        {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}
+        </div>
       </div>
 
       {/* 输入区 */}
@@ -982,48 +1057,90 @@ function useStuck(since?: number): boolean {
   return stuck
 }
 
-/**
- * ShellEntry 是一条命令执行记录，直接内联在对话流里。
- *
- * 之前命令结果放在一个独立侧栏面板里，用户敲完命令后对话区没反应，
- * 得去别处找输出。现在「我敲了什么 → 输出了什么」在同一个流里。
- */
-function ShellEntry({ log }: { log: ShellLog }) {
-  const r = log.result
-  const ok = r ? r.exitCode === 0 : true
-  const output = r ? [r.stdout, r.stderr].filter(Boolean).join('\n').trimEnd() : ''
+function ShellCard({ logs }: { logs: ShellLog[] }) {
+  const groups = groupShellLogs(logs)
+  const pending = logs.some((l) => !l.result)
+  const [open, setOpen] = useState(pending)
+  const masked = groups.filter((g) => g.kind === 'cmd' && g.masked).length
+  const repeats = groups.reduce((n, g) => n + (g.kind === 'cd' && g.count > 1 ? g.count - 1 : 0), 0)
+
+  useEffect(() => {
+    if (pending) setOpen(true)
+  }, [pending])
 
   return (
-    <div style={{ marginBottom: 'var(--space-3)' }}>
+    <div className="c-think">
+      <button type="button" className="c-think__bar" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <span className={pending ? 'c-think__pulse c-think__pulse--live' : 'c-think__pulse c-think__pulse--done'} />
+        <span className="c-think__title">
+          工具 {logs.length} 条
+          {repeats > 0 ? ` · 重复 cd ${repeats}` : ''}
+          {masked > 0 ? ` · 已脱敏 ${masked}` : ''}
+        </span>
+        <span className="c-think__toggle">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && (
+        <div className="c-think__body">
+          {groups.map((g) => (
+            <ShellGroupRow key={g.kind === 'cd' ? g.ids[0] : g.id} group={g} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ShellGroupRow({ group }: { group: ShellGroup }) {
+  if (group.kind === 'cd') {
+    return (
+      <div
+        className="shell-card__row mono"
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          padding: '8px 12px',
+          fontSize: 'var(--text-xs)',
+          color: 'var(--text-secondary)',
+        }}
+      >
+        <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>cd {group.path}</span>
+        <span style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--text-disabled)' }}>× {group.count}</span>
+      </div>
+    )
+  }
+  const ok = group.exitCode === undefined || group.exitCode === 0
+  return (
+    <div className="shell-card__row" style={{ padding: '8px 12px' }}>
       <div
         className="mono"
         style={{
           display: 'flex',
-          alignItems: 'center',
-          gap: 6,
+          alignItems: 'baseline',
+          gap: 8,
           fontSize: 'var(--text-xs)',
-          color: 'var(--text-tertiary)',
-          marginBottom: 3,
+          color: 'var(--text-secondary)',
         }}
       >
-        <span style={{ color: 'var(--text-disabled)' }}>$</span>
-        <span style={{ color: 'var(--text-secondary)' }}>{log.command}</span>
-        {!r && (
-          <span className="blink" style={{ color: 'var(--warning)' }}>
+        <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+          <SecretText text={group.shown} />
+        </span>
+        {group.pending && (
+          <span className="blink" style={{ flexShrink: 0, color: 'var(--warning)' }}>
             执行中…
           </span>
         )}
-        {r && (
-          <span style={{ marginLeft: 'auto', color: ok ? 'var(--success)' : 'var(--danger)' }}>
-            exit {r.exitCode}
+        {group.exitCode !== undefined && (
+          <span style={{ marginLeft: 'auto', flexShrink: 0, color: ok ? 'var(--success)' : 'var(--danger)' }}>
+            exit {group.exitCode}
           </span>
         )}
       </div>
-      {r && (
+      {group.output && (
         <pre
-          className="mono c-shell-out"
+          className="mono"
           style={{
-            margin: 0,
+            margin: '6px 0 0',
             padding: '8px 10px',
             borderRadius: 'var(--radius-md)',
             border: '1px solid var(--border-subtle)',
@@ -1031,13 +1148,13 @@ function ShellEntry({ log }: { log: ShellLog }) {
             fontSize: 'var(--text-xs)',
             lineHeight: 1.6,
             color: ok ? 'var(--text-secondary)' : 'var(--danger)',
-            maxHeight: 320,
+            maxHeight: 160,
             overflow: 'auto',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
           }}
         >
-          {output || '（无输出）'}
+          <SecretText text={group.output} />
         </pre>
       )}
     </div>
@@ -1111,135 +1228,276 @@ const Bubble = memo(
     a.m.content === b.m.content &&
     a.m.reasoning === b.m.reasoning &&
     a.m.timestamp === b.m.timestamp &&
-    a.color === b.color &&
+    a.tone === b.tone &&
+    a.name === b.name &&
+    a.model === b.model &&
+    a.workLabel === b.workLabel &&
+    a.elapsed === b.elapsed &&
     a.live === b.live &&
     a.tokens?.in === b.tokens?.in &&
     a.tokens?.out === b.tokens?.out &&
-    a.agents === b.agents,
+    a.agents === b.agents &&
+    a.peers === b.peers,
 )
 
-
-function BubbleImpl({
-  m,
-  color,
-  live,
-  tokens,
-  agents,
-  onContextMenu,
-}: {
+type BubbleProps = {
   m: Message
-  color: string
+  tone: number
+  name: string
+  model: string
+  workLabel: string
+  elapsed?: string
   live?: boolean
   tokens?: { in: number; out: number }
   agents?: MentionTarget[]
+  peers?: { id: string; name: string }[]
   onContextMenu?: (e: React.MouseEvent, msg: Message) => void
-}) {
-  const isUser = m.role === 'user'
+  onCopy?: (text: string) => void
+  onRegenerate?: (msg: Message) => void
+  onRoute?: (targetId: string, text: string) => void
+  onOpenFile?: (path: string, line: number) => void
+  onOpenKnowledge?: () => void
+}
 
-  // 检测路由消息：[from xxx] 或 [to xxx]
+function BubbleImpl({
+  m,
+  tone,
+  name,
+  model,
+  workLabel: place,
+  elapsed,
+  live,
+  tokens,
+  agents,
+  peers,
+  onContextMenu,
+  onCopy,
+  onRegenerate,
+  onRoute,
+  onOpenFile,
+  onOpenKnowledge,
+}: BubbleProps) {
+  const [routeOpen, setRouteOpen] = useState(false)
+  const isUser = m.role === 'user'
   const parsed = parseMessage(m.content)
   const isRouted = parsed.isRouted
   const routeInfo = parsed.from ? `来自 ${parsed.from}` : parsed.to ? `发给 ${parsed.to}` : ''
   const displayContent = parsed.body
+  const artifacts = isUser ? [] : extractArtifacts(displayContent)
+  const toneStyle = { '--tone': `var(--agent-${tone})` } as CSSProperties
+  const md = useMemo(() => markdownComponents(onOpenFile), [onOpenFile])
+  const clock = m.timestamp
+    ? new Date(m.timestamp * 1000).toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      })
+    : ''
+
+  if (isUser) {
+    return (
+      <div
+        className="c-msg c-msg--user fade-up"
+        style={{ marginBottom: 'var(--space-4)' }}
+        onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
+      >
+        <div className="c-user-bubble">
+          <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            <MentionText text={displayContent} agents={agents} selfColor={`var(--agent-${tone})`} />
+          </div>
+          {clock && (
+            <time style={{ display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+              {clock}
+            </time>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
-      className="fade-up"
-      style={{
-        marginBottom: 'var(--space-4)',
-        display: 'flex',
-        gap: 'var(--space-3)',
-        opacity: isRouted ? 0.85 : 1,
-        cursor: onContextMenu ? 'context-menu' : 'default',
-      }}
+      className="c-msg c-msg--agent fade-up"
+      style={{ marginBottom: 'var(--space-4)', opacity: isRouted ? 0.85 : 1 }}
       onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
     >
-      {!isUser && (
-        <span
-          style={{
-            width: 22,
-            height: 22,
-            borderRadius: 'var(--radius-sm)',
-            background: isRouted ? 'var(--accent-dim)' : color,
-            color: isRouted ? 'var(--accent-bright)' : 'var(--bg-base)',
-            display: 'grid',
-            placeItems: 'center',
-            fontSize: 11,
-            fontWeight: 700,
-            flexShrink: 0,
-            marginTop: 1,
-            opacity: 0.9,
-          }}
-        >
-          {isRouted ? '✉' : '◆'}
+      <div className="c-agent-head" style={toneStyle}>
+        <span className="c-agent-avatar" aria-hidden>
+          {isRouted ? '✉' : name.slice(0, 1).toUpperCase()}
         </span>
-      )}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            marginBottom: 3,
-            fontSize: 'var(--text-xs)',
-            color: isUser ? 'var(--text-disabled)' : isRouted ? 'var(--accent-bright)' : 'var(--text-tertiary)',
-            fontWeight: 600,
-            letterSpacing: '0.02em',
-            lineHeight: 1.3,
-          }}
-        >
-          {isUser ? '你' : isRouted ? `✉ ${routeInfo}` : 'Agent'}
-          {m.timestamp && (
-            <span style={{ fontWeight: 400, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginLeft: 'auto' }}>
-              {new Date(m.timestamp * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+        <span className="c-agent-name">
+          <i className="c-agent-dot" />
+          {isRouted ? routeInfo : name}
+        </span>
+        {model && <span className="c-pill">{model}</span>}
+        {place && <span className="c-pill mono">{place}</span>}
+        <span className="c-agent-meta">
+          {elapsed && <span>{elapsed}</span>}
+          {tokens && (tokens.in > 0 || tokens.out > 0) && (
+            <span>
+              ↑ {formatTokens(tokens.in)} ↓ {formatTokens(tokens.out)}
             </span>
           )}
-          {live && (
-            <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
-              ●
+          {clock && <time>{clock}</time>}
+          {live && <span className="c-think__pulse c-think__pulse--live" />}
+        </span>
+        <div className="c-msg-actions">
+          <button type="button" className="c-icon-btn" title="复制 Markdown" onClick={() => onCopy?.(displayContent)}>
+            复制
+          </button>
+          {onRegenerate && (
+            <button type="button" className="c-icon-btn" title="重新生成" onClick={() => onRegenerate(m)}>
+              重新生成
+            </button>
+          )}
+          {onRoute && peers && peers.length > 0 && (
+            <span className="c-route">
+              <button type="button" className="c-icon-btn" title="Route 派发给其他 Agent" onClick={() => setRouteOpen((v) => !v)}>
+                Route
+              </button>
+              {routeOpen && (
+                <span className="c-route__menu">
+                  {peers.map((peer) => (
+                    <button
+                      key={peer.id}
+                      type="button"
+                      className="c-ctx-item"
+                      onClick={() => {
+                        onRoute(peer.id, displayContent.slice(0, 200))
+                        setRouteOpen(false)
+                      }}
+                    >
+                      {peer.name}
+                    </button>
+                  ))}
+                </span>
+              )}
             </span>
           )}
         </div>
-        <div
-          style={{
-            fontSize: 'var(--text-md)',
-            lineHeight: 1.7,
-            wordBreak: 'break-word',
-            color: isUser ? 'var(--text-primary)' : 'var(--text-secondary)',
-            fontStyle: isRouted ? 'italic' : 'normal',
-            whiteSpace: isUser ? 'pre-wrap' : undefined,
-          }}
-          className={isUser ? undefined : 'markdown-body'}
-        >
-          {!isUser && m.reasoning && <ReasoningText text={m.reasoning} />}
-          {isUser ? (
-            <MentionText text={displayContent} agents={agents} selfColor={color} />
-          ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
-          )}
-        </div>
-        {tokens && (tokens.in > 0 || tokens.out > 0) && (
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-disabled)',
-              display: 'flex',
-              gap: 8,
-            }}
-          >
-            <span>↑ {formatTokens(tokens.in)}</span>
-            <span>↓ {formatTokens(tokens.out)}</span>
-          </div>
-        )}
       </div>
+      <div className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+        {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
+          {displayContent}
+        </ReactMarkdown>
+      </div>
+      {artifacts.length > 0 && (
+        <div className="c-artifacts">
+          {artifacts.map((a) =>
+            a.kind === 'note' ? (
+              <button key={a.label} type="button" className="c-artifact" onClick={() => onOpenKnowledge?.()}>
+                {a.label}
+              </button>
+            ) : (
+              <button key={a.path} type="button" className="c-artifact" onClick={() => onOpenFile?.(a.path, 1)}>
+                {a.label}
+              </button>
+            ),
+          )}
+        </div>
+      )}
     </div>
+  )
+}
+
+function markdownComponents(onOpen?: (path: string, line: number) => void) {
+  const wrap = (Tag: 'p' | 'li' | 'td' | 'blockquote' | 'h1' | 'h2' | 'h3') =>
+    function Wrapped(props: { children?: ReactNode }) {
+      return <Tag>{walk(props.children, onOpen)}</Tag>
+    }
+  return {
+    p: wrap('p'),
+    li: wrap('li'),
+    td: wrap('td'),
+    blockquote: wrap('blockquote'),
+    h1: wrap('h1'),
+    h2: wrap('h2'),
+    h3: wrap('h3'),
+  }
+}
+
+function walk(node: ReactNode, onOpen?: (path: string, line: number) => void): ReactNode {
+  if (typeof node === 'string') return renderAnchors(node, onOpen)
+  if (typeof node === 'number') return node
+  if (Array.isArray(node)) {
+    return node.map((child, i) => <Fragment key={i}>{walk(child, onOpen)}</Fragment>)
+  }
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    if (node.type === 'pre') return node
+    return cloneElement(node, node.props, walk(node.props.children, onOpen))
+  }
+  return node
+}
+
+function renderAnchors(text: string, onOpen?: (path: string, line: number) => void) {
+  const parts = splitAnchors(text)
+  if (parts.length === 1 && parts[0].kind === 'text') return text
+  return parts.map((part, i) =>
+    part.kind === 'text' ? (
+      <Fragment key={i}>{part.text}</Fragment>
+    ) : (
+      <button key={i} type="button" className="c-code-anchor mono" onClick={() => onOpen?.(part.path, part.line)}>
+        {part.text}
+      </button>
+    ),
   )
 }
 
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return `${n}`
+}
+
+function SecretText({ text }: { text: string }) {
+  const parts = text.split(/(Bearer ••••\S+|sk-••••\S+|pt-••••\S+|api_key=••••\S+)/g)
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^(?:Bearer ••••|sk-••••|pt-••••|api_key=••••)\S+$/.test(part) ? (
+          <span key={i} className="c-secret">
+            {part}
+          </span>
+        ) : (
+          <Fragment key={i}>{part}</Fragment>
+        ),
+      )}
+    </>
+  )
+}
+
+function ApprovalCard({
+  tool,
+  target,
+  onDecide,
+}: {
+  tool: string
+  target: string
+  onDecide: (kind: 'allow' | 'deny' | 'always') => void
+}) {
+  const shown = redactCommand(target || tool)
+  return (
+    <div className="c-approval">
+      <div className="c-approval__title">待审批 · {tool}</div>
+      {shown && (
+        <div className="c-approval__cmd">
+          <SecretText text={shown} />
+        </div>
+      )}
+      <div className="c-approval__actions">
+        <button type="button" className="c-btn c-btn--sm" onClick={() => onDecide('allow')}>
+          允许执行
+        </button>
+        <button type="button" className="c-btn c-btn--ghost c-btn--sm" onClick={() => onDecide('deny')}>
+          拒绝
+        </button>
+        <button type="button" className="c-btn c-btn--ghost c-btn--sm" onClick={() => onDecide('always')}>
+          本会话始终允许
+        </button>
+      </div>
+    </div>
+  )
 }
 /** 右键菜单项：统一 hover / 焦点样式。 */
 function MenuItem({

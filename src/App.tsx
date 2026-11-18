@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import AgentView from './components/AgentView'
 import ChannelView from './components/ChannelView'
@@ -28,6 +28,16 @@ export default function App() {
   // 进对话视图时 onViewChange 会把它展开。
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [tab, setTab] = useState<InspectorTab>('changes')
+  const [focusPath, setFocusPath] = useState<string | null>(null)
+  const openFile = useCallback((path: string) => {
+    setFocusPath(path)
+    setTab('changes')
+    setInspectorOpen(true)
+  }, [])
+  const openKnowledge = useCallback(() => {
+    setTab('knowledge')
+    setInspectorOpen(true)
+  }, [])
 
   // 选中项失效时自动回落到第一个可用项
   useEffect(() => {
@@ -186,6 +196,8 @@ export default function App() {
             if (created) setActive({ kind: 'agent', id: created.id })
           }}
           onCreateRequest={() => setCreateOpen(true)}
+          onOpenFile={openFile}
+          onOpenKnowledge={openKnowledge}
         />
       )}
 
@@ -197,6 +209,7 @@ export default function App() {
           todos={s.todos}
           tools={s.tools}
           onClose={() => setInspectorOpen(false)}
+          focusPath={focusPath}
           knowledge={{
             count: s.notes.length,
             node: (

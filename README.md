@@ -19,7 +19,7 @@
 - 多个 agent 会话并存，各自独立历史、状态、颜色
 - Queue + Worker 串行执行，连发多条不会乱序
 - token 级流式渲染，运行中可中断
-- 模型 provider 可切换：Mock / Ollama / OpenAI 兼容 / DeepSeek / Claude
+- 模型 provider 可切换：Mock / Ollama / OpenAI 兼容 / DeepSeek / Claude / Qoder（浏览器授权）
 - **会话级配置**：每个 agent 可独立设置模型与工作目录，未设置则回落全局
 - **Agent 间协作**：`Route` 显式派发消息给对方 agent
 - **群聊频道**：共享 transcript、@提及路由、三种回合策略（discuss / direct / roundrobin）
@@ -138,27 +138,18 @@ Prompt → queue(chan, 32) → workerLoop → execute → idle/queued
 默认 provider 是 `mock`：回复由本地规则生成，**不是真实分析**，用来验证
 多 agent 并行 / 流式渲染 / 会话隔离 / 中断这几件事。
 
-### 本地 Ollama
-
-```bash
-ollama serve
-ollama pull qwen2.5-coder:7b
-```
-
-设置里选 **Ollama**，Base URL 与模型名已预填。
-
 ### 云端 API
 
-设置里选 OpenAI / DeepSeek / Claude，填 Base URL + API Key。
+设置里选 OpenAI / DeepSeek / Claude，填 Base URL + API Key。Qoder 可以点「授权登录」，也可以填写 `pt-` 开头的 Personal Access Token。它不是 OpenAI 兼容接口，请求走 Qoder 自己的对话协议。
 
 ### 环境变量
 
 环境变量会覆盖配置文件里的同名字段（未设置的不受影响）：
 
 ```bash
-MAD_LLM_PROVIDER=ollama
-MAD_LLM_BASE_URL=http://127.0.0.1:11434
-MAD_LLM_MODEL=qwen2.5-coder:7b
+MAD_LLM_PROVIDER=qoder
+MAD_LLM_BASE_URL=https://api3.qoder.sh
+MAD_LLM_MODEL=DeepSeek-V4-Pro
 MAD_LLM_API_KEY=sk-...
 MAD_WORK_DIR=/path/to/project
 ```
@@ -237,6 +228,7 @@ multi-agent-desktop/
 - **Mock 回复是占位的**，别当真实分析看
 - **检查器的「改动 / 任务」始终为空** —— 后端还没有产出这两类结构化数据的路径
 - **shell 是同步等结果**，长命令会卡住，没有超时控制
+- **shell 不读登录脚本**（`zsh -dfc`，没有 zsh 时用 `sh -c`）。登录脚本会去碰桌面、文稿、下载，macOS 就按文件夹反复弹权限。工作目录不能是主目录或这些文件夹本身；放在其中的项目子目录可以，系统最多问一次
 - **工具调用没有审批闸门**，CLI agent 直接执行
 - **无 worktree 隔离**，多 agent 并行改同一仓库会冲突
 - **API Key 明文落盘**（`config.json`，权限 600）—— 计划迁移到系统钥匙串

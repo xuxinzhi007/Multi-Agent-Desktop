@@ -23,6 +23,7 @@ import (
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
+	"multi-agent-desktop/internal/workdir"
 )
 
 // API 是暴露给前端的全部能力。`mygo generate` 据此生成 typed TS client。
@@ -793,19 +794,19 @@ func providerLabel(p string) string {
 	switch p {
 	case "llamacpp":
 		return "本地 llama.cpp"
-	case "ollama":
-		return "Ollama"
 	case "deepseek":
 		return "DeepSeek"
 	case "openai":
 		return "OpenAI"
 	case "claude":
 		return "Claude"
+	case "qoder":
+		return "Qoder"
 	}
 	return p
 }
 
-var knownProviderIDs = []string{"llamacpp", "ollama", "deepseek", "openai", "claude"}
+var knownProviderIDs = []string{"llamacpp", "deepseek", "openai", "claude", "qoder"}
 
 func knownProvider(id string) bool {
 	for _, p := range knownProviderIDs {
@@ -850,6 +851,16 @@ func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint
 		return ProviderEndpoint{}, fmt.Errorf("不支持的服务厂商 %s", cfg.Provider)
 	}
 	cfg = llm.ApplyDefaults(cfg)
+	if cfg.Provider == "qoder" && cfg.APIKey != "" {
+		adopted, err := llm.AdoptQoderAPIKey(ctx, cfg.APIKey)
+		if err != nil {
+			return ProviderEndpoint{}, err
+		}
+		cfg.APIKey = adopted.APIKey
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = adopted.BaseURL
+		}
+	}
 	if prev, ok := s.mgr.SavedProvider(cfg.Provider); ok {
 		if cfg.APIKey == "" {
 			cfg.APIKey = prev.APIKey
@@ -884,6 +895,34 @@ func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint
 	}
 	ep := s.endpointFor(ctx, cfg.Provider, cfg, true)
 	return ep, nil
+}
+
+// LoginQoder 用 Qoder 自己的浏览器授权。本机已经登录过就直接用，否则打开浏览器等用户确认。
+func (s *API) LoginQoder(ctx context.Context) (ProviderEndpoint, error) {
+	cfg, err := llm.AuthorizeQoder(ctx, func(url string) {
+		_ = mygo.Shell.OpenExternal(url)
+	})
+	if err != nil {
+		return ProviderEndpoint{}, err
+	}
+	cfg.Model = ""
+	s.rememberProvider(cfg)
+	base := s.mgr.LLMConfig()
+	if base.Provider == "" || base.Provider == "mock" || base.Provider == "qoder" {
+		next := base
+		next.Provider = "qoder"
+		next.BaseURL = cfg.BaseURL
+		next.APIKey = cfg.APIKey
+		if next.Model == "" || base.Provider != "qoder" {
+			next.Model = llm.DefaultQoderModel
+		}
+		s.mgr.SetLLMConfig(next)
+		if s.settings != nil {
+			_ = s.settings.SetLLM(next)
+		}
+		LLMConfigEvt.Emit(s.win, next)
+	}
+	return s.endpointFor(ctx, "qoder", cfg, true), nil
 }
 
 func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved bool) ProviderEndpoint {
@@ -954,6 +993,15 @@ func (s *API) rememberProvider(cfg LLMConfig) {
 	s.mgr.SetProviders(upsertProviderList(s.mgr.Providers(), cfg))
 }
 
+func providerHasKey(list []llm.Config, id string) bool {
+	for _, p := range list {
+		if p.Provider == id && p.APIKey != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func upsertProviderList(list []llm.Config, cfg llm.Config) []llm.Config {
 	next := make([]llm.Config, 0, len(list)+1)
 	replaced := false
@@ -992,7 +1040,8 @@ func (s *API) GetWorkDir() string {
 
 // SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。
 func (s *API) SetWorkDir(dir string) string {
-	if broadDir(dir) {
+	if workdir.TooBroad(dir) {
+		log.Printf("set workdir: %s", workdir.RejectReason)
 		return s.runner.Dir()
 	}
 	s.runner.SetDir(dir)
@@ -1019,8 +1068,8 @@ func (s *API) SettingsPath() string {
 
 // SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。
 func (s *API) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
-	if dir != "" && broadDir(dir) {
-		return AgentView{}, fmt.Errorf("工作目录不能是整个磁盘或用户主目录")
+	if dir != "" && workdir.TooBroad(dir) {
+		return AgentView{}, fmt.Errorf("%s", workdir.RejectReason)
 	}
 	if err := s.mgr.SetAgentWorkDir(agentId, dir); err != nil {
 		return AgentView{}, err
@@ -1100,7 +1149,17 @@ func (s *API) listModelsWithSavedCreds(ctx context.Context, cfg llm.Config) ([]s
 	case cfg.BaseURL == "":
 		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 Base URL", llm.ErrNotConfigured, cfg.Provider)
 	case cfg.APIKey == "" && !llm.IsLocalProvider(cfg.Provider):
-		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 API Key", llm.ErrNotConfigured, cfg.Provider)
+		if cfg.Provider == "qoder" {
+			if saved, ok := llm.LocalQoder(); ok {
+				cfg.APIKey = saved.APIKey
+			}
+		}
+		if cfg.APIKey == "" && cfg.Provider == "qoder" {
+			return nil, fmt.Errorf("%w：请先授权登录 Qoder", llm.ErrNotConfigured)
+		}
+		if cfg.APIKey == "" {
+			return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 API Key", llm.ErrNotConfigured, cfg.Provider)
+		}
 	}
 	return llm.ListModels(ctx, cfg)
 }
@@ -1130,7 +1189,7 @@ func (s *API) ProvidersStatus() []ProviderStatus {
 			Reason:  "本地 llama.cpp，不需要 Key",
 		},
 	}
-	cloud := []string{"openai", "deepseek", "claude"}
+	cloud := []string{"openai", "deepseek", "claude", "qoder"}
 	for _, id := range cloud {
 		st := ProviderStatus{ID: id}
 		if base.Provider == id {
@@ -1138,10 +1197,21 @@ func (s *API) ProvidersStatus() []ProviderStatus {
 			st.BaseURL = base.BaseURL
 			st.HasKey = base.APIKey != ""
 		}
+		if id == "qoder" && !st.HasKey {
+			if saved, ok := s.mgr.SavedProvider("qoder"); ok && saved.APIKey != "" {
+				st.HasKey = true
+				st.BaseURL = saved.BaseURL
+			} else if local, ok := llm.LocalQoder(); ok {
+				st.HasKey = true
+				st.BaseURL = local.BaseURL
+			}
+		}
 		st.Ready = st.BaseURL != "" && st.HasKey
 		switch {
 		case st.BaseURL == "":
 			st.Reason = "未配置 Base URL"
+		case !st.HasKey && id == "qoder":
+			st.Reason = "未登录"
 		case !st.HasKey:
 			st.Reason = "未配置 API Key"
 		}
@@ -2010,11 +2080,20 @@ func main() {
 	}
 	_ = settings.SetLLM(effective.LLM)
 
+	if local, ok := llm.LocalQoder(); ok && !providerHasKey(effective.Providers, "qoder") {
+		local.Model = ""
+		if saved, err := settings.UpsertProvider(local); err != nil {
+			log.Printf("save qoder login: %v", err)
+		} else {
+			effective.Providers = saved
+		}
+	}
+
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
 	mgr.SetProviders(effective.Providers)
 	workDir := defaultWorkDir(dataDir)
-	if effective.WorkDir != "" && !broadDir(effective.WorkDir) {
+	if effective.WorkDir != "" && !workdir.TooBroad(effective.WorkDir) {
 		workDir = effective.WorkDir
 	}
 	stayInAppDir()
@@ -2032,7 +2111,7 @@ func main() {
 		}
 	}
 
-	// 知识库：全局笔记在 agent 创建时注入 system prompt
+	// 知识库：不在创建时整库注入。会话挂上笔记后，当轮系统提示只带这些笔记。
 	var kbStore knowledge.Store
 	if kb, err := knowledge.NewFileStore(filepath.Join(dataDir, "knowledge.jsonl")); err != nil {
 		log.Printf("load knowledge: %v", err)
@@ -2047,6 +2126,12 @@ func main() {
 	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
 
 	mygo.Bind(api)
+
+	mygo.App.OnQuit(func() {
+		if mgr != nil {
+			mgr.Shutdown()
+		}
+	})
 
 	// 不在启动时申请通知授权。系统通知会弹出「通知」权限，
 	// 而阻塞和报错已经在界面里可见。
@@ -2126,19 +2211,6 @@ func defaultWorkDir(dataDir string) string {
 	return dir
 }
 
-// broadDir 表示这个目录一进去就会覆盖整台机器或整个用户目录。
-func broadDir(dir string) bool {
-	if dir == "" || dir == "." || dir == "/" {
-		return true
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return true
-	}
-	home, err := os.UserHomeDir()
-	return err == nil && abs == home
-}
-
 // stayInAppDir 在进程停在 / 或主目录时切到应用数据目录。
 // 开发时工作目录是源码树，保持不动，过期检查才能看到 .go 文件。
 func stayInAppDir() {
@@ -2146,7 +2218,7 @@ func stayInAppDir() {
 	if err == nil && sourceTree(wd) {
 		return
 	}
-	if err == nil && wd != "" && wd != "/" && wd != "." && !broadDir(wd) {
+	if err == nil && wd != "" && wd != "/" && wd != "." && !workdir.TooBroad(wd) {
 		return
 	}
 	_ = os.Chdir(mustDataDir())
@@ -2257,13 +2329,26 @@ func noteFromEvent(data any) (knowledge.Note, bool) {
 }
 
 func (k *knowledgeProvider) View(agentID, role string, knowledgeIDs []string, recentText string, budget int) (string, []string) {
-	if k == nil || k.store == nil {
+	if k == nil || k.store == nil || len(knowledgeIDs) == 0 {
 		return "", nil
 	}
 	notes := k.store.Query(knowledge.Query{})
 	if len(notes) == 0 {
 		return "", nil
 	}
-	v := knowledge.ViewFromNotes(notes, agentID, role, knowledgeIDs, recentText, budget)
+	want := make(map[string]struct{}, len(knowledgeIDs))
+	for _, id := range knowledgeIDs {
+		want[id] = struct{}{}
+	}
+	picked := make([]knowledge.Note, 0, len(knowledgeIDs))
+	for _, n := range notes {
+		if _, ok := want[n.ID]; ok {
+			picked = append(picked, n)
+		}
+	}
+	if len(picked) == 0 {
+		return "", nil
+	}
+	v := knowledge.ViewFromNotes(picked, agentID, role, knowledgeIDs, recentText, budget)
 	return v.Block, v.IDs
 }

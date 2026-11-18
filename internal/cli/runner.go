@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"multi-agent-desktop/internal/proc"
+	"multi-agent-desktop/internal/workdir"
 )
 
 // Event 是 CLI agent 的结构化输出。
@@ -32,6 +33,13 @@ func NewRunner(workDir string) *Runner {
 	return &Runner{WorkDir: workDir}
 }
 
+func (r Runner) checkDir() error {
+	if workdir.TooBroad(r.WorkDir) {
+		return fmt.Errorf("%s", workdir.RejectReason)
+	}
+	return nil
+}
+
 // ClaudeRunner 执行 claude -p --output-format stream-json。
 type ClaudeRunner struct {
 	Runner
@@ -47,6 +55,9 @@ func NewClaudeRunner(workDir, model string) *ClaudeRunner {
 
 // Run 执行 claude，事件通过 channel 流式返回。
 func (r *ClaudeRunner) Run(ctx context.Context, req Request) (<-chan Event, error) {
+	if err := r.checkDir(); err != nil {
+		return nil, err
+	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -209,6 +220,9 @@ func NewCodexRunner(workDir, model string) *CodexRunner {
 
 // Run 执行 codex，事件通过 channel 流式返回。
 func (r *CodexRunner) Run(ctx context.Context, req Request) (<-chan Event, error) {
+	if err := r.checkDir(); err != nil {
+		return nil, err
+	}
 	args := []string{"exec", "--json"}
 	if r.Model != "" {
 		args = append(args, "-c", fmt.Sprintf("model=%q", r.Model))

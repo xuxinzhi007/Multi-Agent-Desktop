@@ -183,8 +183,7 @@ func TestRoutePrefix(t *testing.T) {
 	}
 }
 
-// ⑤ 知识库注入 system prompt；nil 知识库时不注入也不崩。
-// 注：stubKnowledge 定义在 config_test.go；矩阵用例见 TestSystemPromptFor。
+// ⑤ 创建会话不把知识库写进首条 system；nil 知识库时也不崩。
 func TestKnowledgeInjection(t *testing.T) {
 	m := newTestManager(t)
 	m.SetKnowledge(&stubKnowledge{lines: []string{"约定: 用 Go 风格", "术语: agent=会话"}})
@@ -193,8 +192,11 @@ func TestKnowledgeInjection(t *testing.T) {
 		t.Fatal("no messages")
 	}
 	content := a.Messages[0].Content
-	if !strings.Contains(content, "## 知识库") || !strings.Contains(content, "约定: 用 Go 风格") {
-		t.Errorf("system prompt missing knowledge: %q", content)
+	if strings.Contains(content, "## 知识库") || strings.Contains(content, "约定: 用 Go 风格") {
+		t.Errorf("create should not inject knowledge: %q", content)
+	}
+	if !strings.Contains(content, "角色：后端专家") {
+		t.Errorf("system prompt = %q, want the role line", content)
 	}
 
 	m2 := newTestManager(t)

@@ -34,6 +34,17 @@ func TestBashBasic(t *testing.T) {
 	}
 }
 
+func TestBashRejectsHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := invoke(t, &Bash{WorkDir: home}, `{"command":"echo should-not-run"}`)
+	if res.Status == tool.StatusOK || strings.Contains(res.Content, "should-not-run") {
+		t.Fatalf("command ran in home: %+v", res)
+	}
+}
+
 // 非零退出码是「命令失败了」，不是「工具坏了」。
 // 必须把退出码和 stderr 一起交给模型，它才知道怎么改。
 func TestBashNonZeroExitIsResultNotError(t *testing.T) {

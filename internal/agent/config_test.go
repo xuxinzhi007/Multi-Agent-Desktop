@@ -332,7 +332,7 @@ func TestSessionLLMMidRunSnapshot(t *testing.T) {
 	}
 }
 
-// TC-019 / TC-020 / TC-021 —— systemPromptFor 纯函数：知识库注入矩阵。
+// TC-019 / TC-020 / TC-021 —— systemPromptFor 只写角色，不把知识库塞进首条 system。
 type stubKnowledge struct {
 	lines []string
 	calls int
@@ -344,59 +344,17 @@ func (s *stubKnowledge) NotesForSystemPrompt() []string {
 }
 
 func TestSystemPromptFor(t *testing.T) {
-	base := systemPromptFor("后端专家", nil)
-
-	tests := []struct {
-		name       string
-		kb         KnowledgeProvider
-		wantHas    []string
-		wantNotHas []string
-		wantExact  string
-	}{
-		{
-			name:       "TC-020 kb 为 nil 不注入",
-			kb:         nil,
-			wantNotHas: []string{"## 知识库"},
-			wantExact:  base,
-		},
-		{
-			name:       "TC-021 kb 返回空列表不产生空段",
-			kb:         &stubKnowledge{lines: nil},
-			wantNotHas: []string{"## 知识库"},
-			wantExact:  base,
-		},
-		{
-			name:      "TC-019 两条笔记前置注入",
-			kb:        &stubKnowledge{lines: []string{"约定: 用 Go 风格", "术语: agent=会话"}},
-			wantHas:   []string{"## 知识库\n- 约定: 用 Go 风格\n- 术语: agent=会话\n", base},
-			wantExact: "",
-		},
+	got := systemPromptFor("后端专家")
+	want := "角色：后端专家。工作在 multi-agent-desktop 里，回答要具体、可执行。"
+	if got != want {
+		t.Errorf("systemPromptFor(\"后端专家\") = %q, want %q", got, want)
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := systemPromptFor("后端专家", tc.kb)
-			if tc.wantExact != "" && got != tc.wantExact {
-				t.Errorf("systemPromptFor(\"后端专家\", %v) = %q, want %q", tc.kb, got, tc.wantExact)
-			}
-			for _, want := range tc.wantHas {
-				if !strings.Contains(got, want) {
-					t.Errorf("systemPromptFor(\"后端专家\", %v) = %q, want containing %q", tc.kb, got, want)
-				}
-			}
-			for _, notWant := range tc.wantNotHas {
-				if strings.Contains(got, notWant) {
-					t.Errorf("systemPromptFor(\"后端专家\", %v) = %q, want NOT containing %q", tc.kb, got, notWant)
-				}
-			}
-			if !strings.HasPrefix(got, "角色：") && !strings.HasPrefix(got, "## 知识库") {
-				t.Errorf("systemPromptFor: prompt = %q, want it to contain the role line", got)
-			}
-		})
+	if strings.Contains(got, "知识库") {
+		t.Errorf("systemPromptFor(\"后端专家\") = %q, want no knowledge section", got)
 	}
 }
 
-// TC-019 —— Create 时把知识库写进首条 system message；SetKnowledge(nil) 不注入。
+// Create 的首条 system 不读知识库，无论库里有没有笔记。
 func TestCreateInjectsKnowledge(t *testing.T) {
 	kb := &stubKnowledge{lines: []string{"约定: 用 Go 风格"}}
 	m := newQuietManager(t, llm.Config{Provider: "mock"})
@@ -409,13 +367,13 @@ func TestCreateInjectsKnowledge(t *testing.T) {
 	if a.Messages[0].Role != "system" {
 		t.Errorf("Create(\"a1\"): Messages[0].Role = %q, want %q", a.Messages[0].Role, "system")
 	}
-	if !strings.Contains(a.Messages[0].Content, "## 知识库") ||
-		!strings.Contains(a.Messages[0].Content, "约定: 用 Go 风格") {
-		t.Errorf("Create(\"a1\") with knowledge: system prompt = %q, want it to contain the note",
+	if strings.Contains(a.Messages[0].Content, "## 知识库") ||
+		strings.Contains(a.Messages[0].Content, "约定: 用 Go 风格") {
+		t.Errorf("Create(\"a1\") with knowledge: system prompt = %q, want no knowledge section",
 			a.Messages[0].Content)
 	}
-	if kb.calls != 1 {
-		t.Errorf("Create(\"a1\"): NotesForSystemPrompt calls = %d, want 1", kb.calls)
+	if kb.calls != 0 {
+		t.Errorf("Create(\"a1\"): knowledge reads = %d, want 0", kb.calls)
 	}
 
 	m2 := newQuietManager(t, llm.Config{Provider: "mock"})

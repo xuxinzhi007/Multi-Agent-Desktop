@@ -29,15 +29,18 @@ const demoAgents = [
     status: 'running',
     createdAt: now() - 600,
     messages: [
-      { role: 'user', content: '把登录表单的状态管理重构一下' },
+      { role: 'user', content: '把登录表单的状态管理重构一下', timestamp: now() - 80 },
       {
         role: 'assistant',
         content:
           '我看了一下 AuthForm，现在有 7 个独立 useState，可以合并成一个表单对象 + 一次 dispatch。',
+        timestamp: now() - 40,
+        reasoning: '先确认请求从哪一层进来。表单状态散在 7 个 useState 里，合并时不能把校验和提交耦在同一次 set。',
       },
     ],
     queueLen: 0,
     backend: 'loop',
+    knowledge: ['n1'],
     workDir: '~/code/app',
     startedAt: Math.floor(now()) - 42,
     chars: 520,
@@ -83,22 +86,39 @@ const demoChannels = [
   },
 ]
 
+const demoTags = [
+  'AgentView', 'Compact', 'CtxBudget', 'DiagnosePanel', 'Go热重启', 'P0', 'agent',
+  'agent-config', 'agent-runtime', 'agent.context', 'agents.json', 'agent管理',
+  'architecture', 'ask_agent', 'budget', 'budget持久化', 'bug根因', 'channel',
+  'checkpoint', 'compact', 'context-management', 'context-meter', 'context-window',
+  'contextWindow', 'data-directory', 'default分支', 'delete_agent', 'edit_file越界',
+  'emitToWindow', 'function-calling', 'go',
+]
+
 const demoNotes = [
   {
     id: 'n1',
+    title: 'AuthForm 的状态不要拆成七个 useState',
+    body: '登录表单现在有 7 个独立 useState。合并成一个表单对象时，校验和提交不能耦在同一次 set。',
     scope: 'ch-demo',
-    text: 'AuthForm 有 7 个 useState，可合并',
-    author: '前端',
     at: now() - 300,
-    tags: ['refactor'],
+    tags: demoTags.slice(0, 16),
   },
   {
     id: 'n2',
+    title: '接口变更要同步 e2e 断言',
+    body: '改返回字段时，先改断言再改实现。漏掉的话类型检查是绿的，界面却是旧的。',
     scope: '',
-    text: '接口变更要同步 e2e 断言',
-    author: '测试',
     at: now() - 200,
-    tags: ['process'],
+    tags: demoTags.slice(12),
+  },
+  {
+    id: 'n3',
+    title: '工作目录不要设成用户主目录',
+    body: '主目录会让 macOS 按桌面、文稿、下载逐个弹权限。',
+    scope: '',
+    at: now() - 100,
+    tags: ['macos'],
   },
 ]
 
