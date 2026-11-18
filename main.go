@@ -2172,7 +2172,9 @@ func main() {
 			BackgroundColor: "#00000000",
 			DisableMove:     false, // 允许拖动
 			StateKey:        "mini",
-			URL:             "/mini",
+			// 必须带 .html。/mini 没有对应文件，开发服务器和打包后的
+			// FileServer 都会把它退回 index.html，主界面就被塞进 260×64 的胶囊窗。
+			URL: "/mini.html",
 		})
 		miniWindowRef = miniWin
 

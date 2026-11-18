@@ -88,6 +88,13 @@ export default function Sidebar(p: Props) {
           flexShrink: 0,
         }}
       >
+        <img
+          src="/icon.png"
+          alt=""
+          width={22}
+          height={22}
+          style={{ borderRadius: 'var(--radius-sm)', flexShrink: 0 }}
+        />
         <span
           className={`c-dot ${p.connected ? 'c-dot--connected' : 'c-dot--error'} ${p.connected ? '' : 'blink'}`}
         />

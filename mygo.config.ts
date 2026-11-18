@@ -3,6 +3,7 @@ import { defineConfig } from "mygo-cli";
 export default defineConfig({
   name: "multi-agent-desktop",
   identifier: "com.multiagent.desktop",
+  icon: "resources/icon.png",
   version: "0.3.0",
   devUrl: "http://localhost:5173",
   devCommand: "npm run dev:web",
