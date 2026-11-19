@@ -8,6 +8,7 @@ package workdir
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // RejectReason 是拒绝把某个目录当工作目录时给用户和模型看的原因。
@@ -23,7 +24,7 @@ func TooBroad(dir string) bool {
 		return true
 	}
 	abs = filepath.Clean(abs)
-	if abs == string(filepath.Separator) {
+	if abs == string(filepath.Separator) || volumeRoot(abs) {
 		return true
 	}
 	home, err := os.UserHomeDir()
@@ -40,4 +41,15 @@ func TooBroad(dir string) bool {
 		}
 	}
 	return false
+}
+
+// volumeRoot 报告 abs 是不是盘符根，例如 C:\。Unix 上 VolumeName 为空。
+func volumeRoot(abs string) bool {
+	vol := filepath.VolumeName(abs)
+	if vol == "" {
+		return false
+	}
+	rest := strings.TrimPrefix(abs, vol)
+	rest = strings.Trim(rest, `/\`)
+	return rest == ""
 }

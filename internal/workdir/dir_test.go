@@ -3,6 +3,7 @@ package workdir
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -29,6 +30,16 @@ func TestTooBroad(t *testing.T) {
 	for _, tc := range cases {
 		if got := TooBroad(tc.dir); got != tc.want {
 			t.Errorf("TooBroad(%q) = %v, want %v", tc.dir, got, tc.want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		root := filepath.VolumeName(home) + `\`
+		if !TooBroad(root) {
+			t.Errorf("TooBroad(%q) = false, want true", root)
+		}
+		child := filepath.Join(root, "Windows")
+		if TooBroad(child) {
+			t.Errorf("TooBroad(%q) = true, want false", child)
 		}
 	}
 }

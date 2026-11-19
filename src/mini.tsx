@@ -21,19 +21,15 @@ function MiniApp() {
   const [assist, setAssist] = useState<ScreenHint>({ on: false })
   const [draft, setDraft] = useState('')
   const [sayErr, setSayErr] = useState('')
-  const [act, setAct] = useState('')
   const [bound, setBound] = useState<{ provider: string; model: string } | null>(null)
   const [focusId, setFocusId] = useState('')
   const [choices, setChoices] = useState<ModelChoice[] | null>(null)
   const [pickerOn, setPickerOn] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
-  const streamRef = useRef<HTMLDivElement>(null)
-  const stickRef = useRef(true)
   const speakerRef = useRef('')
   const agentsRef = useRef<MiniAgentStatus[]>([])
   agentsRef.current = model.agents
   const agentRef = useRef('')
-  const answerRef = useRef('')
   const focus = focusId || model.agents[0]?.id || ''
   agentRef.current = focus
   const focusAgent = model.agents.find((a) => a.id === focus)
@@ -98,11 +94,8 @@ function MiniApp() {
       .catch(() => {})
   }, [demo, focus])
 
-  const line = (text: string) => text.replace(/\s+/g, ' ').trim().slice(-48)
-
   useEffect(() => {
     if (demo) return
-    const mine = (id: string) => !agentRef.current || id === agentRef.current
     const unsubDelta = events.agentDelta.on(({ id, delta }) => {
       if (!delta) return
       setRows((prev) => upsertAgent(prev, id, agentsRef.current, speakerRef, (row) => ({ ...row, text: row.text + delta, live: true })))
@@ -126,22 +119,10 @@ function MiniApp() {
         })),
       )
     })
-    const unsubTool = events.agentTool.on((e) => {
-      if (!mine(e.id) || e.phase !== 'start') return
-      answerRef.current = ''
-      const name = e.tool === 'web' ? (e.content || '操作网页') : e.tool
-      setAct('正在' + name)
-    })
-    const unsubError = events.agentError.on(({ id, error }) => {
-      if (!mine(id)) return
-      setAct(line(error) || '出错了')
-    })
     return () => {
       unsubDelta()
       unsubReason()
       unsubMessage()
-      unsubTool()
-      unsubError()
     }
   }, [demo])
 
