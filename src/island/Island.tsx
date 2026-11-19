@@ -6,9 +6,11 @@ type Props = {
   view: View
   onHome: () => void
   onFlightDone: (id: string) => void
+  assistOn?: boolean
+  onToggleAssist?: () => void
 }
 
-export function Island({ view, onHome, onFlightDone }: Props) {
+export function Island({ view, onHome, onFlightDone, assistOn, onToggleAssist }: Props) {
   const [reduce, setReduce] = useState(false)
   useEffect(() => {
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -32,7 +34,7 @@ export function Island({ view, onHome, onFlightDone }: Props) {
       data-mode={mode}
       role="status"
       aria-label={view.label}
-      style={{ width: view.width, ['--speed' as string]: String(view.speed) }}
+      style={{ width: Math.min(view.width + (onToggleAssist ? 36 : 0), 308), ['--speed' as string]: String(view.speed) }}
     >
       <span key={mode} className="island__rim" />
       <button type="button" className="home" aria-label="回到主窗口" onClick={onHome}>
@@ -66,6 +68,16 @@ export function Island({ view, onHome, onFlightDone }: Props) {
               <Envelope key={f.id} flight={f} dots={view.dots} onDone={onFlightDone} />
             ))}
         </div>
+      )}
+      {onToggleAssist && (
+        <button
+          type="button"
+          className={assistOn ? 'watch is-on' : 'watch'}
+          aria-pressed={!!assistOn}
+          onClick={onToggleAssist}
+        >
+          协助
+        </button>
       )}
     </div>
   )

@@ -310,6 +310,17 @@ export interface Result {
   exitCode: number;
 }
 
+/** ScreenHint 是悬浮岛上的一条协助。截图不在这个结构里。 */
+export interface ScreenHint {
+  on: boolean;
+  text?: string;
+  action?: string;
+  app?: string;
+  seen?: string;
+  busy?: string;
+  err?: string;
+}
+
 /** ShellEvent 是命令开始。 */
 export interface ShellEvent {
   agentId: string;
@@ -378,6 +389,10 @@ export interface WorkDirEvent {
  * 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
  */
 export const API = {
+  /** AcceptScreenHint 把当前这一条交给已有会话去执行。 */
+  acceptScreenHint(): Promise<void> {
+    return call("API.AcceptScreenHint");
+  },
   /**
    * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
    * 后续对话会把它作为上下文。返回更新后的会话视图。
@@ -433,6 +448,10 @@ export const API = {
   diagnose(): Promise<Diagnostics> {
     return call("API.Diagnose");
   },
+  /** DismissScreenHint 关掉当前这一条，同一画面不会马上再出。 */
+  dismissScreenHint(): Promise<void> {
+    return call("API.DismissScreenHint");
+  },
   /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
   focusAgent(agentId: string): Promise<void> {
     return call("API.FocusAgent", agentId);
@@ -467,6 +486,10 @@ export const API = {
    */
   islandResize(arg0: boolean): Promise<boolean> {
     return call("API.IslandResize", arg0);
+  },
+  /** LayoutMini 在胶囊高度上再加一块，用来放气泡和「正在看哪里」。 */
+  layoutMini(extra: number): Promise<void> {
+    return call("API.LayoutMini", extra);
   },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");
@@ -590,6 +613,10 @@ export const API = {
   setLLMConfig(cfg: Config): Promise<Config> {
     return call("API.SetLLMConfig", cfg);
   },
+  /** SetScreenAssist 打开或关掉看屏幕。没打开时不截屏。 */
+  setScreenAssist(on: boolean): Promise<ScreenHint> {
+    return call("API.SetScreenAssist", on);
+  },
   /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。 */
   setWorkDir(dir: string): Promise<string> {
     return call("API.SetWorkDir", dir);
@@ -665,4 +692,6 @@ export const events = {
   miniStatus: event<MiniStatus>("mini.status"),
   /** AgentFocused 事件。 */
   agentFocused: event<AgentFocusedEvent>("agent.focused"),
+  /** ScreenHintEvent 推给悬浮岛。 */
+  screenHint: event<ScreenHint>("screen.hint"),
 } as const;

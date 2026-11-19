@@ -23,18 +23,21 @@ import (
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
+	"multi-agent-desktop/internal/screen"
 	"multi-agent-desktop/internal/workdir"
 )
 
 // API 是暴露给前端的全部能力。`mygo generate` 据此生成 typed TS client。
 // 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
 type API struct {
-	mgr      *agent.Manager
-	runner   *pty.Runner
-	channels *channel.Manager
-	kb       knowledge.Store
-	settings *config.Store
-	win      *mygo.Window
+	mgr        *agent.Manager
+	runner     *pty.Runner
+	channels   *channel.Manager
+	kb         knowledge.Store
+	settings   *config.Store
+	win        *mygo.Window
+	screen     *screen.Loop
+	screenOnce sync.Once
 }
 
 // Agent 是前端可见的会话视图。
@@ -1638,8 +1641,10 @@ func (s *API) ToggleMiniWindow(show bool) bool {
 
 // 灵动岛只有胶囊一种尺寸。宽度变化发生在窗口内部，窗口本身不再展开成面板。
 const (
-	islandW = 260
-	islandH = 64
+	islandW = 320
+	islandH = 116
+	hintW   = 340
+	hintH   = 210
 )
 
 // IslandResize 保持悬浮窗为胶囊窗口。
@@ -1649,7 +1654,7 @@ func (s *API) IslandResize(_ bool) bool {
 	if w == nil || w.IsDestroyed() {
 		return false
 	}
-	w.SetSize(islandW, islandH)
+	s.applyMini()
 	return true
 }
 
@@ -1990,14 +1995,23 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.delta":
 			if v, ok := toAgentDelta(data); ok {
 				AgentDelta.Emit(win, v)
+				if miniWin != nil && !miniWin.IsDestroyed() {
+					AgentDelta.Emit(miniWin, v)
+				}
 			}
 		case "agent.message":
 			if v, ok := toAgentMessage(data); ok {
 				AgentMessage.Emit(win, v)
+				if miniWin != nil && !miniWin.IsDestroyed() {
+					AgentMessage.Emit(miniWin, v)
+				}
 			}
 		case "agent.error":
 			if v, ok := toAgentError(data); ok {
 				AgentError.Emit(win, v)
+				if miniWin != nil && !miniWin.IsDestroyed() {
+					AgentError.Emit(miniWin, v)
+				}
 				if mgr != nil {
 					if a, ok := mgr.Get(v.ID); ok {
 						notifyError(a.Snapshot().Name, v.Error)
@@ -2011,10 +2025,16 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.tool":
 			if v, ok := toAgentTool(data); ok {
 				AgentTool.Emit(win, v)
+				if miniWin != nil && !miniWin.IsDestroyed() {
+					AgentTool.Emit(miniWin, v)
+				}
 			}
 		case "agent.reasoning":
 			if v, ok := toAgentReasoning(data); ok {
 				AgentReasoning.Emit(win, v)
+				if miniWin != nil && !miniWin.IsDestroyed() {
+					AgentReasoning.Emit(miniWin, v)
+				}
 			}
 		case "agent.loop":
 			if v, ok := toAgentLoop(data); ok {
@@ -2155,7 +2175,7 @@ func main() {
 		// StateKey 记住位置，重启后回到原处。
 		miniWin = mygo.NewWindow(mygo.WindowOptions{
 			Title: "Agent 舰队",
-			// 窗口锁死为胶囊外框。岛体宽度在这 260px 里变化，不再撑成面板。
+			// 窗口锁死为胶囊外框。有建议时再拉高，不再撑成面板。
 			Width:     islandW,
 			Height:    islandH,
 			MinWidth:  islandW,
@@ -2177,6 +2197,7 @@ func main() {
 			URL: "/mini.html",
 		})
 		miniWindowRef = miniWin
+		api.applyMini()
 
 		// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
 		// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。

@@ -445,18 +445,42 @@ func callHint(c tool.Call) string {
 	if json.Unmarshal(c.Input, &m) != nil {
 		return c.Name
 	}
+	if c.Name == "web" {
+		op, _ := m["op"].(string)
+		text, _ := m["text"].(string)
+		switch op {
+		case "click":
+			if text != "" {
+				return "点击「" + clipHint(text) + "」"
+			}
+		case "type":
+			return "输入"
+		case "press":
+			return "按键"
+		case "open":
+			return "打开页面"
+		case "read":
+			return "读取页面"
+		}
+		return "操作网页"
+	}
 	for _, k := range []string{"path", "file_path", "command", "cmd", "name", "task"} {
 		s, ok := m[k].(string)
 		if !ok || s == "" {
 			continue
 		}
-		s = strings.TrimSpace(s)
-		if len([]rune(s)) > 72 {
-			s = string([]rune(s)[:72]) + "…"
-		}
+		s = clipHint(s)
 		return c.Name + " " + s
 	}
 	return c.Name
+}
+
+func clipHint(s string) string {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) > 72 {
+		return string([]rune(s)[:72]) + "…"
+	}
+	return s
 }
 
 func joinReason(a, b string) string {

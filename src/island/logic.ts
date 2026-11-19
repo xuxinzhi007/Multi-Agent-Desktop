@@ -402,7 +402,7 @@ function islandWidth(mode: Mode, dots: number): number {
   if (mode === 'communicating' || mode === 'collaborating') w += 24
   if (mode === 'completed' || mode === 'error') w += 8
   if (w < 188) w = 188
-  if (w > 252) w = 252
+  if (w > 300) w = 300
   return w
 }
 
