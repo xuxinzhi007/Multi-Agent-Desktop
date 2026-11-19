@@ -85,6 +85,8 @@ export interface AgentView {
   chars?: number;
   /** Busy 非空时，这个会话正在该群里回答。 */
   busy?: string;
+  /** ParentID 是创建它的会话。空表示用户自己建的。 */
+  parentId?: string;
 }
 
 export interface Channel {

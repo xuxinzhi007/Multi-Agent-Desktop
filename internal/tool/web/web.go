@@ -18,7 +18,7 @@ func (*Tool) Name() string { return "web" }
 func (*Tool) Description() string {
 	return "操作应用内置浏览器。op 取 read、open、click、type、press。" +
 		"窗口会打开在应用自己的浏览器里，登录留在那里，不使用用户的 Chrome。" +
-		"read 读取当前页的网址、标题和正文；open 打开 http(s) 链接；" +
+		"read 读取当前页的网址、标题和正文，会等客户端渲染完成，Flutter 页面读的是无障碍树里的文字；open 打开 http(s) 链接；" +
 		"click 的 text 必须是页面上看得见的文字；type 往输入框写 value，可用 text 指定框；" +
 		"press 只按 Enter、Escape 或 Tab。不要编造脚本。"
 }

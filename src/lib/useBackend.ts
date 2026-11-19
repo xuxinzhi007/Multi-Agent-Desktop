@@ -46,7 +46,7 @@ type State = {
   tools: ToolCall[]
   /** 这一轮还没落成消息的思考文本，按 agent id */
   reasoning: Record<string, string>
-  tokenUsage: Record<string, { in: number; out: number }>
+  tokenUsage: Record<string, { in: number; out: number; lastIn?: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
   /** 已经乐观插入消息、但后端还没回执的 agent */
@@ -237,7 +237,11 @@ export function useBackend() {
         const newTokenUsage = { ...s.tokenUsage }
         if (tokensIn || tokensOut) {
           const existing = newTokenUsage[id] ?? { in: 0, out: 0 }
-          newTokenUsage[id] = { in: existing.in + (tokensIn ?? 0), out: existing.out + (tokensOut ?? 0) }
+          newTokenUsage[id] = {
+            in: existing.in + (tokensIn ?? 0),
+            out: existing.out + (tokensOut ?? 0),
+            lastIn: tokensIn ? tokensIn : existing.lastIn,
+          }
         }
         return {
           ...s,

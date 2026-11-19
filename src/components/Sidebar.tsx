@@ -60,6 +60,25 @@ function ViewTab({
   )
 }
 
+function nestAgents(agents: Agent[]): { agent: Agent; depth: number }[] {
+  const ids = new Set(agents.map((a) => a.id))
+  const children = new Map<string, Agent[]>()
+  const roots: Agent[] = []
+  for (const a of agents) {
+    if (a.parentId && ids.has(a.parentId)) {
+      children.set(a.parentId, [...(children.get(a.parentId) ?? []), a])
+    } else {
+      roots.push(a)
+    }
+  }
+  const out: { agent: Agent; depth: number }[] = []
+  for (const root of roots) {
+    out.push({ agent: root, depth: 0 })
+    for (const child of children.get(root.id) ?? []) out.push({ agent: child, depth: 1 })
+  }
+  return out
+}
+
 function sessionLine(a: Agent): string {
   const model = a.llm?.provider === 'mock' ? '' : a.llm?.model || ''
   const folder = a.workDir ? a.workDir.split(/[/\\]/).filter(Boolean).slice(-1)[0] : ''
@@ -296,7 +315,7 @@ export default function Sidebar(p: Props) {
           </div>
         )}
 
-        {p.agents.map((a) => {
+        {nestAgents(p.agents).map(({ agent: a, depth }) => {
           const active = p.activeKind === 'agent' && a.id === p.activeId
           return (
             <div
@@ -308,6 +327,7 @@ export default function Sidebar(p: Props) {
                 alignItems: 'center',
                 gap: 'var(--space-2)',
                 padding: '8px 10px 8px 11px',
+                marginLeft: depth ? 16 : 0,
                 borderRadius: 'var(--radius-md)',
                 cursor: 'pointer',
                 marginBottom: 1,
@@ -373,7 +393,7 @@ export default function Sidebar(p: Props) {
                       textOverflow: 'ellipsis',
                     }}
                   >
-                    {a.name}
+                    {depth ? `└ ${a.name}` : a.name}
                   </span>
                   <span
                     className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}

@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -51,6 +52,11 @@ func (d *Desk) Open(url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if url != "" {
+		if err := waitForNavigation(context.Background(), w.Page(), url); err != nil {
+			return "", err
+		}
+	}
 	return w.Page().URL(), nil
 }
 
@@ -59,20 +65,23 @@ func (d *Desk) Act(ctx context.Context, op Op) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if op.Op == "open" {
+		w, err := d.ensure(op.URL)
+		if err != nil {
+			return "", err
+		}
+		page := w.Page()
+		if err := waitForNavigation(ctx, page, op.URL); err != nil {
+			return "", err
+		}
+		return page.URL(), nil
+	}
 	w, err := d.ensure("")
 	if err != nil {
 		return "", err
 	}
 	page := w.Page()
 	switch op.Op {
-	case "open":
-		if err := page.LoadURL(op.URL); err != nil {
-			return "", err
-		}
-		if err := waitReady(ctx, page); err != nil {
-			return "", err
-		}
-		return page.URL(), nil
 	case "read":
 		if err := waitReady(ctx, page); err != nil {
 			return "", err
@@ -81,7 +90,23 @@ func (d *Desk) Act(ctx context.Context, op Op) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return evalString(ctx, page, js)
+		var last string
+		for i := 0; i < 20; i++ {
+			last, err = evalString(ctx, page, js)
+			if err != nil {
+				return "", err
+			}
+			if readPayloadReady(last) {
+				return last, nil
+			}
+			if err := hold(ctx, 400*time.Millisecond); err != nil {
+				return "", err
+			}
+		}
+		if isBlankDocument(payloadURL(last)) {
+			return "", errors.New("页面没有离开空白页")
+		}
+		return last, nil
 	case "click", "type", "press":
 		if err := waitReady(ctx, page); err != nil {
 			return "", err
@@ -136,15 +161,8 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 			if err := w.Page().LoadURL(url); err != nil {
 				return nil, err
 			}
-			if err := waitReady(context.Background(), w.Page()); err != nil {
-				return nil, err
-			}
 		}
 		return w, nil
-	}
-	start := url
-	if start == "" {
-		start = "about:blank"
 	}
 	w = mygo.NewWindow(mygo.WindowOptions{
 		Title:     "浏览器",
@@ -152,7 +170,7 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 		Height:    760,
 		MinWidth:  640,
 		MinHeight: 480,
-		URL:       start,
+		URL:       "",
 		StateKey:  "workbench",
 		Page: mygo.PageOptions{
 			Session:         d.sess,
@@ -167,21 +185,75 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 		return nil, errors.New("打不开内置浏览器")
 	}
 	page := w.Page()
+	page.OnWillNavigate(func(e *mygo.NavigateEvent) {
+		if !allowWorkbenchNavigation(e.URL) {
+			e.PreventDefault()
+		}
+	})
 	page.SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
 		if req.URL != "" {
 			_ = page.LoadURL(req.URL)
 		}
 		return nil
 	})
-	if url == "" {
-		page.LoadHTML(`<!doctype html><meta charset="utf-8"><title>浏览器</title><body style="font:15px -apple-system;padding:32px;color:#1c2430">把要测的页面地址交给会话，它会在这个窗口里打开。登录会留在这里。</body>`, "about:blank")
-	}
 	d.mu.Lock()
 	d.win = w
 	d.mu.Unlock()
+	if url != "" {
+		if err := page.LoadURL(url); err != nil {
+			return nil, err
+		}
+	} else {
+		page.LoadHTML(`<!doctype html><meta charset="utf-8"><title>浏览器</title><body style="font:15px -apple-system;padding:32px;color:#1c2430">把要测的页面地址交给会话，它会在这个窗口里打开。登录会留在这里。</body>`, "about:blank")
+	}
 	w.Show()
 	w.Focus()
 	return w, nil
+}
+
+func waitForNavigation(ctx context.Context, page *mygo.Page, want string) error {
+	timer := time.NewTimer(20 * time.Second)
+	defer timer.Stop()
+	tick := time.NewTicker(150 * time.Millisecond)
+	defer tick.Stop()
+	var watch navWatch
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return errors.New("页面打开超时")
+		case <-tick.C:
+			doc, ok := committedURL(ctx, page)
+			if !ok {
+				continue
+			}
+			if watch.arrived(doc, page.IsLoading(), want) {
+				return nil
+			}
+		}
+	}
+}
+
+// committedURL 读的是文档自己的 location.href。
+// Page.URL 会提前变成正在提交的地址，这时脚本仍跑在 about:blank 上。
+func committedURL(ctx context.Context, page *mygo.Page) (string, bool) {
+	v, err := page.EvalContext(ctx, "location.href")
+	if err != nil {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok && s != ""
+}
+
+func payloadURL(out string) string {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		return ""
+	}
+	return body.URL
 }
 
 func waitReady(ctx context.Context, page *mygo.Page) error {

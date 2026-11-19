@@ -377,6 +377,8 @@ type AgentView struct {
 	Chars    int    `json:"chars,omitempty"`
 	// Busy 非空时，这个会话正在该群里回答。
 	Busy string `json:"busy,omitempty"`
+	// ParentID 是创建它的会话。空表示用户自己建的。
+	ParentID string `json:"parentId,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -400,6 +402,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		LastTool:      s.LastTool,
 		Chars:         s.Chars,
 		Busy:          s.BusyPlace,
+		ParentID:      s.ParentID,
 	}
 }
 
@@ -418,6 +421,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 		v.Knowledge = ids
 	}
 	v.BlockedReason, _ = m["blockedReason"].(string)
+	v.ParentID, _ = m["parentId"].(string)
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = lc

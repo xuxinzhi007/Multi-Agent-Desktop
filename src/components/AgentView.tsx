@@ -19,13 +19,14 @@ import {
   workLabel,
 } from '../lib/messagePresent'
 import DirectoryPicker from './DirectoryPicker'
+import { contextMeter } from '../lib/contextMeter'
 
 type Props = {
   agent: Agent | null
   streaming: string
   error?: SessionError
   workDir: string
-  tokenUsage?: { in: number; out: number }
+  tokenUsage?: { in: number; out: number; lastIn?: number }
   onPrompt: (text: string) => void
   onStop: () => void
   onShell: (command: string) => void
@@ -136,21 +137,25 @@ function ThinkRail({
   live,
   title,
   children,
-  defaultOpen,
 }: {
   live?: boolean
   title: string
   children?: ReactNode
-  defaultOpen?: boolean
 }) {
-  const [open, setOpen] = useState(defaultOpen ?? false)
+  const [open, setOpen] = useState(false)
   const [secs, setSecs] = useState(0)
+  const bodyRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!live) return
     const t0 = Date.now()
     const id = window.setInterval(() => setSecs((Date.now() - t0) / 1000), 200)
     return () => window.clearInterval(id)
   }, [live])
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el || !open) return
+    el.scrollTop = el.scrollHeight
+  }, [children, open])
   const hasBody = children != null && children !== false && children !== ''
   const label = live ? `思考了 ${secs.toFixed(1)}s` : title
   return (
@@ -165,14 +170,20 @@ function ThinkRail({
         <span className="c-think__title">{label}</span>
         {hasBody && <span className="c-think__toggle">{open ? '收起' : '展开'}</span>}
       </button>
-      {open && hasBody && <div className="c-think__body">{children}</div>}
+      {open && hasBody && (
+        <div className="c-think__body" ref={bodyRef}>
+          {children}
+        </div>
+      )}
     </div>
   )
 }
 
 function ReasoningCard({ text, live }: { text: string; live?: boolean }) {
+  const tail = text.trim().split('\n').filter(Boolean).at(-1) ?? ''
+  const title = tail ? `思考 · ${tail}` : '思考'
   return (
-    <ThinkRail live={live} title="思考" defaultOpen={!!live}>
+    <ThinkRail live={live} title={title}>
       {text}
     </ThinkRail>
   )
@@ -183,7 +194,7 @@ function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; re
   const detail = current ? stepText(current.tool, current.target) : ''
   const has = !!reasoning || steps.length > 0
   return (
-    <ThinkRail live title={detail || (has ? '思考' : '正在思考…')} defaultOpen={has}>
+    <ThinkRail live title={detail || (has ? '思考' : '正在思考…')}>
       {has ? (
         <>
           {reasoning}
@@ -206,7 +217,8 @@ export default function AgentView(p: Props) {
   const [toolGrants, setToolGrants] = useState<{ always: string[]; done: string[] }>({ always: [], done: [] })
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const pinnedToBottom = useRef(true)
+  const stickToBottom = useRef(true)
+  const programmaticScroll = useRef(false)
 
   // 右键菜单 handler
   const handleContextMenu = (e: React.MouseEvent, msg: Message) => {
@@ -237,20 +249,43 @@ export default function AgentView(p: Props) {
     closeContextMenu()
   }
 
-  // 跟踪用户是否在底部（决定是否自动跟随滚动）
+  // 只有用户自己把滚动条拉开，才停止跟随。程序把视口推到底时不算。
   const handleScroll = () => {
+    if (programmaticScroll.current) return
     const el = scrollRef.current
     if (!el) return
-    const threshold = 40 // px，距底部多少内算「在底部」
-    pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }
+
+  const followBottom = () => {
+    const el = scrollRef.current
+    if (!el || !stickToBottom.current) return
+    programmaticScroll.current = true
+    el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => {
+      programmaticScroll.current = false
+    })
   }
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el && pinnedToBottom.current) {
-      el.scrollTop = el.scrollHeight
+    const content = el?.firstElementChild
+    if (!el || !content) return
+    const ro = new ResizeObserver(() => followBottom())
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [p.agent?.id])
+
+  const seenAgent = useRef(p.agent?.id)
+  useEffect(() => {
+    if (seenAgent.current !== p.agent?.id) {
+      seenAgent.current = p.agent?.id
+      stickToBottom.current = true
     }
-  }, [p.agent?.messages.length, p.streaming, p.error?.text, p.error?.after])
+    const last = p.agent?.messages?.[p.agent.messages.length - 1]
+    if (last?.role === 'user') stickToBottom.current = true
+    followBottom()
+  }, [p.agent?.id, p.agent?.messages.length, p.streaming, p.reasoning, p.error?.text, p.error?.after])
 
   useEffect(() => {
     taRef.current?.focus()
@@ -397,6 +432,8 @@ export default function AgentView(p: Props) {
 
   const agent = p.agent
   const running = agent.status === 'running'
+  const turnLive = running || agent.status === 'queued' || agent.status === 'blocked' || !!p.streaming
+  const hasDraft = !!input.trim()
   const rawMessages = p.agent.messages ?? []
   const visible = presentTranscript(rawMessages)
   // 错误记的是出错时的原始条数。按同一套折叠规则数出可见气泡，红条跟在那一截后面。
@@ -609,7 +646,9 @@ export default function AgentView(p: Props) {
             placeholder={
               mode === 'shell'
                 ? '输入 shell 命令，回车执行'
-                : `给 ${p.agent.name} 发消息…`
+                : turnLive
+                  ? `这一轮还在进行。写下一句会排到后面，或点停止打断`
+                  : `给 ${p.agent.name} 发消息…`
             }
             minRows={1}
             maxRows={6}
@@ -710,12 +749,17 @@ export default function AgentView(p: Props) {
               </div>
             </div>
 
+            {turnLive && (
+              <button className="c-btn c-btn--danger c-btn--sm" onClick={p.onStop}>
+                停止
+              </button>
+            )}
             <button
               className="c-btn c-btn--primary c-btn--sm"
               onClick={submit}
-              disabled={!input.trim()}
+              disabled={!hasDraft}
             >
-              {mode === 'shell' ? '执行' : '发送'}
+              {mode === 'shell' ? '执行' : turnLive ? '排队' : '发送'}
             </button>
           </div>
         </div>
@@ -727,9 +771,22 @@ export default function AgentView(p: Props) {
             marginTop: 6,
             fontSize: 'var(--text-xs)',
             color: 'var(--text-disabled)',
+            justifyContent: 'space-between',
+            alignItems: 'baseline',
           }}
         >
-          <span>Enter 发送 · Shift+Enter 换行</span>
+          <span>
+            {turnLive
+              ? '这一轮还在进行。停止会打断它，并清掉还没开始的排队；写好再点排队，会等这一轮结束。'
+              : 'Enter 发送 · Shift+Enter 换行'}
+          </span>
+          <ContextMeter
+            messages={rawMessages}
+            streaming={p.streaming}
+            usage={p.tokenUsage}
+            provider={p.agent.llm?.provider || p.connection?.provider || ''}
+            contextWindow={p.agent.llm?.contextWindow}
+          />
         </div>
       </div>
 
@@ -1436,6 +1493,38 @@ function renderAnchors(text: string, onOpen?: (path: string, line: number) => vo
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return `${n}`
+}
+
+function ContextMeter({
+  messages,
+  streaming,
+  usage,
+  provider,
+  contextWindow,
+}: {
+  messages: { content?: string }[]
+  streaming?: string
+  usage?: { in: number; out: number; lastIn?: number }
+  provider: string
+  contextWindow?: number
+}) {
+  const meter = contextMeter({ messages, streaming, usage, provider, contextWindow })
+  const ratio = meter.limit > 0 ? meter.used / meter.limit : 0
+  const hot = ratio >= 0.85
+  return (
+    <span
+      title={
+        meter.estimated
+          ? '模型还没返回用量，这是按文本粗估的上下文。消耗会在接口带回 token 后出现。'
+          : '上下文是最近一次请求装进窗口的量。消耗是累计输入加输出。'
+      }
+      style={{ color: hot ? 'var(--warning)' : 'var(--text-tertiary)', whiteSpace: 'nowrap' }}
+    >
+      上下文 {meter.estimated ? '约 ' : ''}
+      {formatTokens(meter.used)} / {formatTokens(meter.limit)}
+      {meter.spent > 0 ? ` · 消耗 ${formatTokens(meter.spent)}` : ''}
+    </span>
+  )
 }
 
 function SecretText({ text }: { text: string }) {

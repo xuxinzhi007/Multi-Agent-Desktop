@@ -39,6 +39,9 @@ func TestCreateAgentCopiesParent(t *testing.T) {
 	if b.WorkDir != "/tmp/work" {
 		t.Fatalf("workdir=%s", b.WorkDir)
 	}
+	if b.ParentID != a.ID {
+		t.Fatalf("parent=%q, want %s", b.ParentID, a.ID)
+	}
 
 	again := (&createAgentTool{m: m, fromID: a.ID}).Execute(context.Background(), []byte(`{"name":"帮手"}`))
 	if again.Status == tool.StatusOK {
