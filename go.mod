@@ -2,7 +2,10 @@ module multi-agent-desktop
 
 go 1.27.3
 
-require github.com/egoist/mygo v0.9.0
+require (
+	github.com/egoist/mygo v0.9.0
+	github.com/gorilla/websocket v1.5.0
+)
 
 require (
 	github.com/ebitengine/purego v0.11.1 // indirect

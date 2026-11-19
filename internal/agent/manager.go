@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"multi-agent-desktop/internal/cli"
 	"multi-agent-desktop/internal/llm"
 )
 
@@ -36,7 +35,7 @@ type Agent struct {
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
 	QueueLen  int           `json:"queueLen"`            // 排队中的消息数
-	Backend   string        `json:"backend"`             // mock / claude / codex
+	Backend   string        `json:"backend"`             // loop / mock。旧的 claude / codex 读入后按 loop 跑
 	WorkDir   string        `json:"workDir,omitempty"`   // 会话级工作目录，空则回落 Manager.workDir
 	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`    // 会话级模型配置，nil 则回落 Manager.llmCfg
 	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
@@ -52,6 +51,8 @@ type Agent struct {
 	turnKind   string `json:"-"` // ok / error / stopped，本轮结束原因，给等待方读
 	turnReason string `json:"-"`
 	workerGone bool   `json:"-"`
+	// BusyPlace 非空表示这一轮是在答某个群，值是群名。不落盘。
+	BusyPlace string `json:"-"`
 
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
@@ -273,7 +274,7 @@ func (m *Manager) Load() error {
 			Status:        StatusIdle,
 			CreatedAt:     saved.CreatedAt,
 			Messages:      saved.Messages,
-			Backend:       saved.Backend,
+			Backend:       canonicalBackend(saved.Backend),
 			WorkDir:       saved.WorkDir,
 			LLMCfg:        saved.LLMCfg,
 			Knowledge:     append([]string(nil), saved.Knowledge...),
@@ -323,11 +324,11 @@ func (m *Manager) LLMConfig() llm.Config {
 	return m.llmCfg
 }
 
-// LLMConfigFor 返回某个会话的生效模型配置（会话级优先，回落全局）。
+// LLMConfigFor 返回这个会话自己的模型。没有该会话，或它还没选模型，就返回空配置。
 func (m *Manager) LLMConfigFor(id string) llm.Config {
 	a, ok := m.Get(id)
 	if !ok {
-		return m.LLMConfig()
+		return llm.Config{}
 	}
 	return a.EffectiveLLM(m)
 }
@@ -353,8 +354,7 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 		return fmt.Errorf("agent %s not found", id)
 	}
 	a.mu.Lock()
-	// 零值配置表示「清除会话级设置，回落到全局」。
-	// 用 nil 而不是指向零值的指针，让 EffectiveLLM 的回落逻辑生效。
+	// 零值配置表示这个会话还没选模型。用 nil，避免留下一份空配置。
 	if cfg.Provider == "" {
 		a.LLMCfg = nil
 	} else {
@@ -552,8 +552,12 @@ type PromptRequest struct {
 	AgentID string `json:"agentId"`
 	Text    string `json:"text"`
 	// ChannelID 非空表示这条 prompt 来自群聊，回复要写回该频道。
-	// 不再依赖从文本里猜 [channel:xxx] 标记。
+	// 这一轮不写入本会话的 Messages。
 	ChannelID string `json:"channelId,omitempty"`
+	// ChannelName 是群名，会话上用它写「正在某个群里回答」。
+	ChannelName string `json:"channelName,omitempty"`
+	// Context 是这一轮给模型看的群上文。不写入会话记录。
+	Context string `json:"-"`
 	// Done 在这条消息执行结束后关闭。ask_agent 用它等待对方回复。
 	Done chan struct{} `json:"-"`
 	// outcome 非空时，结束原因写在这里再关闭 Done。只关闭 Done 时，等待方分不清正常回复和异常退出。
@@ -589,6 +593,23 @@ func complete(req PromptRequest, text, err string) {
 	if req.Done != nil {
 		close(req.Done)
 	}
+}
+
+// RunPrompt 入队并等到这条消息结束。不写 ChannelID，回复留在该会话里。
+func (m *Manager) RunPrompt(ctx context.Context, agentID, text string) (string, error) {
+	out := &promptOutcome{done: make(chan struct{})}
+	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Done: out.done, outcome: out}); err != nil {
+		return "", err
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-out.done:
+	}
+	if out.err != "" {
+		return "", fmt.Errorf("%s", out.err)
+	}
+	return out.text, nil
 }
 
 // Prompt 给某个 agent 发一条消息。如果 agent 空闲立即执行，否则排队。
@@ -629,7 +650,7 @@ func (m *Manager) Stop(id string) bool {
 		return false
 	}
 	a.StopAll()
-	m.emit("agent.status", map[string]any{"id": id, "status": StatusIdle})
+	m.emit("agent.status", a.statusPayload(StatusIdle))
 	return true
 }
 
@@ -645,9 +666,10 @@ func (m *Manager) Route(fromId, toId, text string) error {
 		return fmt.Errorf("agent %s not found", toId)
 	}
 
+	line := fmt.Sprintf("%s转给%s：%s", from.Name, to.Name, text)
 	note := llm.Message{
 		Role:      "assistant",
-		Content:   fmt.Sprintf("已转给「%s」：%s", to.Name, text),
+		Content:   line,
 		Timestamp: time.Now().Unix(),
 	}
 	from.mu.Lock()
@@ -658,7 +680,7 @@ func (m *Manager) Route(fromId, toId, text string) error {
 
 	return m.Prompt(context.Background(), PromptRequest{
 		AgentID: toId,
-		Text:    fmt.Sprintf("来自会话「%s」的转发，只针对下面这段内容回复：\n%s", from.Name, text),
+		Text:    line,
 	})
 }
 
@@ -771,11 +793,16 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	}
 	a.turnKind = ""
 	a.turnReason = ""
-	a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
+	channelTurn := req.ChannelID != ""
+	if channelTurn {
+		a.BusyPlace = req.ChannelName
+	}
+	if !channelTurn {
+		a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
+	}
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
-	a.QueuedAt = 0 // 已经开始执行，不再处于排队
-	// 本轮指标：开始时间与计数器，供悬浮岛显示，不依赖前端猜
+	a.QueuedAt = 0
 	a.StartedAt = time.Now().Unix()
 	a.Chars = 0
 	a.LastTool = ""
@@ -783,25 +810,25 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	a.cancel = cancel
 	a.mu.Unlock()
 
-	m.emit("agent.status", map[string]any{"id": a.ID, "status": StatusRunning})
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
-	m.goSave()
+	m.emit("agent.status", a.statusPayload(StatusRunning))
+	if !channelTurn {
+		m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
+		m.goSave()
+	}
 
-	// 根据 backend 选择执行方式
-	backend := a.Backend
-	if backend == "" {
-		backend = "loop"
+	// 空 backend 和旧的 claude / codex 都进 loop。mock 仍走内置假回复。
+	backend := canonicalBackend(a.Backend)
+	if backend != a.Backend {
+		a.mu.Lock()
+		a.Backend = backend
+		a.mu.Unlock()
 	}
 
 	switch backend {
 	case "loop":
-		// 自持循环：停止、预算、去重、检查点都在进程内可控。
-		// CLI 的两种 backend 暂时保留，用来做新旧路径的对照。
-		a.executeLoop(m, runCtx, req.Text, req.ChannelID)
-	case "claude", "codex":
-		a.executeCLI(m, runCtx, backend, req.Text, req.ChannelID)
+		a.executeLoop(m, runCtx, req.Text, req.ChannelID, req.Context)
 	default:
-		a.executeMock(m, runCtx, req.Text, req.ChannelID)
+		a.executeMock(m, runCtx, req.Text, req.ChannelID, req.Context)
 	}
 
 	cancel()
@@ -809,13 +836,19 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 }
 
 // executeMock 用内置 mock LLM 执行。
-func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID string) {
+func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID, contextText string) {
 	// 每轮开始时对配置取一次快照：中途改配置只影响下一轮。
 	cfg := a.EffectiveLLM(m)
 	client := llm.New(cfg)
 
 	a.mu.Lock()
 	history := append([]llm.Message(nil), a.Messages...)
+	if channelID != "" {
+		if contextText != "" {
+			history = append(history, llm.Message{Role: "system", Content: contextText})
+		}
+		history = append(history, llm.Message{Role: "user", Content: text, Timestamp: time.Now().Unix()})
+	}
 	a.mu.Unlock()
 
 	stream, err := client.Stream(runCtx, history)
@@ -836,7 +869,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID 
 			a.mu.Lock()
 			a.Chars += len(chunk.Delta)
 			a.mu.Unlock()
-			m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta})
+			m.emit("agent.delta", map[string]any{"id": a.ID, "delta": chunk.Delta, "channelId": channelID})
 		}
 		if chunk.TokensIn > 0 {
 			tokensIn = chunk.TokensIn
@@ -852,6 +885,17 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID 
 		return
 	}
 
+	if channelID != "" {
+		m.emit("agent.channel.reply", map[string]any{
+			"channelId": channelID,
+			"agentId":   a.ID,
+			"agentName": a.Name,
+			"text":      full,
+		})
+		a.setIdleOrQueued(m)
+		return
+	}
+
 	a.mu.Lock()
 	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: full, Timestamp: time.Now().Unix()})
 	a.mu.Unlock()
@@ -863,173 +907,53 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID 
 		"tokensOut": tokensOut,
 	})
 
-	// 检查是否是频道消息，如果是则路由回频道
-	if channelID != "" {
-		m.emit("agent.channel.reply", map[string]any{
-			"channelId": channelID,
-			"agentId":   a.ID,
-			"agentName": a.Name,
-			"text":      full,
-		})
-	}
-
 	a.setIdleOrQueued(m)
 }
 
-// executeCLI 用外部 CLI agent 执行。
-func (a *Agent) executeCLI(m *Manager, runCtx context.Context, backend, text, channelID string) {
-	runner, err := cli.NewCLIRunner(backend, a.EffectiveWorkDir(m), a.EffectiveLLM(m).Model)
-	if err != nil {
-		m.finish(a, StatusError, err.Error())
-		return
+func canonicalBackend(b string) string {
+	switch b {
+	case "", "loop", "claude", "codex":
+		return "loop"
+	default:
+		return b
 	}
-
-	if !runner.Available() {
-		m.finish(a, StatusError, fmt.Sprintf("%s CLI not found in PATH", runner.Name()))
-		return
-	}
-
-	// 组装 Request：system（知识库）+ history + prompt
-	a.mu.Lock()
-	history := make([]cli.Message, 0, len(a.Messages))
-	for _, m := range a.Messages {
-		history = append(history, cli.Message{Role: m.Role, Content: m.Content})
-	}
-	knowledgeIDs := append([]string(nil), a.Knowledge...)
-	a.mu.Unlock()
-
-	systemPrompt := ""
-	if m.knowledge != nil && len(knowledgeIDs) > 0 {
-		block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 0)
-		systemPrompt = block
-	}
-
-	req := cli.Request{
-		System:  systemPrompt,
-		History: history,
-		Prompt:  text,
-	}
-
-	events, err := runner.Run(runCtx, req)
-	if err != nil {
-		m.finish(a, StatusError, fmt.Sprintf("%s: %v", backend, err))
-		return
-	}
-
-	var fullText string
-	var toolCalls []string
-
-	for ev := range events {
-		if runCtx.Err() != nil {
-			a.noteStop("已停止")
-			a.setIdleOrQueued(m)
-			return
-		}
-
-		switch ev.Type {
-		case "assistant":
-			if ev.Text != "" {
-				fullText += ev.Text
-				a.mu.Lock()
-				a.Chars += len(ev.Text)
-				a.mu.Unlock()
-				m.emit("agent.delta", map[string]any{"id": a.ID, "delta": ev.Text})
-			}
-
-		case "tool_use":
-			toolInfo := fmt.Sprintf("[%s]", ev.Tool)
-			if ev.ToolInput != "" {
-				toolInfo += " " + ev.ToolInput
-			}
-			toolCalls = append(toolCalls, toolInfo)
-			a.mu.Lock()
-			a.LastTool = ev.Tool
-			a.mu.Unlock()
-			m.emit("tool.start", map[string]any{
-				"id":      fmt.Sprintf("%s-%d", a.ID, len(toolCalls)),
-				"agentId": a.ID,
-				"tool":    ev.Tool,
-				"target":  ev.ToolInput,
-			})
-
-		case "error":
-			m.finish(a, StatusError, ev.Error)
-			return
-
-		case "result":
-			if ev.Text != "" {
-				fullText = ev.Text
-			}
-		}
-	}
-
-	if runCtx.Err() != nil {
-		a.noteStop("已停止")
-		a.setIdleOrQueued(m)
-		return
-	}
-
-	// 附加工具调用记录
-	if len(toolCalls) > 0 {
-		fullText += "\n\n--- 工具调用 ---\n" + strings.Join(toolCalls, "\n")
-	}
-
-	a.mu.Lock()
-	a.Messages = append(a.Messages, llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()})
-	a.mu.Unlock()
-
-	m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "assistant", Content: fullText, Timestamp: time.Now().Unix()}})
-
-	// 检查是否是频道消息，如果是则路由回频道
-	if channelID != "" {
-		m.emit("agent.channel.reply", map[string]any{
-			"channelId": channelID,
-			"agentId":   a.ID,
-			"agentName": a.Name,
-			"text":      fullText,
-		})
-	}
-
-	a.setIdleOrQueued(m)
 }
 
-// EffectiveWorkDir 返回会话级工作目录，未设置时回落到全局默认。
+// EffectiveWorkDir 只返回这个会话自己的文件夹。没选就是空，不借用别的会话或一份默认目录。
 func (a *Agent) EffectiveWorkDir(m *Manager) string {
 	a.mu.Lock()
 	dir := a.WorkDir
 	a.mu.Unlock()
-	if dir != "" {
-		return dir
-	}
-	return m.workDir
+	return dir
 }
 
-// EffectiveLLM 拼出这一轮真正要发出去的配置。
-// 连接（地址、Key）在设置里；模型在会话上。
-// 会话没写的字段沿用同一提供方的连接信息，空模型不能把连接上的模型盖掉。
+// EffectiveLLM 只使用这个会话自己选的模型。
+// 地址和 Key 从该厂商已保存的连接里补，不从另一份「当前模型」里拿名字。
 func (a *Agent) EffectiveLLM(m *Manager) llm.Config {
-	base := m.LLMConfig()
 	a.mu.Lock()
 	cfg := a.LLMCfg
 	a.mu.Unlock()
-	if cfg == nil {
-		return fillSavedCreds(m, base)
+	if cfg == nil || cfg.Provider == "" {
+		return llm.Config{}
 	}
 	out := *cfg
-	same := out.Provider == "" || out.Provider == base.Provider
-	if out.Provider == "" {
-		out.Provider = base.Provider
+	saved := fillSavedCreds(m, out)
+	if saved.BaseURL != "" {
+		out.BaseURL = saved.BaseURL
 	}
-	if same && out.BaseURL == "" {
-		out.BaseURL = base.BaseURL
+	if saved.APIKey != "" {
+		out.APIKey = saved.APIKey
 	}
-	if same && out.APIKey == "" {
-		out.APIKey = base.APIKey
+	base := m.LLMConfig()
+	if out.Provider == base.Provider {
+		if out.BaseURL == "" {
+			out.BaseURL = base.BaseURL
+		}
+		if out.APIKey == "" {
+			out.APIKey = base.APIKey
+		}
 	}
-	if same && out.Model == "" {
-		out.Model = base.Model
-	}
-	return fillSavedCreds(m, out)
+	return out
 }
 
 func fillSavedCreds(m *Manager, cfg llm.Config) llm.Config {
@@ -1056,18 +980,21 @@ func (a *Agent) AppendSystemMessage(content string) {
 // setIdleOrQueued 设置状态为 idle 或 queued（还有排队消息）。
 func (a *Agent) setIdleOrQueued(m *Manager) {
 	a.mu.Lock()
+	a.BusyPlace = ""
 	a.Status = StatusIdle
 	a.QueueLen = len(a.queue)
 	if len(a.queue) > 0 {
 		a.Status = StatusQueued
 	}
+	st := a.Status
 	a.cancel = nil
 	a.mu.Unlock()
-	m.emit("agent.status", map[string]any{"id": a.ID, "status": a.Status})
+	m.emit("agent.status", a.statusPayload(st))
 }
 
 func (m *Manager) finish(a *Agent, st Status, msg string) {
 	a.mu.Lock()
+	a.BusyPlace = ""
 	a.Status = st
 	a.cancel = nil
 	if st == StatusError {
@@ -1079,7 +1006,7 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 	}
 	a.mu.Unlock()
 
-	m.emit("agent.status", map[string]any{"id": a.ID, "status": st})
+	m.emit("agent.status", a.statusPayload(st))
 	if msg != "" {
 		m.emit("agent.error", map[string]any{"id": a.ID, "error": msg})
 	}
@@ -1102,10 +1029,21 @@ func (a *Agent) StopAll() {
 	a.stop()
 	a.failQueued("已停止")
 	a.mu.Lock()
+	a.BusyPlace = ""
 	if a.Status != StatusIdle {
 		a.Status = StatusIdle
 	}
 	a.mu.Unlock()
+}
+
+func (a *Agent) statusPayload(st Status) map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ev := map[string]any{"id": a.ID, "status": st}
+	if a.BusyPlace != "" {
+		ev["busy"] = a.BusyPlace
+	}
+	return ev
 }
 
 func (a *Agent) enqueue(req PromptRequest) error {
@@ -1196,6 +1134,7 @@ func (a *Agent) Snapshot() *Agent {
 		LastError:     a.LastError,
 		turnKind:      a.turnKind,
 		turnReason:    a.turnReason,
+		BusyPlace:     a.BusyPlace,
 	}
 }
 
@@ -1214,7 +1153,7 @@ func (a *Agent) viewMap() map[string]any {
 		"queueLen":      a.QueueLen,
 		"backend":       a.Backend,
 		"workDir":       a.WorkDir,
-		"llmCfg":        a.LLMCfg, // nil 时前端收到 null，表示沿用全局默认
+		"llmCfg":        a.LLMCfg, // nil 表示这个会话还没选模型
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,
 	}

@@ -11,6 +11,7 @@ type Props = {
   streaming?: Record<string, string>
   /** text 已含 @名字；mentions 是结构化的被点名成员名列表 */
   onSend: (text: string, mentions: string[]) => void
+  onSetSpeaker?: (agentId: string) => void
   onDelete?: () => void
 }
 
@@ -18,7 +19,7 @@ type Props = {
  * ChannelView 是「群聊」视图：一个频道里的消息对所有成员广播。
  * 与 AgentView 的区别是消息带发言人身份，且成员都是 agent。
  */
-export default function ChannelView({ channel, agents, streaming, onSend, onDelete }: Props) {
+export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete }: Props) {
   const [input, setInput] = useState('')
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
@@ -56,11 +57,14 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
 
   const members = agents.filter((a) => (channel.members ?? []).includes(a.id))
   // 用全部 agent 而非仅成员：历史消息里被 @ 的人可能已退出频道
-  const mentionTargets: MentionTarget[] = agents.map((a) => ({
-    id: a.id,
-    name: a.name,
-    color: a.color,
-  }))
+  const mentionTargets: MentionTarget[] = [
+    { id: 'all', name: '所有人', color: 'var(--accent-bright)' },
+    ...agents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      color: a.color,
+    })),
+  ]
   const memberById = (id: string) => agents.find((a) => a.id === id)
 
   const submit = () => {
@@ -133,9 +137,42 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
             {channel.name}
           </div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-            {members.length} 个成员 · 广播模式
+            {members.length} 个成员
           </div>
         </div>
+
+        <label
+          style={{
+            marginLeft: 12,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-tertiary)',
+          }}
+        >
+          默认接话
+          <select
+            aria-label="默认接话人"
+            value={channel.speaker ?? ''}
+            onChange={(e) => onSetSpeaker?.(e.target.value)}
+            style={{
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-primary)',
+              background: 'var(--bg-inset)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '2px 6px',
+            }}
+          >
+            <option value="">未指定</option>
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
 
         {/* 成员头像 */}
         <div style={{ display: 'flex', marginLeft: 12 }}>
@@ -184,7 +221,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onDele
           <div className="c-empty" style={{ paddingTop: 'var(--space-6)' }}>
             频道已创建，发第一条消息吧
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
-              消息会广播给所有成员 Agent，它们并行回复
+              没 @ 人时，由默认接话人回答。@ 谁谁回答，@所有人每人一次。
             </div>
           </div>
         )}

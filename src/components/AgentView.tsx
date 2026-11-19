@@ -405,8 +405,8 @@ export default function AgentView(p: Props) {
     ? presentTranscript(rawMessages.slice(0, p.error.after)).length
     : visible.length
   const tone = agentTone((p.agents ?? []).findIndex((a) => a.id === agent.id))
-  const modelName = agent.llm?.model || p.connection?.model || ''
-  const place = workLabel(agent.workDir || p.workDir)
+  const modelName = agent.llm?.model || ''
+  const place = workLabel(agent.workDir)
   const head = {
     tone,
     name: agent.name,
@@ -486,7 +486,7 @@ export default function AgentView(p: Props) {
               maxWidth: 300,
             }}
           >
-            {p.agent.role}
+            {p.agent.busy ? `正在${p.agent.busy}里回答` : p.agent.role}
           </div>
         </div>
 
@@ -550,7 +550,7 @@ export default function AgentView(p: Props) {
 
         {visible.slice(errorAt).map((m, i) => renderMsg(m, errorAt + i))}
 
-        {p.streaming && (
+        {p.streaming && !p.agent.busy && (
           <Bubble
             m={{ role: 'assistant', content: p.streaming }}
             {...head}
@@ -561,7 +561,8 @@ export default function AgentView(p: Props) {
           />
         )}
 
-        {running && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
+        {running && !p.agent.busy && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
+        {!!p.streaming && !p.agent.busy && (p.steps?.length ?? 0) > 0 && <Thinking steps={p.steps ?? []} />}
 
         {pendingTools.map((s, i) => (
           <ApprovalCard
@@ -686,7 +687,6 @@ export default function AgentView(p: Props) {
                     },
                   })
                 }}
-                preferred={p.connection?.model}
               />
               <ThinkingSwitch
                 provider={p.agent.llm?.provider || p.connection?.provider || ''}
@@ -706,7 +706,7 @@ export default function AgentView(p: Props) {
                 }}
               />
               <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
-                <WorkDirChip agent={p.agent} fallbackWorkDir={p.workDir} onConfig={p.onConfig} />
+                <WorkDirChip agent={p.agent} onConfig={p.onConfig} />
               </div>
             </div>
 
@@ -828,16 +828,14 @@ export default function AgentView(p: Props) {
  */
 function WorkDirChip({
   agent,
-  fallbackWorkDir,
   onConfig,
 }: {
   agent: Agent
-  fallbackWorkDir: string
   onConfig: (patch: { workDir?: string; llm?: Config }) => void
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
-  const effective = agent.workDir || fallbackWorkDir
+  const effective = agent.workDir
 
   // 切换会话时收起，避免弹层残留在新会话上
   useEffect(() => {
@@ -886,9 +884,9 @@ function WorkDirChip({
               padding: 12,
             }}
           >
-            <div style={popoverLabel}>本会话工作目录</div>
+            <div style={popoverLabel}>这个会话的文件夹</div>
             <DirectoryPicker value={draft} onChange={setDraft} />
-            <div style={hintStyle}>只影响当前会话的 CLI 与 shell，不改其他 agent</div>
+            <div style={hintStyle}>只给这个会话用。读代码、跑命令都在这个目录里。</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
               <button
                 className="c-btn c-btn--primary c-btn--sm"
@@ -900,16 +898,6 @@ function WorkDirChip({
                 }}
               >
                 应用
-              </button>
-              <button
-                className="c-btn c-btn--ghost c-btn--sm"
-                onClick={() => {
-                  onConfig({ workDir: '' })
-                  setOpen(false)
-                }}
-                title="回落到全局默认目录"
-              >
-                跟随全局
               </button>
             </div>
           </div>

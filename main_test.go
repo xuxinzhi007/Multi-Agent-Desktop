@@ -76,14 +76,14 @@ func TestListModelsForUsesSavedCredentials(t *testing.T) {
 		wantInErr string
 	}{
 		{
-			name:      "mock 不需要凭据",
+			name:      "mock 不再是可选模型",
 			globalCfg: llm.Config{Provider: "mock"},
-			want:      []string{"mock"},
+			wantErr:   llm.ErrNotConfigured,
 		},
 		{
-			name:      "空 provider 走全局 mock",
-			globalCfg: llm.Config{Provider: "mock"},
-			want:      []string{"mock"},
+			name:      "空 provider 不是模型",
+			globalCfg: llm.Config{},
+			wantErr:   llm.ErrNotConfigured,
 		},
 		{
 			name:      "provider 已配好但缺 BaseURL",
@@ -101,8 +101,13 @@ func TestListModelsForUsesSavedCredentials(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mgr := agent.NewManager(tc.globalCfg, func(string, any) {})
+			mgr := agent.NewManager(llm.Config{}, func(string, any) {})
 			mgr.Create("a1", "A1", "r")
+			if tc.globalCfg.Provider != "" {
+				if err := mgr.SetAgentLLM("a1", tc.globalCfg); err != nil {
+					t.Fatal(err)
+				}
+			}
 			s := &API{mgr: mgr, channels: channel.NewManager(), win: &mygo.Window{}}
 
 			models, err := s.ListModelsFor(context.Background(), "a1", tc.provider)
@@ -163,13 +168,11 @@ func TestProvidersStatus(t *testing.T) {
 		byID[st.ID] = st
 	}
 
-	if !byID["mock"].Ready {
-		t.Error("mock 应当始终可用")
-	}
-	// 本地模型的就绪状态取决于服务有没有起，这里只断言条目存在，
-	// 不能断言 Ready —— 那会让测试依赖本机环境。
 	if _, ok := byID["llamacpp"]; !ok {
 		t.Error("列表里必须有本地模型这一项，否则界面上看不到它")
+	}
+	if _, ok := byID["mock"]; ok {
+		t.Error("mock 已下线，不该再出现在列表里")
 	}
 	if byID["ollama"].ID != "" {
 		t.Error("ollama 已下线，不该再出现在列表里")
@@ -248,9 +251,9 @@ func TestAPISessionConfig(t *testing.T) {
 	if v1.WorkDir != "/tmp/a1" {
 		t.Errorf("SetAgentWorkDir(%q): view.WorkDir = %q, want %q", a1.ID, v1.WorkDir, "/tmp/a1")
 	}
-	if v2, _ := s.mgr.Get(a2.ID); v2.EffectiveWorkDir(s.mgr) != "/global" {
-		t.Errorf("SetAgentWorkDir(%q): sibling a2 WorkDir = %q, want fallback %q",
-			a1.ID, v2.EffectiveWorkDir(s.mgr), "/global")
+	if v2, _ := s.mgr.Get(a2.ID); v2.EffectiveWorkDir(s.mgr) != "" {
+		t.Errorf("SetAgentWorkDir(%q): sibling a2 WorkDir = %q, want empty",
+			a1.ID, v2.EffectiveWorkDir(s.mgr))
 	}
 
 	cfg := LLMConfig{Provider: "openai", BaseURL: "http://x", Model: "agent-m"}
@@ -264,8 +267,8 @@ func TestAPISessionConfig(t *testing.T) {
 	if got := s.GetAgentConfig(a1.ID); got.Model != "agent-m" {
 		t.Errorf("GetAgentConfig(%q).Model = %q, want %q", a1.ID, got.Model, "agent-m")
 	}
-	if got := s.GetAgentConfig(a2.ID); got.Model != "global-m" {
-		t.Errorf("GetAgentConfig(%q).Model = %q, want global fallback %q", a2.ID, got.Model, "global-m")
+	if got := s.GetAgentConfig(a2.ID); got.Model != "" || got.Provider != "" {
+		t.Errorf("GetAgentConfig(%q) = %+v, want empty", a2.ID, got)
 	}
 
 	// 对不存在的会话必须返回错误，不能 panic。
@@ -402,6 +405,9 @@ func TestSendToChannelPartialFailureKeepsOthers(t *testing.T) {
 	healthy := s.CreateAgent(CreateAgentRequest{Name: "Healthy", Role: "r"})
 
 	ch := s.CreateChannel("g", []string{gone.ID, healthy.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, healthy.ID); err != nil {
+		t.Fatalf("SetSpeaker: %v", err)
+	}
 	// 直接删 manager 里的 agent，但保留频道成员（模拟"成员表与 agent 表不一致"），
 	// 这样 SendToChannel 的 Prompt 会稳定返回 "agent ... not found"。
 	if ok := s.mgr.Delete(gone.ID); !ok {
@@ -428,19 +434,37 @@ func TestSendToChannelPartialFailureKeepsOthers(t *testing.T) {
 		t.Errorf("SendToChannel(%q) with a failing member: len(Messages) = %d, want 1", ch.ID, len(got.Messages))
 	}
 
-	// 健康的成员必须仍然收到消息（错误被合并而非提前返回）。
-	deadline := time.Now().Add(3 * time.Second)
+	// 健康的成员必须仍然被投递。群里的原文不写进他的私聊。
+	var delivered bool
+	for _, d := range got.Messages[0].Deliveries {
+		if d.AgentID == healthy.ID && d.Status == "delivered" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Fatalf("healthy delivery = %+v, want delivered", got.Messages[0].Deliveries)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	saw := false
 	for time.Now().Before(deadline) {
 		a, _ := s.mgr.Get(healthy.ID)
-		msgs := messagesOf(a)
-		if len(msgs) > 1 && msgs[len(msgs)-1].Role == "user" {
+		sn := a.Snapshot()
+		if sn.Status == agent.StatusRunning || sn.BusyPlace != "" {
+			saw = true
+		}
+		if sn.Status == agent.StatusError || (saw && sn.Status == agent.StatusIdle) {
+			for _, m := range sn.Messages {
+				if strings.Contains(m.Content, "hi") || strings.Contains(m.Content, "群聊上下文") {
+					t.Fatalf("群消息写进了私聊：%q", m.Content)
+				}
+			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	a, _ := s.mgr.Get(healthy.ID)
-	t.Fatalf("SendToChannel(%q): healthy agent %q never received the prompt (Messages=%+v)",
-		ch.ID, healthy.ID, messagesOf(a))
+	t.Fatalf("SendToChannel(%q): healthy agent %q did not finish the channel turn (status=%s messages=%+v)",
+		ch.ID, healthy.ID, a.Snapshot().Status, messagesOf(a))
 }
 
 // TC-028 —— 删 agent 后频道成员被清理，List 中也不再有该 agent。
@@ -533,7 +557,7 @@ func TestToAgentCreatedMapsSessionConfig(t *testing.T) {
 	}
 }
 
-// nil llmCfg 必须映射成 nil（前端据此显示"跟随全局"）。
+// nil llmCfg 必须映射成 nil（这个会话还没选模型）。
 func TestToAgentCreatedNilLLM(t *testing.T) {
 	v, ok := toAgentCreated(map[string]any{"id": "a1", "llmCfg": nil, "messages": []llm.Message{}})
 	if !ok {
@@ -604,6 +628,9 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 		raw.Backend = "mock"
 	}
 	ch := s.CreateChannel("g", []string{a.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, a.ID); err != nil {
+		t.Fatalf("SetSpeaker: %v", err)
+	}
 
 	if got := len(s.ListChannels()); got != 1 {
 		t.Fatalf("CreateChannel: len(ListChannels()) = %d, want 1", got)
@@ -623,17 +650,23 @@ func TestSendToChannelDoesNotDuplicateChannel(t *testing.T) {
 		t.Errorf("SendToChannel(%q): Messages[0].FromID = %q, want %q", ch.ID, got.Messages[0].FromID, "user")
 	}
 
-	// 成员的回复进入它自己的对话历史，而不是频道。
-	deadline := time.Now().Add(5 * time.Second)
+	// 成员的回复写回群，不写进私聊。
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		a2, _ := s.mgr.Get(a.ID)
-		if msgs := messagesOf(a2); len(msgs) >= 3 { // system + [ch] user + assistant
+		raw, _ := s.mgr.Get(a.ID)
+		sn := raw.Snapshot()
+		if sn.Status == agent.StatusIdle && sn.Chars > 0 {
+			for _, m := range sn.Messages {
+				if strings.Contains(m.Content, "hi") || strings.Contains(m.Content, "群聊上下文") {
+					t.Fatalf("群消息写进了私聊：%q", m.Content)
+				}
+			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	a2, _ := s.mgr.Get(a.ID)
-	t.Fatalf("agent %q never produced an assistant reply (Messages=%+v)", a.ID, messagesOf(a2))
+	raw, _ := s.mgr.Get(a.ID)
+	t.Fatalf("agent %q did not finish (status=%s Messages=%+v)", a.ID, raw.Snapshot().Status, messagesOf(raw))
 }
 
 // TestChannelReplyLandsInChannel —— 群聊回复必须写回频道。
@@ -648,6 +681,9 @@ func TestChannelReplyLandsInChannel(t *testing.T) {
 		raw.Backend = "mock"
 	}
 	ch := s.CreateChannel("测试群", []string{a.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, a.ID); err != nil {
+		t.Fatalf("SetSpeaker: %v", err)
+	}
 
 	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "hello"); err != nil {
 		t.Fatalf("SendToChannel: %v", err)
@@ -684,7 +720,13 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 	defer stopAll(t, s)
 
 	a := s.CreateAgent(CreateAgentRequest{Name: "A1", Role: "后端"})
+	if raw, ok := s.mgr.Get(a.ID); ok {
+		raw.Backend = "mock"
+	}
 	ch := s.CreateChannel("测试群", []string{a.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, a.ID); err != nil {
+		t.Fatalf("SetSpeaker: %v", err)
+	}
 
 	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "第一句"); err != nil {
 		t.Fatalf("SendToChannel: %v", err)
@@ -718,17 +760,10 @@ func TestSendToChannelTranscriptExcludesCurrent(t *testing.T) {
 		t.Fatal("agent 不存在")
 	}
 	snap := raw.Snapshot()
-	var found string
 	for _, m := range snap.Messages {
-		if m.Role == "user" && strings.Contains(m.Content, "第二句") {
-			found = m.Content
+		if strings.Contains(m.Content, "第二句") || strings.Contains(m.Content, "第一句") || strings.Contains(m.Content, "群聊上下文") {
+			t.Fatalf("群消息写进了私聊：%q", m.Content)
 		}
-	}
-	if found == "" {
-		t.Fatal("agent 历史里找不到含「第二句」的 user 消息")
-	}
-	if n := strings.Count(found, "第二句"); n != 1 {
-		t.Errorf("「第二句」在 prompt 里出现 %d 次, want 1（transcript 应排除本轮消息）", n)
 	}
 }
 
@@ -766,4 +801,150 @@ func TestMockPromptDoesNotLeaveAgentBlocked(t *testing.T) {
 	}
 	got, _ := s.mgr.Get(a.ID)
 	t.Fatalf("等待 mock 对话完成超时，最终状态 = %s", got.Snapshot().Status)
+}
+
+func TestGroupReplyStaysOutOfPrivate(t *testing.T) {
+	s := newWiredTestAPI(t)
+	defer stopAll(t, s)
+
+	speaker := s.CreateAgent(CreateAgentRequest{Name: "甲", Role: "后端"})
+	other := s.CreateAgent(CreateAgentRequest{Name: "乙", Role: "前端"})
+	for _, id := range []string{speaker.ID, other.ID} {
+		if raw, ok := s.mgr.Get(id); ok {
+			raw.Backend = "mock"
+		}
+	}
+	ch := s.CreateChannel("设计群", []string{speaker.ID, other.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, speaker.ID); err != nil {
+		t.Fatalf("SetSpeaker: %v", err)
+	}
+	if err := s.SendToChannel(context.Background(), ch.ID, "user", "你", "你好"); err != nil {
+		t.Fatalf("SendToChannel: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got channel.Channel
+	for time.Now().Before(deadline) {
+		got, _ = s.channels.Get(ch.ID)
+		if len(got.Messages) >= 2 {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("群消息数 = %d, want 2（用户原文 + 恰好一个成员）", len(got.Messages))
+	}
+	if got.Messages[0].Text != "你好" || got.Messages[0].FromName != "你" {
+		t.Fatalf("群原文 = %+v, want 你/你好", got.Messages[0])
+	}
+	if got.Messages[1].FromID != speaker.ID {
+		t.Fatalf("接话人 = %s, want %s", got.Messages[1].FromID, speaker.ID)
+	}
+	time.Sleep(200 * time.Millisecond)
+	got, _ = s.channels.Get(ch.ID)
+	if len(got.Messages) != 2 {
+		t.Fatalf("接话后又多了消息，条数 = %d", len(got.Messages))
+	}
+
+	raw, _ := s.mgr.Get(speaker.ID)
+	for _, m := range raw.Snapshot().Messages {
+		if strings.Contains(m.Content, "你好") || strings.Contains(m.Content, "群聊上下文") {
+			t.Fatalf("私聊里出现群内容：%q", m.Content)
+		}
+	}
+	otherRaw, _ := s.mgr.Get(other.ID)
+	for _, m := range otherRaw.Snapshot().Messages {
+		if strings.Contains(m.Content, "你好") || strings.Contains(m.Content, "群聊上下文") {
+			t.Fatalf("未被点名的私聊里出现群内容：%q", m.Content)
+		}
+	}
+}
+
+func TestPrivateSendDoesNotTouchChannels(t *testing.T) {
+	s := newWiredTestAPI(t)
+	defer stopAll(t, s)
+
+	a := s.CreateAgent(CreateAgentRequest{Name: "甲", Role: "后端"})
+	if raw, ok := s.mgr.Get(a.ID); ok {
+		raw.Backend = "mock"
+	}
+	ch := s.CreateChannel("设计群", []string{a.ID}, "")
+	if _, err := s.channels.AddMessage(ch.ID, "user", "你", "已有的群消息"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.channels.Get(ch.ID)
+	if err := s.PromptAgent(context.Background(), PromptRequest{AgentID: a.ID, Text: "只对你说"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, _ := s.mgr.Get(a.ID)
+		sn := raw.Snapshot()
+		if sn.Status == agent.StatusIdle && len(sn.Messages) >= 3 {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	after, _ := s.channels.Get(ch.ID)
+	if len(after.Messages) != len(before.Messages) {
+		t.Fatalf("私发后群消息数 = %d, want %d", len(after.Messages), len(before.Messages))
+	}
+	raw, _ := s.mgr.Get(a.ID)
+	var saw bool
+	for _, m := range raw.Snapshot().Messages {
+		if m.Role == "user" && m.Content == "只对你说" {
+			saw = true
+		}
+		if strings.Contains(m.Content, "已有的群消息") || strings.Contains(m.Content, "群聊上下文") {
+			t.Fatalf("私聊里出现群内容：%q", m.Content)
+		}
+	}
+	if !saw {
+		t.Fatal("私聊里没有「只对你说」")
+	}
+}
+
+func TestRouteShowsForwardInBothSessions(t *testing.T) {
+	s := newTestAPI(t)
+	defer stopAll(t, s)
+
+	from := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "r"})
+	to := s.CreateAgent(CreateAgentRequest{Name: "B", Role: "r"})
+	for _, id := range []string{from.ID, to.ID} {
+		if raw, ok := s.mgr.Get(id); ok {
+			raw.Backend = "mock"
+		}
+	}
+	ch := s.CreateChannel("设计群", []string{from.ID, to.ID}, "")
+	before, _ := s.channels.Get(ch.ID)
+	if err := s.RouteAgent(from.ID, to.ID, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	want := "A转给B：hello"
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, _ := s.mgr.Get(to.ID)
+		for _, m := range raw.Snapshot().Messages {
+			if strings.Contains(m.Content, want) {
+				goto both
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("接收方会话里没有转发")
+both:
+	fromRaw, _ := s.mgr.Get(from.ID)
+	var fromSaw bool
+	for _, m := range fromRaw.Snapshot().Messages {
+		if strings.Contains(m.Content, want) {
+			fromSaw = true
+		}
+	}
+	if !fromSaw {
+		t.Fatalf("发送方会话 = %+v, want 含 %s", messagesOf(fromRaw), want)
+	}
+	after, _ := s.channels.Get(ch.ID)
+	if len(after.Messages) != len(before.Messages) {
+		t.Fatalf("转发后群消息数 = %d, want %d", len(after.Messages), len(before.Messages))
+	}
 }

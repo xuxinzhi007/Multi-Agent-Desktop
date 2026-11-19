@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,6 +25,13 @@ type Turn struct {
 	Reasoning string
 	// Calls 是模型想执行的工具。为空表示它认为任务已经完成。
 	Calls []tool.Call
+}
+
+// Delta 是流式 Turn 里已经切好的一段增量。
+// 工具参数不在这里：碎片要等这一轮流结束、拼成完整 JSON 之后才进入 Turn.Calls。
+type Delta struct {
+	Text      string
+	Reasoning string
 }
 
 // ChatModel 是给 agent loop 用的一次性（非流式）调用。
@@ -85,53 +93,9 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 	if c.cfg.Provider == "qoder" {
 		return qoderTurn(ctx, c.client, c.cfg, msgs, tools)
 	}
-	echoReasoning := thinkingOn(c.cfg)
-	req := map[string]any{
-		"model":    c.cfg.Model,
-		"messages": toWire(msgs, echoReasoning),
-	}
-	applyThinking(req, c.cfg)
-	if len(tools) > 0 {
-		wt := make([]wireTool, 0, len(tools))
-		for _, s := range tools {
-			schema := s.Schema
-			if len(schema) == 0 {
-				schema = json.RawMessage(`{"type":"object","properties":{}}`)
-			}
-			wt = append(wt, wireTool{
-				Type: "function",
-				Function: wireFunction{
-					Name:        s.Name,
-					Description: s.Description,
-					Parameters:  schema,
-				},
-			})
-		}
-		req["tools"] = wt
-		req["tool_choice"] = "auto"
-	}
-
-	body, err := json.Marshal(req)
+	resp, err := c.postChat(ctx, msgs, tools, false)
 	if err != nil {
-		return Turn{}, fmt.Errorf("llm: marshal request: %w", err)
-	}
-
-	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
-	base = strings.TrimSuffix(base, "/v1")
-	url := base + "/v1/chat/completions"
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return Turn{}, fmt.Errorf("llm: new request: %w", err)
-	}
-	httpReq.Header.Set("content-type", "application/json")
-	if c.cfg.APIKey != "" {
-		httpReq.Header.Set("authorization", "Bearer "+c.cfg.APIKey)
-	}
-
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return Turn{}, fmt.Errorf("llm: do: %w", err)
+		return Turn{}, err
 	}
 	defer resp.Body.Close()
 
@@ -178,6 +142,211 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 			Input: json.RawMessage(args),
 		})
 	}
+	return turn, nil
+}
+
+// TurnStream 是一轮带 tools 的流式调用。
+// 文本和推理增量通过 onDelta 立刻送出。tool_calls 按 index 拼完，
+// arguments 必须是完整 JSON，才放进返回的 Turn。拼不齐、上游报错或 ctx 取消都返回 error，不带半截参数。
+func (c *ChatModel) TurnStream(ctx context.Context, msgs []Message, tools []tool.Spec, onDelta func(Delta)) (Turn, error) {
+	if onDelta == nil {
+		onDelta = func(Delta) {}
+	}
+	if c.cfg.Provider == "qoder" {
+		return qoderTurnStream(ctx, c.client, c.cfg, msgs, tools, onDelta)
+	}
+	resp, err := c.postChat(ctx, msgs, tools, true)
+	if err != nil {
+		return Turn{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return Turn{}, fmt.Errorf("llm: upstream %d: %s", resp.StatusCode, truncateForError(payload))
+	}
+	return readToolStream(ctx, resp.Body, onDelta)
+}
+
+func (c *ChatModel) postChat(ctx context.Context, msgs []Message, tools []tool.Spec, stream bool) (*http.Response, error) {
+	req := map[string]any{
+		"model":    c.cfg.Model,
+		"messages": toWire(msgs, thinkingOn(c.cfg)),
+	}
+	if stream {
+		req["stream"] = true
+	}
+	applyThinking(req, c.cfg)
+	if len(tools) > 0 {
+		wt := make([]wireTool, 0, len(tools))
+		for _, s := range tools {
+			schema := s.Schema
+			if len(schema) == 0 {
+				schema = json.RawMessage(`{"type":"object","properties":{}}`)
+			}
+			wt = append(wt, wireTool{
+				Type: "function",
+				Function: wireFunction{
+					Name:        s.Name,
+					Description: s.Description,
+					Parameters:  schema,
+				},
+			})
+		}
+		req["tools"] = wt
+		req["tool_choice"] = "auto"
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request: %w", err)
+	}
+
+	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
+	base = strings.TrimSuffix(base, "/v1")
+	url := base + "/v1/chat/completions"
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("llm: new request: %w", err)
+	}
+	httpReq.Header.Set("content-type", "application/json")
+	if stream {
+		httpReq.Header.Set("accept", "text/event-stream")
+	}
+	if c.cfg.APIKey != "" {
+		httpReq.Header.Set("authorization", "Bearer "+c.cfg.APIKey)
+	}
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("llm: do: %w", err)
+	}
+	return resp, nil
+}
+
+type toolAcc struct {
+	id   string
+	name string
+	args string
+}
+
+func foldToolDelta(acc []toolAcc, index int, id, name, args string) ([]toolAcc, error) {
+	if index < 0 || index > 32 {
+		return nil, fmt.Errorf("llm: tool index %d out of range", index)
+	}
+	for len(acc) <= index {
+		acc = append(acc, toolAcc{})
+	}
+	slot := &acc[index]
+	slot.id += id
+	slot.name += name
+	slot.args += args
+	return acc, nil
+}
+
+func callsFromAcc(acc []toolAcc) ([]tool.Call, error) {
+	var out []tool.Call
+	for _, tc := range acc {
+		if tc.id == "" && tc.name == "" && strings.TrimSpace(tc.args) == "" {
+			continue
+		}
+		if tc.name == "" {
+			return nil, fmt.Errorf("llm: tool call missing name")
+		}
+		args := strings.TrimSpace(tc.args)
+		if args == "" {
+			args = "{}"
+		}
+		if !json.Valid([]byte(args)) {
+			return nil, fmt.Errorf("llm: tool %s arguments are incomplete", tc.name)
+		}
+		out = append(out, tool.Call{
+			ID:    tc.id,
+			Name:  tc.name,
+			Input: json.RawMessage(args),
+		})
+	}
+	return out, nil
+}
+
+func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	var turn Turn
+	var acc []toolAcc
+	saw := false
+	for sc.Scan() {
+		if ctx.Err() != nil {
+			return Turn{}, ctx.Err()
+		}
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.Error != nil && chunk.Error.Message != "" {
+			return Turn{}, fmt.Errorf("llm: %s", chunk.Error.Message)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		saw = true
+		d := chunk.Choices[0].Delta
+		if d.Content != "" || d.ReasoningContent != "" {
+			onDelta(Delta{Text: d.Content, Reasoning: d.ReasoningContent})
+			turn.Text += d.Content
+			turn.Reasoning += d.ReasoningContent
+		}
+		for _, tc := range d.ToolCalls {
+			var err error
+			acc, err = foldToolDelta(acc, tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+			if err != nil {
+				return Turn{}, err
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		if ctx.Err() != nil {
+			return Turn{}, ctx.Err()
+		}
+		return Turn{}, fmt.Errorf("llm: read stream: %w", err)
+	}
+	if ctx.Err() != nil {
+		return Turn{}, ctx.Err()
+	}
+	calls, err := callsFromAcc(acc)
+	if err != nil {
+		return Turn{}, err
+	}
+	if !saw && len(calls) == 0 && turn.Text == "" && turn.Reasoning == "" {
+		return Turn{}, fmt.Errorf("llm: empty stream")
+	}
+	turn.Calls = calls
 	return turn, nil
 }
 

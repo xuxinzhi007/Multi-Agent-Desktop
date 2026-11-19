@@ -66,11 +66,11 @@ func TestEffectiveConfigFallback(t *testing.T) {
 	m.SetWorkDir("/global")
 	a := m.Create("a1", "", "")
 
-	if got := a.EffectiveWorkDir(m); got != "/global" {
-		t.Errorf("EffectiveWorkDir = %q, want /global", got)
+	if got := a.EffectiveWorkDir(m); got != "" {
+		t.Errorf("EffectiveWorkDir = %q, want empty", got)
 	}
-	if got := a.EffectiveLLM(m); got.Model != "global-model" {
-		t.Errorf("EffectiveLLM.Model = %q, want global-model", got.Model)
+	if got := a.EffectiveLLM(m); got.Model != "" || got.Provider != "" {
+		t.Errorf("EffectiveLLM = %+v, want empty", got)
 	}
 
 	if err := m.SetAgentWorkDir("a1", "/local"); err != nil {
@@ -178,8 +178,8 @@ func TestRoutePrefix(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) == 0 || !strings.Contains(seen[0], "来自会话「A」") {
-		t.Fatalf("expected sender name in forwarded prompt, got %v", seen)
+	if len(seen) == 0 || !strings.Contains(seen[0], "A转给B：hello") {
+		t.Fatalf("expected forward line, got %v", seen)
 	}
 }
 
@@ -288,4 +288,111 @@ func TestPromptAfterStopWorks(t *testing.T) {
 	}
 	sn := a.Snapshot()
 	t.Fatalf("停止后新消息没跑完: status=%s messages=%d", sn.Status, len(sn.Messages))
+}
+
+func TestChannelTurnShowsBusyGroup(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	a := m.Create("", "甲", "r")
+	a.Backend = "mock"
+	if err := m.Prompt(context.Background(), PromptRequest{
+		AgentID: a.ID, Text: "你好", ChannelID: "ch1", ChannelName: "设计群",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Snapshot().BusyPlace == "设计群" {
+			m.Stop(a.ID)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("忙处 = %q, want 设计群", a.Snapshot().BusyPlace)
+}
+
+func TestPrivateWaitsBehindChannelTurn(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	a := m.Create("", "甲", "r")
+	a.Backend = "mock"
+	if err := m.Prompt(context.Background(), PromptRequest{
+		AgentID: a.ID, Text: "## 群聊上下文\n你: 你好", ChannelID: "ch1", ChannelName: "设计群",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Snapshot().Status == StatusRunning {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.Snapshot().Status != StatusRunning {
+		t.Fatal("群这一轮没有跑起来")
+	}
+	if err := m.Prompt(context.Background(), PromptRequest{AgentID: a.ID, Text: "私下一句"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range a.Snapshot().Messages {
+		if strings.Contains(msg.Content, "私下一句") {
+			t.Fatal("私聊在群这一轮结束前就写进了会话")
+		}
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		sn := a.Snapshot()
+		if sn.Status == StatusIdle {
+			var priv, group bool
+			for _, msg := range sn.Messages {
+				if strings.Contains(msg.Content, "私下一句") {
+					priv = true
+				}
+				if strings.Contains(msg.Content, "你好") || strings.Contains(msg.Content, "群聊上下文") {
+					group = true
+				}
+			}
+			if !priv {
+				t.Fatal("群这一轮结束后私聊没有留下")
+			}
+			if group {
+				t.Fatal("私聊里出现了群内容")
+			}
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("没等到空闲，status=%s", a.Snapshot().Status)
+}
+
+func TestStopInterruptsCurrentTurn(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	a := m.Create("", "甲", "r")
+	a.Backend = "mock"
+	if err := m.Prompt(context.Background(), PromptRequest{
+		AgentID: a.ID, Text: "你好", ChannelID: "ch1", ChannelName: "设计群",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Snapshot().Status == StatusRunning {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !m.Stop(a.ID) {
+		t.Fatal("Stop 返回 false")
+	}
+	time.Sleep(300 * time.Millisecond)
+	sn := a.Snapshot()
+	if sn.Status != StatusIdle {
+		t.Fatalf("停止后状态 = %s, want idle", sn.Status)
+	}
+	if sn.BusyPlace != "" {
+		t.Fatalf("停止后仍标着忙：%s", sn.BusyPlace)
+	}
+	chars := sn.Chars
+	time.Sleep(400 * time.Millisecond)
+	if got := a.Snapshot().Chars; got != chars {
+		t.Fatalf("停止后仍在产出：%d -> %d", chars, got)
+	}
 }

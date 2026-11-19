@@ -17,24 +17,20 @@ import (
 
 // executeLoop 用自持循环执行。
 //
-// 与 executeMock / executeCLI 的区别不是「换个客户端」，
+// 与 executeMock 的区别不是「换个客户端」，
 // 而是控制点回到了进程内：每一轮之间我们都能检查停止、预算、
 // 重复调用，并把这些状态如实推给界面。
-//
-// CLI 没有弃用 —— 它是 loop 内部可选的一个执行器（后续由
-// 独立工具承载），但不再决定整个执行的生命周期。
-func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID string) {
+func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID, contextText string) {
 	cfg := a.EffectiveLLM(m)
-	if cfg.Provider == "mock" || cfg.Provider == "" {
-		// 没配真实 provider 时不假装能跑 loop：
-		// 直接说明原因，比让用户等一个永远不会来的结果好
-		m.finish(a, StatusError, "loop backend 需要真实模型：请先在设置里配置 provider")
+	if cfg.Provider == "mock" || cfg.Provider == "" || cfg.Model == "" {
+		m.finish(a, StatusError, "这个会话还没有模型")
 		return
 	}
 
 	workDir := a.EffectiveWorkDir(m)
 	if workDir == "" {
-		workDir = "."
+		m.finish(a, StatusError, "这个会话还没有文件夹")
+		return
 	}
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
@@ -55,6 +51,12 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 
 	a.mu.Lock()
 	history := append([]llm.Message(nil), a.Messages...)
+	if channelID != "" {
+		if contextText != "" {
+			history = append(history, llm.Message{Role: "system", Content: contextText})
+		}
+		history = append(history, llm.Message{Role: "user", Content: text, Timestamp: time.Now().Unix()})
+	}
 	knowledgeIDs := append([]string(nil), a.Knowledge...)
 	a.mu.Unlock()
 
@@ -80,20 +82,23 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 		Messages: history,
 		Budget:   loop.DefaultBudget(),
 	}
-	if prev, err := store.Load(runCtx, runID); err == nil && resumable(prev) && messagesExtend(history, prev.Messages) {
-		// 检查点比已落盘的历史更长，且前缀一致，才续跑。
-		// 否则会把用户刚发出的那条消息丢掉。
-		st = prev
+	if channelID == "" {
+		if prev, err := store.Load(runCtx, runID); err == nil && resumable(prev) && messagesExtend(history, prev.Messages) {
+			st = prev
+		}
 	}
 
 	runner := &loop.Runner{
 		Model:        llm.NewChatModel(cfg),
 		Tools:        reg,
 		Store:        store,
-		Emitter:      &loopEmitter{m: m, agent: a},
+		Emitter:      &loopEmitter{m: m, agent: a, channelID: channelID},
 		System:       system,
 		ContextLimit: llm.ContextLimit(cfg),
 		Sync: func(msgs []llm.Message) {
+			if channelID != "" {
+				return
+			}
 			a.mu.Lock()
 			a.Messages = msgs
 			a.mu.Unlock()
@@ -117,18 +122,22 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 
 	// 循环里的消息就是完整会话。按前缀追加会在检查点更短时把回复切掉。
 	a.mu.Lock()
-	a.Messages = append([]llm.Message(nil), out.Messages...)
+	if channelID == "" {
+		a.Messages = append([]llm.Message(nil), out.Messages...)
+	}
 	a.mu.Unlock()
 
 	switch out.Phase {
 	case loop.PhaseDone:
-		if view, ok := oneAnswer(out); ok {
-			m.emit("agent.message", map[string]any{
-				"id":        a.ID,
-				"message":   view,
-				"tokensIn":  0,
-				"tokensOut": 0,
-			})
+		if channelID == "" {
+			if view, ok := oneAnswer(out); ok {
+				m.emit("agent.message", map[string]any{
+					"id":        a.ID,
+					"message":   view,
+					"tokensIn":  0,
+					"tokensOut": 0,
+				})
+			}
 		}
 		if channelID != "" && out.FinalText != "" {
 			m.emit("agent.channel.reply", map[string]any{
@@ -139,7 +148,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 			})
 		}
 		a.setIdleOrQueued(m)
-		if m.NoteBook() != nil && strings.TrimSpace(out.FinalText) != "" {
+		if channelID == "" && m.NoteBook() != nil && strings.TrimSpace(out.FinalText) != "" {
 			msgs := append([]llm.Message(nil), out.Messages...)
 			text := out.FinalText
 			go distillKnowledge(m, cfg, msgs, text)
@@ -166,14 +175,23 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID 
 // 而不是「循环内部第几步」。所以 iter.start 转成状态更新，
 // tool.start 转成 LastTool，tool.end 转成消息增量。
 type loopEmitter struct {
-	m     *Manager
-	agent *Agent
+	m         *Manager
+	agent     *Agent
+	channelID string
 }
 
 func (e *loopEmitter) Emit(ev loop.Event) {
 	switch ev.Kind {
+	case "delta":
+		if ev.Text == "" {
+			return
+		}
+		e.agent.mu.Lock()
+		e.agent.Chars += len(ev.Text)
+		e.agent.mu.Unlock()
+		e.m.emit("agent.delta", map[string]any{"id": e.agent.ID, "delta": ev.Text, "channelId": e.channelID})
 	case "iter.start":
-		e.m.emit("agent.status", map[string]any{"id": e.agent.ID, "status": StatusRunning})
+		e.m.emit("agent.status", e.agent.statusPayload(StatusRunning))
 		// 上下文占用单独发一个事件：不塞进 agent.status（那是状态语义），
 		// 也不塞进 agent.loop（只在 done/stopped/failed 发）——这个量每轮都要
 		// 刷新，而且只有配了窗口才有意义，CtxLimit<=0 时发出去前端也无从算比例。
@@ -294,7 +312,7 @@ func loopSystemPrompt(workDir string) string {
 		"- ask_agent：把任务交给已有会话并等待回复。参数 name、task。",
 		"- list_notes：看知识库里已有的笔记。",
 		"- save_note：把结论写进应用正在用的知识库，页面会马上更新。参数 title、body，可选 tags。",
-		"- web：操作用户当前打开的浏览器页面。参数 op（read、open、click、type、press）。点击和输入用页面上看得见的文字，不要写脚本。",
+		"- web：操作应用内置浏览器，用来跑页面和自动化测试。参数 op（read、open、click、type、press）。页面在应用自己的窗口里打开，登录留在那里。点击和输入用页面上看得见的文字，不要写脚本。",
 		"这些能力已经接在工具里。不要回答自己无法创建 agent 或无法和其他 agent 对话；需要协作时直接调用上面的工具。",
 		"沉淀知识必须调用 save_note。不要直接修改 knowledge.jsonl，那样只改了磁盘，打开着的页面不会变。",
 	}

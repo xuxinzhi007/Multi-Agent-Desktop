@@ -49,6 +49,8 @@ type Channel struct {
 	Members  []string   `json:"members"` // agent IDs
 	Messages []Message  `json:"messages"`
 	Policy   TurnPolicy `json:"policy,omitempty"` // 回合策略，默认 discuss
+	// Speaker 是没人被 @ 时的默认接话人（agent ID）。空则这一条没人接。
+	Speaker string `json:"speaker,omitempty"`
 }
 
 // Manager 管理所有频道。
@@ -113,6 +115,7 @@ func (m *Manager) Save() error {
 				Members:  append([]string{}, ch.Members...),
 				Messages: append([]Message{}, ch.Messages...),
 				Policy:   ch.Policy,
+				Speaker:  ch.Speaker,
 			})
 		}
 	}
@@ -198,6 +201,7 @@ func (c *Channel) clone() Channel {
 		Name:    c.Name,
 		Members: append([]string{}, c.Members...),
 		Policy:  c.Policy,
+		Speaker: c.Speaker,
 	}
 	if c.Messages == nil {
 		out.Messages = []Message{}
@@ -281,6 +285,9 @@ func (m *Manager) RemoveMember(agentId string) {
 			}
 		}
 		ch.Members = kept
+		if ch.Speaker == agentId {
+			ch.Speaker = ""
+		}
 	}
 	m.mu.Unlock()
 	m.goSave()
@@ -410,7 +417,7 @@ func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string
 
 	// 被 @ 必须回复（含 @all）
 	for _, m := range mentions {
-		if m == agentName || m == agentID || m == "all" {
+		if m == agentName || m == agentID || m == "all" || m == "所有人" {
 			return true, "被 @"
 		}
 	}
@@ -437,38 +444,6 @@ func ShouldReply(policy TurnPolicy, msg Message, agentID, agentName, role string
 	default:
 		return false, "未识别的策略"
 	}
-}
-
-// RoleRelevant 判断消息是否与该角色相关（供 SendToChannel 排序用）。
-// 关键词表来自角色名（"后端" / "前端" / "测试" / "运维"）与内容的子串匹配。
-func RoleRelevant(text, role string) bool {
-	if role == "" {
-		return false
-	}
-	keywords := map[string][]string{
-		"后端": {"api", "api", "数据库", "sql", "服务", "接口", "server", "backend"},
-		"前端": {"ui", "页面", "组件", "样式", "css", "前端", "react", "frontend"},
-		"测试": {"测试", "bug", "错误", "用例", "qa", "test"},
-		"运维": {"部署", "监控", "日志", "服务器", "deploy", "ops"},
-	}
-	lower := strings.ToLower(text)
-	lowerRole := strings.ToLower(role)
-
-	// 角色名本身出现在文本里，也算相关
-	if strings.Contains(lower, lowerRole) {
-		return true
-	}
-	for key, kws := range keywords {
-		if !strings.Contains(role, key) {
-			continue
-		}
-		for _, kw := range kws {
-			if strings.Contains(lower, kw) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ParseMentions 解析 @提及（前后端语义唯一来源）。
@@ -504,13 +479,14 @@ type Decision struct {
 
 // DecideReplies 决定一条消息该由哪些成员回复，是「谁该回」的唯一实现。
 // 规则：
-//   - 被 @ 的必须回（@all 命中全员）
+//   - 被 @ 的必须回（@all / @所有人 命中全员）
 //   - 有人被 @ 时，没被点名的成员不打扰
-//   - discuss 模式下没人被 @，选 1 个最相关的成员（避免 N 成员 = N 倍成本）
+//   - discuss 模式下没人被 @，只由 speaker 接；speaker 为空或不是成员，则没人接
 //   - direct / roundrobin 由 ShouldReply 直接给出结论
 //
+// speaker 是该群当前的默认接话人。调用方每次用最新值，所以改人从下一条生效。
 // 返回值按 recipients 顺序排列，便于上层稳定地产生 deliveries。
-func DecideReplies(policy TurnPolicy, msg Message, recipients []Member) []Decision {
+func DecideReplies(policy TurnPolicy, msg Message, recipients []Member, speaker string) []Decision {
 	if len(recipients) == 0 {
 		return nil
 	}
@@ -526,29 +502,22 @@ func DecideReplies(policy TurnPolicy, msg Message, recipients []Member) []Decisi
 		}
 	}
 
-	// discuss 模式下没人被点名：挑一个最优匹配，全不相关则第一个兜底
-	runnerUp := ""
 	if policy == PolicyDiscuss && len(addressed) == 0 {
-		bestScore := -1
+		out := make([]Decision, 0, len(recipients))
 		for _, m := range recipients {
-			score := relevanceScore(msg.Text, m)
-			if score > bestScore {
-				bestScore = score
-				runnerUp = m.ID
+			reply := speaker != "" && m.ID == speaker
+			reason := "未指定默认接话人"
+			if reply {
+				reason = "默认接话人"
 			}
+			out = append(out, Decision{Member: m, Reply: reply, Reason: reason})
 		}
-		if runnerUp == "" {
-			runnerUp = recipients[0].ID
-		}
+		return out
 	}
 
 	out := make([]Decision, 0, len(recipients))
 	for _, m := range recipients {
 		reply, reason := ShouldReply(policy, msg, m.ID, m.Name, m.Role)
-		if !reply && runnerUp != "" && m.ID == runnerUp {
-			reply = true
-			reason = "discuss 模式 · 最优匹配"
-		}
 		if !reply && len(addressed) > 0 && !addressed[m.ID] {
 			reason = "未被点名"
 		}
@@ -560,21 +529,38 @@ func DecideReplies(policy TurnPolicy, msg Message, recipients []Member) []Decisi
 // isAddressed 判断某成员是否被这条消息点名。
 func isAddressed(mentions []string, m Member) bool {
 	for _, mention := range mentions {
-		if mention == m.Name || mention == m.ID || mention == "all" {
+		if mention == m.Name || mention == m.ID || mention == "all" || mention == "所有人" {
 			return true
 		}
 	}
 	return false
 }
 
-// relevanceScore 给 discuss 模式的成员排序打分：角色相关 +2，名字出现 +3。
-func relevanceScore(text string, m Member) int {
-	score := 0
-	if RoleRelevant(text, m.Role) {
-		score += 2
+// SetSpeaker 指定这个群在没人被 @ 时由谁接话。
+// agentId 为空表示取消。下一次 DecideReplies 才读到新值。
+func (m *Manager) SetSpeaker(channelId, agentId string) (Channel, error) {
+	m.mu.Lock()
+	ch, ok := m.channels[channelId]
+	if !ok {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("channel %s not found", channelId)
 	}
-	if m.Name != "" && strings.Contains(strings.ToLower(text), strings.ToLower(m.Name)) {
-		score += 3
+	if agentId != "" {
+		member := false
+		for _, id := range ch.Members {
+			if id == agentId {
+				member = true
+				break
+			}
+		}
+		if !member {
+			m.mu.Unlock()
+			return Channel{}, fmt.Errorf("agent %s is not a member of channel %s", agentId, channelId)
+		}
 	}
-	return score
+	ch.Speaker = agentId
+	snap := ch.clone()
+	m.mu.Unlock()
+	m.goSave()
+	return snap, nil
 }

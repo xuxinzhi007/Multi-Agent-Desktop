@@ -62,8 +62,8 @@ func TestCreateAgentDoesNotPinGlobalLLM(t *testing.T) {
 		t.Fatalf("LLMCfg=%+v", *b.LLMCfg)
 	}
 	got := b.EffectiveLLM(m)
-	if got.Provider != global.Provider || got.Model != global.Model || got.BaseURL != global.BaseURL {
-		t.Fatalf("effective=%+v", got)
+	if got.Provider != "" || got.Model != "" {
+		t.Fatalf("effective=%+v, want empty", got)
 	}
 }
 

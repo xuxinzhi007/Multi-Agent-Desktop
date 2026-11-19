@@ -9,6 +9,29 @@ import (
 	"multi-agent-desktop/internal/llm"
 )
 
+func TestLegacyCLIBackendUsesLoop(t *testing.T) {
+	m := newTestManager(t)
+	a := m.CreateWithBackend("a1", "测试", "通用开发助手", "claude")
+
+	m.Prompt(context.Background(), PromptRequest{AgentID: "a1", Text: "hi"})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		v := a.Snapshot()
+		if v.Status == StatusError {
+			if strings.Contains(v.LastError, "CLI") || strings.Contains(v.LastError, "not found") {
+				t.Fatalf("旧 cli backend 仍在找外部可执行文件: %q", v.LastError)
+			}
+			if a.Snapshot().Backend != "loop" {
+				t.Fatalf("backend = %q, want loop", a.Snapshot().Backend)
+			}
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("claude backend 没有按 loop 结束，停在 %q", a.Snapshot().Status)
+}
+
 // loop backend 没配真实 provider 时必须明确报错，
 // 而不是让用户看着「排队中」等一个永远不来的结果。
 func TestLoopBackendWithoutProviderFails(t *testing.T) {
@@ -22,7 +45,7 @@ func TestLoopBackendWithoutProviderFails(t *testing.T) {
 	for time.Now().Before(deadline) {
 		v := a.Snapshot()
 		if v.Status == StatusError {
-			if !strings.Contains(v.LastError, "provider") {
+			if !strings.Contains(v.LastError, "模型") {
 				t.Fatalf("错误信息没说清原因: %q", v.LastError)
 			}
 			return
@@ -36,14 +59,19 @@ func TestLoopBackendWithoutProviderFails(t *testing.T) {
 // loop backend 配了真实 provider 但连不上时，也必须是 error 而不是 queued。
 func TestLoopBackendUnreachableProviderFails(t *testing.T) {
 	m := newTestManager(t)
-	m.SetLLMConfig(llm.Config{
-		Provider: "openai",
-		BaseURL:  "http://127.0.0.1:1", // 必定连不上
-		APIKey:   "x",
-		Model:    "gpt-4o-mini",
-	})
 	a := m.Create("a1", "测试", "通用开发助手")
 	a.Backend = "loop"
+	if err := m.SetAgentWorkDir("a1", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetAgentLLM("a1", llm.Config{
+		Provider: "openai",
+		BaseURL:  "http://127.0.0.1:1",
+		APIKey:   "x",
+		Model:    "gpt-4o-mini",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	m.Prompt(context.Background(), PromptRequest{AgentID: "a1", Text: "hi"})
 

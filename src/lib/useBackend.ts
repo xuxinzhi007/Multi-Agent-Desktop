@@ -35,6 +35,8 @@ type State = {
   channels: Channel[]
   notes: Note[]
   streaming: Record<string, string>
+  /** 群里正在生成的回复。不进私聊。 */
+  channelStreaming: Record<string, string>
   errors: Record<string, SessionError>
   shell: ShellLog[]
   /** 每个 agent 执行过的命令，按 agentId 归集，直接渲染在对话流里 */
@@ -57,11 +59,12 @@ const EMPTY: State = {
   connected: true,
   version: '0.3.0-mygo',
   workDir: '',
-  llm: { provider: 'mock', baseUrl: '', apiKey: '', model: '' },
+  llm: { provider: '', baseUrl: '', apiKey: '', model: '' },
   agents: [],
   channels: [],
   notes: [],
   streaming: {},
+  channelStreaming: {},
   errors: {},
   shell: [],
   shellByAgent: {},
@@ -81,6 +84,91 @@ export function useBackend() {
   useEffect(() => {
     let alive = true
     const unsubs: (() => void)[] = []
+    const deltaGen = new Map<string, number>()
+    const reasonGen = new Map<string, number>()
+    const channelGen = new Map<string, number>()
+    const deltaBuf = new Map<string, { g: number; text: string }>()
+    const reasonBuf = new Map<string, { g: number; text: string }>()
+    const channelBuf = new Map<string, { g: number; text: string }>()
+    const reasonGap = new Set<string>()
+    let raf = 0
+
+    const schedule = () => {
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        if (!alive) return
+        const deltas = [...deltaBuf.entries()]
+        const reasons = [...reasonBuf.entries()]
+        const channelDeltas = [...channelBuf.entries()]
+        deltaBuf.clear()
+        reasonBuf.clear()
+        channelBuf.clear()
+        if (deltas.length === 0 && reasons.length === 0 && channelDeltas.length === 0) return
+        setState((s) => {
+          const streaming = { ...s.streaming }
+          const channelStreaming = { ...s.channelStreaming }
+          const reasoning = { ...s.reasoning }
+          let touchS = false
+          let touchC = false
+          let touchR = false
+          for (const [id, item] of deltas) {
+            if ((deltaGen.get(id) ?? 0) !== item.g) continue
+            streaming[id] = (streaming[id] ?? '') + item.text
+            touchS = true
+          }
+          for (const [id, item] of channelDeltas) {
+            if ((channelGen.get(id) ?? 0) !== item.g) continue
+            channelStreaming[id] = (channelStreaming[id] ?? '') + item.text
+            touchC = true
+          }
+          for (const [id, item] of reasons) {
+            if ((reasonGen.get(id) ?? 0) !== item.g) continue
+            const prev = reasoning[id] ?? ''
+            if (prev && reasonGap.has(id)) {
+              reasoning[id] = `${prev}\n\n${item.text}`
+              reasonGap.delete(id)
+            } else {
+              reasoning[id] = prev + item.text
+            }
+            touchR = true
+          }
+          if (!touchS && !touchR && !touchC) return s
+          return {
+            ...s,
+            streaming: touchS ? streaming : s.streaming,
+            channelStreaming: touchC ? channelStreaming : s.channelStreaming,
+            reasoning: touchR ? reasoning : s.reasoning,
+          }
+        })
+      })
+    }
+
+    const pushBuf = (buf: Map<string, { g: number; text: string }>, gen: Map<string, number>, id: string, text: string) => {
+      const g = gen.get(id) ?? 0
+      const prev = buf.get(id)
+      buf.set(id, { g, text: prev && prev.g === g ? prev.text + text : text })
+      schedule()
+    }
+
+    const dropDeltas = (id: string) => {
+      deltaGen.set(id, (deltaGen.get(id) ?? 0) + 1)
+      deltaBuf.delete(id)
+      channelGen.set(id, (channelGen.get(id) ?? 0) + 1)
+      channelBuf.delete(id)
+    }
+
+    const dropReason = (id: string) => {
+      reasonGen.set(id, (reasonGen.get(id) ?? 0) + 1)
+      reasonBuf.delete(id)
+      reasonGap.delete(id)
+    }
+
+    const pendingDelta = (id: string) => {
+      const item = deltaBuf.get(id)
+      if (!item || item.g !== (deltaGen.get(id) ?? 0)) return ''
+      return item.text
+    }
 
     const sub = <T>(evt: { on: (cb: (p: T) => void) => () => void }, cb: (p: T) => void) => {
       unsubs.push(evt.on((p) => alive && cb(p)))
@@ -113,21 +201,38 @@ export function useBackend() {
         ...s,
         agents: s.agents.filter((a) => a.id !== id),
         streaming: omit(s.streaming, id),
+        channelStreaming: omit(s.channelStreaming, id),
       })),
     )
     // token 级流式片段：累积到 streaming[agentId]，assistant 完整消息到达时清掉。
     sub(events.agentFocused, ({ agentId }) => setState((s) => ({ ...s, focusAgentId: agentId })))
-    sub(events.agentDelta, ({ id, delta }) => {
-      if (!delta) return
-      setState((s) => ({ ...s, streaming: { ...s.streaming, [id]: (s.streaming[id] ?? '') + delta } }))
+    sub(events.agentDelta, ({ id, delta, channelId }) => {
+      if (!delta || !id) return
+      if (channelId) pushBuf(channelBuf, channelGen, id, delta)
+      else pushBuf(deltaBuf, deltaGen, id, delta)
     })
-    sub(events.agentStatus, ({ id, status }) =>
+    sub(events.agentStatus, ({ id, status, busy }) => {
+      if (status !== 'running') {
+        dropDeltas(id)
+        dropReason(id)
+      }
       setState((s) => ({
         ...s,
-        agents: s.agents.map((a) => (a.id === id ? { ...a, status: status as Agent['status'] } : a)),
-      })),
-    )
-    sub(events.agentMessage, ({ id, message, tokensIn, tokensOut }) =>
+        agents: s.agents.map((a) =>
+          a.id === id
+            ? { ...a, status: status as Agent['status'], busy: status === 'running' ? busy || '' : '' }
+            : a,
+        ),
+        streaming: status === 'running' ? s.streaming : omit(s.streaming, id),
+        channelStreaming: status === 'running' ? s.channelStreaming : omit(s.channelStreaming, id),
+        reasoning: status === 'running' ? s.reasoning : omit(s.reasoning, id),
+      }))
+    })
+    sub(events.agentMessage, ({ id, message, tokensIn, tokensOut }) => {
+      if (message.role === 'assistant') {
+        dropDeltas(id)
+        dropReason(id)
+      }
       setState((s) => {
         const newTokenUsage = { ...s.tokenUsage }
         if (tokensIn || tokensOut) {
@@ -139,30 +244,42 @@ export function useBackend() {
           agents: s.agents.map((a) => {
             if (a.id !== id) return a
             const list = a.messages ?? []
-            // 乐观插入过同一条 user 消息时不要再追加一份
+            // 乐观插入过同一条 user 消息时不要再追加一份。
+            // 工具回合已经把流式文本收成消息时，结束事件再带同一段也不再追加。
             const last = list[list.length - 1]
             if (message.role === 'user' && last?.role === 'user' && last.content === message.content) {
+              return a
+            }
+            if (message.role === 'assistant' && last?.role === 'assistant' && last.content === message.content) {
+              if (message.reasoning && message.reasoning !== last.reasoning) {
+                return { ...a, messages: [...list.slice(0, -1), { ...last, reasoning: message.reasoning }] }
+              }
               return a
             }
             return { ...a, messages: [...list, message] }
           }),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
+          channelStreaming: message.role === 'assistant' ? omit(s.channelStreaming, id) : s.channelStreaming,
           reasoning: message.role === 'assistant' ? omit(s.reasoning, id) : s.reasoning,
           tokenUsage: newTokenUsage,
           // 后端回推了消息说明确实在处理，清掉 pending
           pending: omit(s.pending, id),
         }
-      }),
-    )
-    sub(events.agentError, ({ id, error }) =>
+      })
+    })
+    sub(events.agentError, ({ id, error }) => {
+      dropDeltas(id)
+      dropReason(id)
       setState((s) => {
         return {
           ...s,
           errors: rememberError(s, id, error),
           streaming: omit(s.streaming, id),
+        channelStreaming: omit(s.channelStreaming, id),
+          reasoning: omit(s.reasoning, id),
         }
-      }),
-    )
+      })
+    })
     sub(events.toolStart, (e) => {
       // 工具已开始执行 —— 这是信息事件，不是审批请求。
       // 真正的「等你审批」要等后端接入工具审批流程后由后端发状态，
@@ -176,12 +293,8 @@ export function useBackend() {
     // end 时补上结果。这些信息让用户能看到循环真的在推进，
     // 而不是只看到一个「运行中」然后干等。
     sub(events.agentReasoning, (e) => {
-      if (!e.reasoning) return
-      setState((s) => {
-        const prev = s.reasoning[e.id]
-        const next = prev ? `${prev}\n\n${e.reasoning}` : e.reasoning
-        return { ...s, reasoning: { ...s.reasoning, [e.id]: next } }
-      })
+      if (!e.reasoning || !e.id) return
+      pushBuf(reasonBuf, reasonGen, e.id, e.reasoning)
     })
     sub(events.agentTool, (e) => {
       // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
@@ -194,10 +307,32 @@ export function useBackend() {
             : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
               ? 'error'
               : 'ok'
+      let folded = ''
+      if (e.phase === 'start') {
+        folded = (pendingDelta(e.id))
+        dropDeltas(e.id)
+        reasonGap.add(e.id)
+      }
       setState((s) => {
         if (e.phase === 'start') {
+          const text = (s.streaming[e.id] ?? '') + folded
+          const agents = text
+            ? s.agents.map((a) =>
+                a.id === e.id
+                  ? {
+                      ...a,
+                      messages: [
+                        ...(a.messages ?? []),
+                        { role: 'assistant', content: text, timestamp: Math.floor(Date.now() / 1000) },
+                      ],
+                    }
+                  : a,
+              )
+            : s.agents
           return {
             ...s,
+            agents,
+            streaming: omit(s.streaming, e.id),
             tools: [
               ...s.tools,
               { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
@@ -224,8 +359,13 @@ export function useBackend() {
     })
     // 停止原因：用户按停止和预算用尽是两回事，必须能区分。
     sub(events.agentStopped, (e) => {
+      dropDeltas(e.id)
+      dropReason(e.id)
       setState((s) => ({
         ...s,
+        streaming: omit(s.streaming, e.id),
+        channelStreaming: omit(s.channelStreaming, e.id),
+        reasoning: omit(s.reasoning, e.id),
         stops: { ...s.stops, [e.id]: { reason: e.reason, iter: e.iter, used: e.used, at: Date.now() } },
       }))
     })
@@ -282,24 +422,31 @@ export function useBackend() {
     // 频道
     sub(events.channelCreated, (ch) =>
       setState((s) =>
-        s.channels.some((x) => x.id === ch.id) ? s : { ...s, channels: [...s.channels, ch] },
+        s.channels.some((x) => x.id === ch.id)
+          ? { ...s, channels: s.channels.map((x) => (x.id === ch.id ? ch : x)) }
+          : { ...s, channels: [...s.channels, ch] },
       ),
     )
     sub(events.channelMessage, (msg: ChannelMessage) =>
-      setState((s) => ({
-        ...s,
-        channels: s.channels.map((ch) =>
-          ch.id === msg.channelId
-            ? {
-                ...ch,
-                // 同一 ID 重发时覆盖旧记录（用于回填 deliveries）
-                messages: (ch.messages ?? []).some((m) => m.id === msg.id)
-                  ? (ch.messages ?? []).map((m) => (m.id === msg.id ? msg : m))
-                  : [...(ch.messages ?? []), msg],
-              }
-            : ch,
-        ),
-      })),
+      setState((s) => {
+        const existed = s.channels.some((ch) =>
+          ch.id === msg.channelId && (ch.messages ?? []).some((m) => m.id === msg.id),
+        )
+        return {
+          ...s,
+          channelStreaming: existed ? s.channelStreaming : omit(s.channelStreaming, msg.fromId),
+          channels: s.channels.map((ch) =>
+            ch.id === msg.channelId
+              ? {
+                  ...ch,
+                  messages: (ch.messages ?? []).some((m) => m.id === msg.id)
+                    ? (ch.messages ?? []).map((m) => (m.id === msg.id ? msg : m))
+                    : [...(ch.messages ?? []), msg],
+                }
+              : ch,
+          ),
+        }
+      }),
     )
 
     // 知识库
@@ -317,6 +464,7 @@ export function useBackend() {
 
     return () => {
       alive = false
+      if (raf) cancelAnimationFrame(raf)
       unsubs.forEach((u) => u())
     }
   }, [])
@@ -419,6 +567,13 @@ export function useBackend() {
       case 'channel.create': {
         const { name, members } = data as { name: string; members: string[] }
         return API.createChannel(name, members, 'discuss')
+      }
+      case 'channel.speaker': {
+        const { channelId, agentId } = data as { channelId: string; agentId: string }
+        return API.setChannelSpeaker(channelId, agentId).catch((e) => {
+          console.error('setChannelSpeaker failed', e)
+          return null
+        })
       }
       case 'channel.send': {
         const { channelId, fromId, fromName, text } = data as {

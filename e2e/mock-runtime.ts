@@ -88,6 +88,23 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.SetLLMConfig': (cfg) => cfg,
       'API.SettingsPath': () =>
         '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
+      'API.GetFeishu': () => ({
+        enabled: false,
+        appId: '',
+        hasSecret: false,
+        agentId: '',
+        status: 'stopped',
+      }),
+      'API.SaveFeishu': (input) => {
+        const in_ = input as { enabled?: boolean; appId?: string; appSecret?: string; agentId?: string }
+        return {
+          enabled: !!in_.enabled,
+          appId: in_.appId ?? '',
+          hasSecret: !!in_.appSecret,
+          agentId: in_.agentId ?? '',
+          status: in_.enabled ? 'connecting' : 'stopped',
+        }
+      },
       'API.SetWorkDir': () => undefined,
       'API.ListModels': () => ['mock'],
       'API.ListProviderEndpoints': () => [

@@ -73,11 +73,11 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
     if (!nameTouched) setName(suggestName(preset.name, existingCount))
   }
 
-  const canSubmit = name.trim().length > 0
+  const canSubmit = name.trim().length > 0 && workDir.trim().length > 0
 
   const submit = () => {
     if (!canSubmit) return
-    onCreate(name.trim(), role, 'loop', workDir.trim() || undefined)
+    onCreate(name.trim(), role, 'loop', workDir.trim())
     onClose()
   }
 
@@ -165,7 +165,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
           </div>
 
           <div>
-            <label style={LABEL_STYLE}>工作目录（可选）</label>
+            <label style={LABEL_STYLE}>文件夹</label>
             <DirectoryPicker value={workDir} onChange={setWorkDir} compact />
           </div>
         </div>

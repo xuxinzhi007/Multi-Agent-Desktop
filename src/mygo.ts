@@ -83,6 +83,8 @@ export interface AgentView {
   queuedAt?: number;
   lastTool?: string;
   chars?: number;
+  /** Busy 非空时，这个会话正在该群里回答。 */
+  busy?: string;
 }
 
 export interface Channel {
@@ -91,6 +93,7 @@ export interface Channel {
   members: string[];
   messages: ChannelMessage[];
   policy?: TurnPolicy;
+  speaker?: string;
 }
 
 export interface ChannelMessage {
@@ -129,6 +132,7 @@ export interface Delivery {
 export interface DeltaEvent {
   id: string;
   delta: string;
+  channelId?: string;
 }
 
 /**
@@ -158,6 +162,24 @@ export interface Diagnostics {
 export interface ErrorEvent {
   id: string;
   error: string;
+}
+
+/** FeishuSave 是设置页提交的飞书配置。AppSecret 为空表示沿用已保存的值。 */
+export interface FeishuSave {
+  enabled: boolean;
+  appId: string;
+  appSecret: string;
+  agentId: string;
+}
+
+/** FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。 */
+export interface FeishuView {
+  enabled: boolean;
+  appId: string;
+  hasSecret: boolean;
+  agentId: string;
+  status: string;
+  detail?: string;
 }
 
 /** LoopDiag 是某个 agent 的循环检查点状态，用于判断「停在哪一轮、为什么停」。 */
@@ -266,10 +288,17 @@ export interface Note {
   updatedAt?: number;
 }
 
+/** PrivacyGrant 是一项系统权限现在的状态。state 为 yes、no 或 unknown。 */
+export interface PrivacyGrant {
+  kind: string;
+  state: string;
+}
+
 export interface PromptRequest {
   agentId: string;
   text: string;
   channelId?: string;
+  channelName?: string;
 }
 
 /** ProviderEndpoint 是设置里的一条厂商连接：保存过没有、现在是否生效、加载到哪些模型。 */
@@ -344,6 +373,8 @@ export interface ShellResultEvent {
 export interface StatusEvent {
   id: string;
   status: string;
+  /** Busy 非空时，这个会话正在该群里回答。 */
+  busy?: string;
 }
 
 /** SystemInfo 描述运行环境。 */
@@ -404,13 +435,7 @@ export const API = {
   blockAgent(id: string, reason: string): Promise<void> {
     return call("API.BlockAgent", id, reason);
   },
-  /**
-   * ClearAgentLLM 清掉会话级模型配置，让该会话回落到全局默认。
-   *
-   * 为什么需要独立的方法：之前「跟随全局」被编码成 provider:"mock"，
-   * 但 mock 本身是合法 provider —— 「未设置」和「显式选了 mock」
-   * 无法区分，导致 UI 上无法表达两种不同的意图。
-   */
+  /** ClearAgentLLM 清掉这个会话自己的模型。清掉之后它没有模型，直到再次选择。 */
   clearAgentLLM(agentId: string): Promise<AgentView> {
     return call("API.ClearAgentLLM", agentId);
   },
@@ -456,13 +481,17 @@ export const API = {
   focusAgent(agentId: string): Promise<void> {
     return call("API.FocusAgent", agentId);
   },
-  /** GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。 */
+  /** GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。 */
   getAgentConfig(agentId: string): Promise<Config> {
     return call("API.GetAgentConfig", agentId);
   },
   /** GetAgentKnowledge 返回 agent 附加的知识笔记 ID 列表。 */
   getAgentKnowledge(agentId: string): Promise<string[]> {
     return call("API.GetAgentKnowledge", agentId);
+  },
+  /** GetFeishu 返回飞书机器人配置和长连接状态。 */
+  getFeishu(): Promise<FeishuView> {
+    return call("API.GetFeishu");
   },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
@@ -541,6 +570,14 @@ export const API = {
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
   },
+  /** OpenPrivacy 打开系统设置里对应的权限页，方便之后授权。 */
+  openPrivacy(kind: string): Promise<void> {
+    return call("API.OpenPrivacy", kind);
+  },
+  /** OpenWorkbench 打开应用自己的浏览器。地址为空时只把窗口带到前面。 */
+  openWorkbench(url: string): Promise<string> {
+    return call("API.OpenWorkbench", url);
+  },
   /**
    * PauseAll 暂停所有正在跑/排队的 agent：停止当前执行并清空队列。
    * 返回被暂停的数量，供前端 toast 使用。
@@ -551,6 +588,10 @@ export const API = {
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("API.PickDirectory");
+  },
+  /** PrivacyStatus 读取屏幕录制、辅助功能和自动化是否已经允许。不弹授权框。 */
+  privacyStatus(): Promise<PrivacyGrant[]> {
+    return call("API.PrivacyStatus");
   },
   /** PromptAgent 发消息并流式回流。 */
   promptAgent(req: PromptRequest): Promise<void> {
@@ -578,6 +619,10 @@ export const API = {
   /** RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。 */
   runShell(req: ShellRequest): Promise<void> {
     return call("API.RunShell", req);
+  },
+  /** SaveFeishu 保存飞书机器人配置，并按开关拉起或停掉长连接。 */
+  saveFeishu(in_: FeishuSave): Promise<FeishuView> {
+    return call("API.SaveFeishu", in_);
   },
   /** SaveProvider 保存一个厂商的地址和 Key，然后检查它现在是否生效。 */
   saveProvider(cfg: Config): Promise<ProviderEndpoint> {
@@ -607,6 +652,13 @@ export const API = {
     return call("API.SetAlwaysOnTop", v);
   },
   /**
+   * SetChannelSpeaker 指定这个群在没人被 @ 时由谁接话。空字符串表示先不指定。
+   * 已经在答的那一轮不变，下一条消息才用新的人。
+   */
+  setChannelSpeaker(channelId: string, agentId: string): Promise<Channel> {
+    return call("API.SetChannelSpeaker", channelId, agentId);
+  },
+  /**
    * SetLLMConfig 切换全局模型配置，并落盘到 config.json。
    * 落盘失败不阻断本次生效，但要记日志 —— 用户下次启动会回到旧配置。
    */
@@ -621,10 +673,7 @@ export const API = {
   setWorkDir(dir: string): Promise<string> {
     return call("API.SetWorkDir", dir);
   },
-  /**
-   * SettingsPath 返回配置文件路径。前端用它告诉用户「密钥存在哪」，
-   * 也让「打开配置目录」这类操作有明确目标。
-   */
+  /** SettingsPath 返回配置文件路径。 */
   settingsPath(): Promise<string> {
     return call("API.SettingsPath");
   },

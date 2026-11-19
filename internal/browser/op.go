@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Op 是对当前浏览器页面的一次操作。脚本由这里生成，不接受模型传来的任意 JS。
+// Op 是对内置浏览器页面的一次操作。脚本由这里生成，不接受模型传来的任意 JS。
 type Op struct {
 	Op    string `json:"op"`
 	App   string `json:"app"`
@@ -219,14 +219,4 @@ func clip(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
-}
-
-func Supported(app string) bool {
-	switch app {
-	case "Google Chrome", "Google Chrome Canary", "Chromium", "Microsoft Edge",
-		"Brave Browser", "Arc", "Vivaldi", "Opera", "Safari", "Dia", "Comet":
-		return true
-	default:
-		return false
-	}
 }

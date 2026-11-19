@@ -22,7 +22,8 @@ function MiniApp() {
   const [draft, setDraft] = useState('')
   const [sayErr, setSayErr] = useState('')
   const [act, setAct] = useState('')
-  const [modelName, setModelName] = useState('')
+  const [bound, setBound] = useState<{ provider: string; model: string } | null>(null)
+  const [focusId, setFocusId] = useState('')
   const [choices, setChoices] = useState<ModelChoice[] | null>(null)
   const [pickerOn, setPickerOn] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
@@ -33,7 +34,9 @@ function MiniApp() {
   agentsRef.current = model.agents
   const agentRef = useRef('')
   const answerRef = useRef('')
-  agentRef.current = model.agents[0]?.id ?? ''
+  const focus = focusId || model.agents[0]?.id || ''
+  agentRef.current = focus
+  const focusAgent = model.agents.find((a) => a.id === focus)
 
   useEffect(() => {
     if (view.mode !== 'completed') return
@@ -88,12 +91,12 @@ function MiniApp() {
 
   useEffect(() => {
     if (demo) return
-    const id = agentRef.current
+    const id = focus
     if (!id) return
     API.getAgentConfig(id)
-      .then((cfg) => setModelName(cfg.model || cfg.provider || ''))
+      .then((cfg) => setBound({ provider: cfg.provider, model: cfg.model }))
       .catch(() => {})
-  }, [demo, model.agents])
+  }, [demo, focus])
 
   const line = (text: string) => text.replace(/\s+/g, ' ').trim().slice(-48)
 
@@ -110,6 +113,7 @@ function MiniApp() {
     })
     const unsubMessage = events.agentMessage.on(({ id, message }) => {
       if (message.role !== 'assistant') return
+      setFocusId(id)
       const text = showText(message.content)
       setRows((prev) =>
         upsertAgent(prev, id, agentsRef.current, speakerRef, (row) => ({
@@ -147,7 +151,7 @@ function MiniApp() {
   const [hover, setHover] = useState(false)
   const showRise = floats.length > 0 || !!hint
   const pickerRows = pickerOn ? Math.min(grouped(choices).reduce((n, g) => n + 1 + g.items.length, 0) || 1, 6) : 0
-  const extra = Math.min(3, floats.length + (hint && !reply ? 1 : 0)) * 78 + (assist.on ? 22 : 0) + (pickerRows ? pickerRows * 28 + 12 : 0)
+  const extra = Math.min(3, floats.length + (hint && !reply ? 1 : 0)) * 78 + (assist.on ? 58 : 0) + (pickerRows ? pickerRows * 28 + 12 : 0)
 
   useEffect(() => {
     if (hover) return
@@ -220,8 +224,9 @@ function MiniApp() {
           model: choice.model,
         }),
       )
-      .then(() => {
-        setModelName(choice.model)
+      .then(() => API.getAgentConfig(id))
+      .then((cfg) => {
+        setBound({ provider: cfg.provider, model: cfg.model })
         setPickerOn(false)
       })
       .catch((err: unknown) => {
@@ -233,7 +238,7 @@ function MiniApp() {
     e.preventDefault()
     const text = draft.trim()
     if (!text) return
-    const id = model.agents[0]?.id
+    const id = focus
     if (!id) {
       setSayErr('还没有会话')
       return
@@ -294,7 +299,7 @@ function MiniApp() {
             <article className="rise__card" style={{ ['--accent' as string]: 'var(--cyan)' }}>
               <header>
                 <i style={{ background: 'var(--cyan)' }} />
-                <b>协助</b>
+                <b>来自{assist.app || '当前窗口'}这一屏的字</b>
                 {assist.action && (
                   <button
                     type="button"
@@ -314,6 +319,12 @@ function MiniApp() {
             </article>
           )}
         </div>
+      )}
+      {assist.on && (
+        <p className="eye">
+          <b>{watchCopy(assist).title}</b>
+          <span>{watchCopy(assist).body}</span>
+        </p>
       )}
       <Island
         view={view}
@@ -335,14 +346,6 @@ function MiniApp() {
         }}
         onFlightDone={(id) => dispatch({ type: 'flight-done', id, now: Date.now() })}
       />
-      {assist.on && (
-        <p className="eye">
-          <b>
-            {`正在看 ${assist.app || '主屏幕'}`}
-            {assist.seen && assist.seen !== '画面变了，停一下再读' ? ` · ${assist.seen}` : ''}
-          </b>
-        </p>
-      )}
       {!demo && pickerOn && (
         <div className="models" role="listbox" aria-label="选择模型">
           {choices === null && <p className="models__vendor">读取中</p>}
@@ -355,8 +358,8 @@ function MiniApp() {
                   key={`${m.provider}/${m.model}`}
                   type="button"
                   role="option"
-                  aria-selected={m.model === modelName}
-                  className={m.model === modelName ? 'is-on' : ''}
+                  aria-selected={!!bound && m.provider === bound.provider && m.model === bound.model}
+                  className={bound && m.provider === bound.provider && m.model === bound.model ? 'is-on' : ''}
                   disabled={!m.ready}
                   onClick={() => pickModel(m)}
                 >
@@ -374,9 +377,9 @@ function MiniApp() {
             className={pickerOn ? 'model is-on' : 'model'}
             aria-expanded={pickerOn}
             onClick={togglePicker}
-            title="选择模型"
+            title={focusAgent ? `发给 ${focusAgent.name}` : '选择模型'}
           >
-            {modelName || '模型'}
+            {chipLabel(focusAgent?.name || '', bound)}
           </button>
           <input
             value={draft}
@@ -438,6 +441,25 @@ function showText(text: string) {
   return body.replace(/\*\*/g, '')
 }
 
+function watchCopy(a: { app?: string; seen?: string; text?: string; busy?: string; err?: string }) {
+  const app = a.app || '当前窗口'
+  const title = `正在看 ${app}`
+  if (a.err) return { title, body: a.err }
+  if (a.text) return { title, body: `建议：${a.text}。依据是这一屏上的字。` }
+  if (a.busy) return { title, body: '正在根据这一屏上的字想一条建议。' }
+  if (a.seen === '画面变了，停一下再读') return { title, body: '画面还在动。停稳后才读这一屏的字。' }
+  if (a.seen) return { title, body: `还没有建议。这一屏上先看到的字是「${a.seen}」。` }
+  return { title, body: '画面停稳后，读这一屏上的字，再给一条建议。' }
+}
+
+function chipLabel(name: string, cfg: { provider: string; model: string } | null) {
+  const who = name || '会话'
+  if (!cfg?.provider && !cfg?.model) return who
+  const local = cfg.provider === 'llamacpp' || cfg.provider === 'ollama'
+  const vendor = local ? '本地' : vendorName(cfg.provider)
+  return `${who} · ${vendor}${cfg.model ? ' ' + cfg.model : ''}`
+}
+
 function holdFor(text: string) {
   const n = Array.from(text).length
   return Math.min(18000, Math.max(3200, 1600 + n * 140))
@@ -491,7 +513,6 @@ const VENDORS: Record<string, string> = {
   openai: 'OpenAI',
   claude: 'Claude',
   llamacpp: '本地 llama.cpp',
-  mock: '本地',
 }
 
 function vendorName(id: string) {

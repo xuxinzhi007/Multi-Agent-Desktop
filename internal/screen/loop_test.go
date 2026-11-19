@@ -7,6 +7,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,42 @@ func TestParseHint(t *testing.T) {
 	}
 	if _, err := ParseHint("没有"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestDropIslandRemovesOwnSuggestion(t *testing.T) {
+	raw := "来自 Feishu 这一屏的字\nMakefile 里的脚本名拼错了\n供应商初始日汇总\n采集 ID"
+	got := DropIsland(raw, "Makefile 里的脚本名拼错了")
+	if strings.Contains(got, "Makefile") || strings.Contains(got, "这一屏") {
+		t.Fatal(got)
+	}
+	if !strings.Contains(got, "供应商初始日汇总") {
+		t.Fatal(got)
+	}
+}
+
+func TestLoopClearsSuggestionWhenPictureChanges(t *testing.T) {
+	dir := t.TempDir()
+	frame := filepath.Join(dir, "frame.jpg")
+	writeSolid(t, frame, color.RGBA{8, 8, 8, 255})
+	l := &Loop{
+		Hooks: Hooks{
+			Front: func() (string, error) { return "Feishu", nil },
+			Own:   func(string) bool { return false },
+			Shot:  func(path string) error { return copyFile(frame, path) },
+			Read:  func(string) (string, error) { return "供应商初始日汇总", nil },
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l.cancel = cancel
+	l.cur = View{On: true, App: "Code", Text: "Makefile 里的脚本名拼错了", Action: "改脚本名"}
+	l.step(ctx, filepath.Join(dir, "shot.jpg"))
+	if l.cur.Text != "" || l.cur.Action != "" {
+		t.Fatalf("old suggestion kept: %+v", l.cur)
+	}
+	if l.cur.App != "Feishu" {
+		t.Fatalf("app = %q", l.cur.App)
 	}
 }
 

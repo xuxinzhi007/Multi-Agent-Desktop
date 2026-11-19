@@ -89,14 +89,14 @@ func TestCorruptFileFallsBackToDefaults(t *testing.T) {
 	}
 }
 
-// 首次启动没有配置文件时用 mock 默认值。
+// 首次启动没有配置文件时，不预置模型。
 func TestMissingFileUsesMockDefaults(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "nope", FileName))
 	if err != nil {
 		t.Fatalf("Open(不存在): %v", err)
 	}
-	if got := st.Get().LLM.Provider; got != "mock" {
-		t.Errorf("默认 provider = %q, want mock", got)
+	if got := st.Get().LLM.Provider; got != "" {
+		t.Errorf("默认 provider = %q, want empty", got)
 	}
 }
 
@@ -175,5 +175,25 @@ func TestUpsertProviderKeepsSeveral(t *testing.T) {
 	got := again.Get().Providers
 	if len(got) != 2 || got[0].Provider != "llamacpp" || got[1].APIKey != "sk" {
 		t.Fatalf("providers = %+v", got)
+	}
+}
+
+func TestFeishuSettingsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	want := Feishu{Enabled: true, AppID: "cli_x", AppSecret: "sec", AgentID: "a1"}
+	if err := st.SetFeishu(want); err != nil {
+		t.Fatalf("SetFeishu: %v", err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := again.Get().Feishu
+	if got != want {
+		t.Fatalf("Feishu = %+v, want %+v", got, want)
 	}
 }

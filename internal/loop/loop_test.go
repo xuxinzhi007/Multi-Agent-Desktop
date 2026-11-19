@@ -441,6 +441,135 @@ type recordingModel struct {
 	n        int
 }
 
+type streamScript struct {
+	turns   []llm.Turn
+	n       int
+	block   bool
+	started chan struct{}
+}
+
+func (m *streamScript) Turn(context.Context, []llm.Message, []tool.Spec) (llm.Turn, error) {
+	return llm.Turn{}, errors.New("stream model must not use Turn")
+}
+
+func (m *streamScript) TurnStream(ctx context.Context, msgs []llm.Message, tools []tool.Spec, onDelta func(llm.Delta)) (llm.Turn, error) {
+	if m.block {
+		onDelta(llm.Delta{Text: "一半"})
+		if m.started != nil {
+			close(m.started)
+		}
+		<-ctx.Done()
+		return llm.Turn{Calls: []tool.Call{tc("t")}}, ctx.Err()
+	}
+	if m.n >= len(m.turns) {
+		return llm.Turn{Text: "done"}, nil
+	}
+	turn := m.turns[m.n]
+	m.n++
+	if turn.Text != "" {
+		onDelta(llm.Delta{Text: turn.Text[:1]})
+		if len(turn.Text) > 1 {
+			onDelta(llm.Delta{Text: turn.Text[1:]})
+		}
+	}
+	if turn.Reasoning != "" {
+		onDelta(llm.Delta{Reasoning: turn.Reasoning})
+	}
+	return turn, nil
+}
+
+func TestStreamDeltasBeforeToolsAndNoCheckpointPerDelta(t *testing.T) {
+	m := &streamScript{turns: []llm.Turn{
+		{Text: "先看", Reasoning: "想一下", Calls: []tool.Call{tc("t")}},
+		{Text: "好了"},
+	}}
+	var invokes atomic.Int32
+	reg := tool.NewRegistry()
+	reg.Register(&countingTool{name: "t", n: &invokes})
+	r, em := newRunner(m, reg)
+	store := &memStore{}
+	r.Store = store
+
+	st := r.Run(context.Background(), &State{ID: "stream"})
+	if st.Phase != PhaseDone {
+		t.Fatalf("phase = %q reason %q", st.Phase, st.StopReason)
+	}
+	if invokes.Load() != 1 {
+		t.Fatalf("invokes = %d", invokes.Load())
+	}
+	ks := em.kinds()
+	deltaAt, toolAt := -1, -1
+	reasoning := 0
+	for i, k := range ks {
+		if k == "delta" && deltaAt < 0 {
+			deltaAt = i
+		}
+		if k == "tool.start" && toolAt < 0 {
+			toolAt = i
+		}
+		if k == "reasoning" {
+			reasoning++
+		}
+	}
+	if deltaAt < 0 || toolAt < 0 || deltaAt > toolAt {
+		t.Fatalf("events = %v", ks)
+	}
+	if reasoning != 1 {
+		t.Fatalf("reasoning events = %d, streamed reasoning must not be repeated", reasoning)
+	}
+	// 检查点在每次模型请求之前，再加上结束时的一次。不能按 delta 落盘。
+	if store.saves != 3 {
+		t.Fatalf("checkpoints = %d, want 3", store.saves)
+	}
+}
+
+func TestStreamCancelDoesNotInvoke(t *testing.T) {
+	started := make(chan struct{})
+	m := &streamScript{block: true, started: started}
+	var invokes atomic.Int32
+	reg := tool.NewRegistry()
+	reg.Register(&countingTool{name: "t", n: &invokes})
+	r, _ := newRunner(m, reg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *State, 1)
+	go func() { done <- r.Run(ctx, &State{ID: "cancel"}) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not start")
+	}
+	cancel()
+
+	select {
+	case got := <-done:
+		if got.Phase != PhaseStopped {
+			t.Fatalf("phase = %q", got.Phase)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not stop the stream")
+	}
+	if invokes.Load() != 0 {
+		t.Fatalf("Invoke ran %d times after cancel", invokes.Load())
+	}
+}
+
+type countingTool struct {
+	name string
+	n    *atomic.Int32
+}
+
+func (f *countingTool) Name() string        { return f.name }
+func (f *countingTool) Description() string { return "count" }
+func (f *countingTool) Writes() bool        { return false }
+func (f *countingTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}}}`)
+}
+func (f *countingTool) Execute(ctx context.Context, in json.RawMessage) tool.Result {
+	f.n.Add(1)
+	return tool.OK("result")
+}
+
 func (m *recordingModel) Turn(ctx context.Context, msgs []llm.Message, tools []tool.Spec) (llm.Turn, error) {
 	m.n++
 	if m.n > m.maxTurns {

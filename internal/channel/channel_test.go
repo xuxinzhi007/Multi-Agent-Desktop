@@ -412,28 +412,33 @@ func TestShouldReplyDirectRepliesWithoutMention(t *testing.T) {
 	}
 }
 
-// TC-036 —— DecideReplies 在 discuss 模式下只让 1 个成员回复。
-func TestDecideRepliesDiscussPicksSingleMember(t *testing.T) {
-	msg := Message{Text: "登录接口报错了"}
+// TestDecideRepliesDefaultSpeaker —— 没 @ 时只由当前指定的人接，改人从下一次调用生效。
+func TestDecideRepliesDefaultSpeaker(t *testing.T) {
+	msg := Message{Text: "你好"}
 	members := []Member{
-		{ID: "a1", Name: "前端", Role: "前端开发"},
-		{ID: "a2", Name: "后端", Role: "后端开发"},
-		{ID: "a3", Name: "测试", Role: "测试工程师"},
+		{ID: "a1", Name: "甲", Role: "前端"},
+		{ID: "a2", Name: "乙", Role: "后端"},
+		{ID: "a3", Name: "丙", Role: "测试"},
 	}
-	decisions := DecideReplies(PolicyDiscuss, msg, members)
+	if got := replyIDs(DecideReplies(PolicyDiscuss, msg, members, "a2")); len(got) != 1 || got[0] != "a2" {
+		t.Fatalf("默认接话人 = %v, want [a2]", got)
+	}
+	if got := replyIDs(DecideReplies(PolicyDiscuss, msg, members, "a1")); len(got) != 1 || got[0] != "a1" {
+		t.Fatalf("改过之后的接话人 = %v, want [a1]", got)
+	}
+	if got := replyIDs(DecideReplies(PolicyDiscuss, msg, members, "")); len(got) != 0 {
+		t.Fatalf("未指定时回复人数 = %v, want none", got)
+	}
+}
 
+func replyIDs(decisions []Decision) []string {
 	var replied []string
 	for _, d := range decisions {
 		if d.Reply {
 			replied = append(replied, d.Member.ID)
 		}
 	}
-	if len(replied) != 1 {
-		t.Fatalf("discuss 模式回复人数 = %d (%v), want 1", len(replied), replied)
-	}
-	if replied[0] != "a2" {
-		t.Errorf("discuss 模式选中 %q, want a2（「@接口报错」最匹配后端）", replied[0])
-	}
+	return replied
 }
 
 // TC-037 —— 被 @ 的必须回，其余成员跳过。
@@ -443,7 +448,7 @@ func TestDecideRepliesMentionWins(t *testing.T) {
 		{ID: "a1", Name: "前端", Role: "前端开发"},
 		{ID: "a2", Name: "后端", Role: "后端开发"},
 	}
-	decisions := DecideReplies(PolicyDiscuss, msg, members)
+	decisions := DecideReplies(PolicyDiscuss, msg, members, "a2")
 
 	byID := map[string]Decision{}
 	for _, d := range decisions {
@@ -457,6 +462,20 @@ func TestDecideRepliesMentionWins(t *testing.T) {
 	}
 }
 
+func TestDecideRepliesAllMentionsEach(t *testing.T) {
+	members := []Member{
+		{ID: "a1", Name: "甲"},
+		{ID: "a2", Name: "乙"},
+		{ID: "a3", Name: "丙"},
+	}
+	for _, text := range []string{"@所有人 看一下", "@all 看一下"} {
+		got := replyIDs(DecideReplies(PolicyDiscuss, Message{Text: text}, members, "a1"))
+		if len(got) != 3 {
+			t.Errorf("%q 回复人数 = %v, want 3", text, got)
+		}
+	}
+}
+
 // TC-038 —— direct 模式全员回复。
 func TestDecideRepliesDirectRepliesAll(t *testing.T) {
 	msg := Message{Text: "开始吧"}
@@ -464,7 +483,7 @@ func TestDecideRepliesDirectRepliesAll(t *testing.T) {
 		{ID: "a1", Name: "前端", Role: "前端开发"},
 		{ID: "a2", Name: "后端", Role: "后端开发"},
 	}
-	for _, d := range DecideReplies(PolicyDirect, msg, members) {
+	for _, d := range DecideReplies(PolicyDirect, msg, members, "") {
 		if !d.Reply {
 			t.Errorf("direct 模式 %s reply = false, want true", d.Member.ID)
 		}
@@ -473,7 +492,7 @@ func TestDecideRepliesDirectRepliesAll(t *testing.T) {
 
 // TC-039 —— 空成员列表不产生判定。
 func TestDecideRepliesEmptyMembers(t *testing.T) {
-	if got := DecideReplies(PolicyDiscuss, Message{Text: "hi"}, nil); len(got) != 0 {
+	if got := DecideReplies(PolicyDiscuss, Message{Text: "hi"}, nil, "a1"); len(got) != 0 {
 		t.Errorf("DecideReplies(nil) = %v, want empty", got)
 	}
 }

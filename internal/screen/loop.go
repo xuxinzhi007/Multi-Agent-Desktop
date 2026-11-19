@@ -41,6 +41,7 @@ type Loop struct {
 	hash   string
 	n      int
 	sent   string
+	prev   string
 	other  string
 	cur    View
 	emit   func(View)
@@ -175,6 +176,7 @@ func (l *Loop) step(ctx context.Context, path string) time.Duration {
 	} else if app != "" && app != l.other {
 		l.other = app
 		l.hash, l.n, l.sent = "", 0, ""
+		l.cur.Text, l.cur.Action, l.cur.Err, l.cur.Busy = "", "", "", ""
 		label = app
 	}
 	l.mu.Unlock()
@@ -205,7 +207,7 @@ func (l *Loop) step(ctx context.Context, path string) time.Duration {
 		l.patch(func(v *View) {
 			v.App = label
 			v.Seen = "画面变了，停一下再读"
-			v.Busy = ""
+			v.Text, v.Action, v.Err, v.Busy = "", "", "", ""
 		})
 		return 0
 	}
@@ -225,7 +227,7 @@ func (l *Loop) step(ctx context.Context, path string) time.Duration {
 		l.markSent(hash)
 		return 5 * time.Second
 	}
-	text = strings.TrimSpace(text)
+	text = DropIsland(strings.TrimSpace(text), l.previous())
 	seen := Glimpse(text)
 	if len([]rune(text)) < 8 {
 		l.push(View{On: true, App: label, Seen: seen, Err: "这一屏几乎没有字"})
@@ -255,6 +257,7 @@ func (l *Loop) step(ctx context.Context, path string) time.Duration {
 		l.push(View{On: true, App: label, Seen: seen})
 		return 0
 	}
+	l.remember(hint.Text)
 	l.push(View{On: true, Text: hint.Text, Action: hint.Action, App: label, Seen: seen})
 	return 0
 }
@@ -273,6 +276,18 @@ func (l *Loop) patch(fn func(*View)) {
 	if emit != nil {
 		emit(v)
 	}
+}
+
+func (l *Loop) previous() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.prev
+}
+
+func (l *Loop) remember(text string) {
+	l.mu.Lock()
+	l.prev = text
+	l.mu.Unlock()
 }
 
 func (l *Loop) markSent(hash string) {

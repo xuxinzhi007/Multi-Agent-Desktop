@@ -179,6 +179,64 @@ func qoderTurn(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	return turn, nil
 }
 
+func qoderTurnStream(ctx context.Context, client *http.Client, cfg Config, msgs []Message, tools []tool.Spec, onDelta func(Delta)) (Turn, error) {
+	if onDelta == nil {
+		onDelta = func(Delta) {}
+	}
+	if cfg.APIKey == "" {
+		if saved, ok := LocalQoder(); ok {
+			cfg.APIKey = saved.APIKey
+		}
+	}
+	resp, err := qoderPost(ctx, client, cfg, msgs, tools)
+	if err != nil {
+		return Turn{}, err
+	}
+	defer resp.Body.Close()
+	var turn Turn
+	var acc []qoderToolAcc
+	var turnErr error
+	err = qoderRead(ctx, resp.Body, func(d qoderDelta) bool {
+		if d.err != "" {
+			turnErr = fmt.Errorf("qoder: %s", d.err)
+			return false
+		}
+		if d.content != "" || d.reasoning != "" {
+			onDelta(Delta{Text: d.content, Reasoning: d.reasoning})
+		}
+		turn.Text += d.content
+		turn.Reasoning += d.reasoning
+		acc = qoderMergeTools(acc, d.tools)
+		return !d.done
+	})
+	if ctx.Err() != nil {
+		return Turn{}, ctx.Err()
+	}
+	if turnErr != nil {
+		return Turn{}, turnErr
+	}
+	if err != nil {
+		return Turn{}, err
+	}
+	for _, tc := range acc {
+		if tc.id == "" && tc.name == "" && strings.TrimSpace(tc.args) == "" {
+			continue
+		}
+		if tc.name == "" {
+			return Turn{}, fmt.Errorf("llm: tool call missing name")
+		}
+		args := strings.TrimSpace(tc.args)
+		if args == "" {
+			args = "{}"
+		}
+		if !json.Valid([]byte(args)) {
+			return Turn{}, fmt.Errorf("llm: tool %s arguments are incomplete", tc.name)
+		}
+		turn.Calls = append(turn.Calls, tool.Call{ID: tc.id, Name: tc.name, Input: json.RawMessage(args)})
+	}
+	return turn, nil
+}
+
 type qoderDelta struct {
 	content   string
 	reasoning string

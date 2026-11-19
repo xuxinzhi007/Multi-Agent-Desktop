@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { API, type AgentView as Agent, type Channel } from '../mygo'
 import CreateAgentModal from './CreateAgentModal'
-import { bodyOf, truncate } from '../lib/message'
 
 type Props = {
   agents: Agent[]
@@ -17,6 +16,7 @@ type Props = {
   onDelete: (id: string) => void
   onCreateChannel: (name: string, members: string[]) => void
   onOpenSettings: () => void
+  onOpenBrowser: () => void
   /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
   createOpen: boolean
   onCreateOpenChange: (open: boolean) => void
@@ -58,6 +58,15 @@ function ViewTab({
       {children}
     </button>
   )
+}
+
+function sessionLine(a: Agent): string {
+  const model = a.llm?.provider === 'mock' ? '' : a.llm?.model || ''
+  const folder = a.workDir ? a.workDir.split(/[/\\]/).filter(Boolean).slice(-1)[0] : ''
+  if (!model && !folder) return '未选模型和文件夹'
+  if (!model) return `未选模型 · ${folder}`
+  if (!folder) return `${model} · 未选文件夹`
+  return `${model} · ${folder}`
 }
 
 export default function Sidebar(p: Props) {
@@ -110,6 +119,14 @@ export default function Sidebar(p: Props) {
         <button
           className="c-icon-btn"
           style={{ marginLeft: 'auto' }}
+          onClick={p.onOpenBrowser}
+          title="内置浏览器"
+          aria-label="内置浏览器"
+        >
+          ⌬
+        </button>
+        <button
+          className="c-icon-btn"
           onClick={p.onOpenSettings}
           title="设置"
           aria-label="设置"
@@ -138,7 +155,9 @@ export default function Sidebar(p: Props) {
             运行 <b style={{ fontWeight: 600 }}>{running}</b>
           </span>
         )}
-        <span style={{ marginLeft: 'auto', color: 'var(--text-disabled)' }}>{p.provider}</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--text-disabled)' }}>
+          {p.agents.filter((a) => a.llm?.model && a.llm.provider !== 'mock').length} 个已选模型
+        </span>
       </div>
 
       {/* 列表 */}
@@ -370,15 +389,15 @@ export default function Sidebar(p: Props) {
                     textOverflow: 'ellipsis',
                   }}
                 >
-                  {a.status === 'blocked'
+                  {a.busy
+                    ? `正在${a.busy}里回答`
+                    : a.status === 'blocked'
                     ? `⚠ ${a.blockedReason || '等你处理'}`
                     : a.status === 'running'
                       ? '正在处理…'
                       : a.status === 'queued'
                         ? `排队中 (${a.queueLen})`
-                      : a.messages.length > 1
-                        ? truncate(bodyOf(a.messages[a.messages.length - 1].content), 30)
-                        : a.role}
+                      : sessionLine(a)}
                 </div>
               </div>
               <button

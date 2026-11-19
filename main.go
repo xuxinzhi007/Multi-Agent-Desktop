@@ -18,10 +18,13 @@ import (
 	"github.com/egoist/mygo"
 
 	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
+	"multi-agent-desktop/internal/feishu"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/privacy"
 	"multi-agent-desktop/internal/pty"
 	"multi-agent-desktop/internal/screen"
 	"multi-agent-desktop/internal/workdir"
@@ -35,7 +38,9 @@ type API struct {
 	channels   *channel.Manager
 	kb         knowledge.Store
 	settings   *config.Store
+	bot        *feishu.Service
 	win        *mygo.Window
+	desk       *browser.Desk
 	screen     *screen.Loop
 	screenOnce sync.Once
 }
@@ -98,6 +103,8 @@ var (
 type StatusEvent struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+	// Busy 非空时，这个会话正在该群里回答。
+	Busy string `json:"busy,omitempty"`
 }
 
 // ToolStartEvent 是工具调用开始。
@@ -142,8 +149,9 @@ type AgentStoppedEvent struct {
 
 // DeltaEvent 是流式输出片段。
 type DeltaEvent struct {
-	ID    string `json:"id"`
-	Delta string `json:"delta"`
+	ID        string `json:"id"`
+	Delta     string `json:"delta"`
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 // MessageEvent 是一条完整消息。
@@ -367,6 +375,8 @@ type AgentView struct {
 	QueuedAt int64  `json:"queuedAt,omitempty"`
 	LastTool string `json:"lastTool,omitempty"`
 	Chars    int    `json:"chars,omitempty"`
+	// Busy 非空时，这个会话正在该群里回答。
+	Busy string `json:"busy,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -389,6 +399,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		StartedAt:     s.StartedAt,
 		LastTool:      s.LastTool,
 		Chars:         s.Chars,
+		Busy:          s.BusyPlace,
 	}
 }
 
@@ -544,6 +555,17 @@ func (s *API) CreateChannel(name string, members []string, policy string) channe
 	return ch
 }
 
+// SetChannelSpeaker 指定这个群在没人被 @ 时由谁接话。空字符串表示先不指定。
+// 已经在答的那一轮不变，下一条消息才用新的人。
+func (s *API) SetChannelSpeaker(channelId, agentId string) (channel.Channel, error) {
+	ch, err := s.channels.SetSpeaker(channelId, agentId)
+	if err != nil {
+		return channel.Channel{}, err
+	}
+	ChannelCreated.Emit(s.win, ch)
+	return ch, nil
+}
+
 // ListChannels 返回所有频道快照。
 func (s *API) ListChannels() []channel.Channel {
 	return s.channels.List()
@@ -595,7 +617,7 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		byID[m.ID] = m
 	}
 
-	decisions := channel.DecideReplies(policy, msg, members)
+	decisions := channel.DecideReplies(policy, msg, members, ch.Speaker)
 	byDecision := make(map[string]channel.Decision, len(decisions))
 	for _, d := range decisions {
 		byDecision[d.Member.ID] = d
@@ -604,7 +626,7 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 	// 6. 按原 recipients 顺序投递，保证 deliveries 顺序稳定。
 	// prompt 里只放「谁说的 + 说了什么」，不塞频道 ID —— ID 是内部标识，
 	// 混进对话历史后既污染上下文也会原样显示给用户。
-	prompt := fmt.Sprintf("%s\n%s: %s", transcript.Render(), fromName, text)
+	prompt := fmt.Sprintf("%s: %s", fromName, text)
 	deliveries := make([]channel.Delivery, 0, len(recipients))
 	var errs []string
 
@@ -627,9 +649,11 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		}
 
 		err := s.mgr.Prompt(ctx, agent.PromptRequest{
-			AgentID:   agentId,
-			Text:      prompt,
-			ChannelID: channelId, // 回复写回频道，不再靠字符串标记
+			AgentID:     agentId,
+			Text:        prompt,
+			ChannelID:   channelId,
+			ChannelName: ch.Name,
+			Context:     transcript.Render(),
 		})
 		if err != nil {
 			errs = append(errs, err.Error())
@@ -668,9 +692,15 @@ func (s *API) PromptAgent(ctx context.Context, req PromptRequest) error {
 
 // RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。
 func (s *API) RunShell(ctx context.Context, req ShellRequest) {
+	dir := ""
+	if s.mgr != nil && req.AgentID != "" {
+		if a, ok := s.mgr.Get(req.AgentID); ok {
+			dir = a.EffectiveWorkDir(s.mgr)
+		}
+	}
 	go func() {
 		ShellStart.Emit(s.win, ShellEvent{AgentID: req.AgentID, Command: req.Command})
-		res := s.runner.Run(ctx, req.Command)
+		res := s.runner.RunIn(ctx, dir, req.Command)
 		ShellResult_.Emit(s.win, ShellResultEvent{
 			AgentID: req.AgentID,
 			Command: req.Command,
@@ -1060,8 +1090,139 @@ func (s *API) SetWorkDir(dir string) string {
 	return dir
 }
 
-// SettingsPath 返回配置文件路径。前端用它告诉用户「密钥存在哪」，
-// 也让「打开配置目录」这类操作有明确目标。
+// OpenPrivacy 打开系统设置里对应的权限页，方便之后授权。
+func (s *API) OpenPrivacy(kind string) error {
+	pane := map[string]string{
+		"screen":        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+		"accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+		"automation":    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+	}[kind]
+	if pane == "" {
+		return fmt.Errorf("未知权限")
+	}
+	return mygo.Shell.OpenExternal(pane)
+}
+
+// OpenWorkbench 打开应用自己的浏览器。地址为空时只把窗口带到前面。
+func (s *API) OpenWorkbench(url string) (string, error) {
+	if s.desk == nil {
+		return "", fmt.Errorf("内置浏览器还没准备好")
+	}
+	return s.desk.Open(url)
+}
+
+// PrivacyGrant 是一项系统权限现在的状态。state 为 yes、no 或 unknown。
+type PrivacyGrant struct {
+	Kind  string `json:"kind"`
+	State string `json:"state"`
+}
+
+// PrivacyStatus 读取屏幕录制、辅助功能和自动化是否已经允许。不弹授权框。
+func (s *API) PrivacyStatus() []PrivacyGrant {
+	st := privacy.Status()
+	out := make([]PrivacyGrant, 0, 3)
+	for _, kind := range []string{"screen", "accessibility", "automation"} {
+		state := st[kind]
+		if state != "yes" && state != "no" {
+			state = "unknown"
+		}
+		out = append(out, PrivacyGrant{Kind: kind, State: state})
+	}
+	return out
+}
+
+// FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。
+type FeishuView struct {
+	Enabled   bool   `json:"enabled"`
+	AppID     string `json:"appId"`
+	HasSecret bool   `json:"hasSecret"`
+	AgentID   string `json:"agentId"`
+	Status    string `json:"status"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// FeishuSave 是设置页提交的飞书配置。AppSecret 为空表示沿用已保存的值。
+type FeishuSave struct {
+	Enabled   bool   `json:"enabled"`
+	AppID     string `json:"appId"`
+	AppSecret string `json:"appSecret"`
+	AgentID   string `json:"agentId"`
+}
+
+// GetFeishu 返回飞书机器人配置和长连接状态。
+func (s *API) GetFeishu() FeishuView {
+	cfg := config.Feishu{}
+	if s.settings != nil {
+		cfg = s.settings.Get().Feishu
+	}
+	return s.feishuView(cfg)
+}
+
+// SaveFeishu 保存飞书机器人配置，并按开关拉起或停掉长连接。
+func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
+	cur := config.Feishu{}
+	if s.settings != nil {
+		cur = s.settings.Get().Feishu
+	}
+	next := config.Feishu{
+		Enabled:   in.Enabled,
+		AppID:     strings.TrimSpace(in.AppID),
+		AppSecret: strings.TrimSpace(in.AppSecret),
+		AgentID:   strings.TrimSpace(in.AgentID),
+	}
+	if next.AppSecret == "" {
+		next.AppSecret = cur.AppSecret
+	}
+	if next.Enabled {
+		if next.AppID == "" || next.AppSecret == "" || next.AgentID == "" {
+			return FeishuView{}, fmt.Errorf("启用前要填写 App ID、App Secret，并选择一个会话")
+		}
+		if s.mgr == nil {
+			return FeishuView{}, fmt.Errorf("会话还没准备好")
+		}
+		if _, ok := s.mgr.Get(next.AgentID); !ok {
+			return FeishuView{}, fmt.Errorf("绑定的会话不存在")
+		}
+	}
+	if s.settings != nil {
+		if err := s.settings.SetFeishu(next); err != nil {
+			return FeishuView{}, err
+		}
+	}
+	if s.bot != nil {
+		s.bot.Apply(feishuConfig(next))
+	}
+	return s.feishuView(next), nil
+}
+
+func (s *API) feishuView(cfg config.Feishu) FeishuView {
+	view := FeishuView{
+		Enabled:   cfg.Enabled,
+		AppID:     cfg.AppID,
+		HasSecret: cfg.AppSecret != "",
+		AgentID:   cfg.AgentID,
+		Status:    "stopped",
+	}
+	if s.bot != nil {
+		st := s.bot.Status()
+		if st.State != "" {
+			view.Status = st.State
+		}
+		view.Detail = st.Detail
+	}
+	return view
+}
+
+func feishuConfig(cfg config.Feishu) feishu.Config {
+	return feishu.Config{
+		Enabled:   cfg.Enabled,
+		AppID:     cfg.AppID,
+		AppSecret: cfg.AppSecret,
+		AgentID:   cfg.AgentID,
+	}
+}
+
+// SettingsPath 返回配置文件路径。
 func (s *API) SettingsPath() string {
 	if s.settings == nil {
 		return ""
@@ -1100,11 +1261,7 @@ func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 	return v, nil
 }
 
-// ClearAgentLLM 清掉会话级模型配置，让该会话回落到全局默认。
-//
-// 为什么需要独立的方法：之前「跟随全局」被编码成 provider:"mock"，
-// 但 mock 本身是合法 provider —— 「未设置」和「显式选了 mock」
-// 无法区分，导致 UI 上无法表达两种不同的意图。
+// ClearAgentLLM 清掉这个会话自己的模型。清掉之后它没有模型，直到再次选择。
 func (s *API) ClearAgentLLM(agentId string) (AgentView, error) {
 	if err := s.mgr.SetAgentLLM(agentId, llm.Config{}); err != nil {
 		return AgentView{}, err
@@ -1118,7 +1275,7 @@ func (s *API) ClearAgentLLM(agentId string) (AgentView, error) {
 	return v, nil
 }
 
-// GetAgentConfig 返回某个会话实际生效的模型配置（含全局回落）。
+// GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。
 func (s *API) GetAgentConfig(agentId string) LLMConfig {
 	return s.mgr.LLMConfigFor(agentId)
 }
@@ -1148,7 +1305,7 @@ func (s *API) listModelsWithSavedCreds(ctx context.Context, cfg llm.Config) ([]s
 
 	switch {
 	case cfg.Provider == "" || cfg.Provider == "mock":
-		return []string{"mock"}, nil
+		return nil, fmt.Errorf("%w：这个会话还没有模型", llm.ErrNotConfigured)
 	case cfg.BaseURL == "":
 		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 Base URL", llm.ErrNotConfigured, cfg.Provider)
 	case cfg.APIKey == "" && !llm.IsLocalProvider(cfg.Provider):
@@ -1183,8 +1340,6 @@ type ProviderStatus struct {
 func (s *API) ProvidersStatus() []ProviderStatus {
 	base := s.mgr.LLMConfig()
 	out := []ProviderStatus{
-		{ID: "mock", Ready: true, Reason: "内置示例模型"},
-		// 本地服务不需要 Key，默认就绪 —— 只要服务在跑就能用。
 		{
 			ID:      "llamacpp",
 			Ready:   true,
@@ -1758,7 +1913,8 @@ func toAgentStatus(data any) (StatusEvent, bool) {
 	if id == "" || st == "" {
 		return StatusEvent{}, false
 	}
-	return StatusEvent{ID: id, Status: st}, true
+	busy, _ := m["busy"].(string)
+	return StatusEvent{ID: id, Status: st, Busy: busy}, true
 }
 
 func toAgentDelta(data any) (DeltaEvent, bool) {
@@ -1772,7 +1928,7 @@ func toAgentDelta(data any) (DeltaEvent, bool) {
 	if id == "" {
 		return DeltaEvent{}, false
 	}
-	return DeltaEvent{ID: id, Delta: delta}, true
+	return DeltaEvent{ID: id, Delta: delta, ChannelID: getStr(m, "channelId")}, true
 }
 
 func toAgentReasoning(data any) (AgentReasoningEvent, bool) {
@@ -2069,7 +2225,7 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 }
 
 func main() {
-	cfg := llm.Config{Provider: "mock"}
+	cfg := llm.Config{}
 	var mgr *agent.Manager
 	var win *mygo.Window
 	var miniWin *mygo.Window
@@ -2092,7 +2248,11 @@ func main() {
 		settings, _ = config.Open("") // 降级为内存配置，应用仍可启动
 	}
 	effective := config.ApplyEnv(settings.Get())
-	if len(effective.Providers) == 0 && effective.LLM.Provider != "" && effective.LLM.Provider != "mock" {
+	if effective.LLM.Provider == "mock" {
+		effective.LLM = llm.Config{}
+		_ = settings.SetLLM(effective.LLM)
+	}
+	if len(effective.Providers) == 0 && effective.LLM.Provider != "" {
 		effective.Providers = []llm.Config{effective.LLM}
 		if err := settings.SetProviders(effective.Providers); err != nil {
 			log.Printf("persist providers: %v", err)
@@ -2144,10 +2304,21 @@ func main() {
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
 	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
+	api.bot = feishu.New(feishu.Hooks{
+		Run:   mgr.RunPrompt,
+		Reply: feishu.ReplyText,
+		Dial:  feishu.Dial,
+	})
+	api.bot.Apply(feishuConfig(effective.Feishu))
+	api.desk = browser.NewDesk()
+	browser.SetDesk(api.desk)
 
 	mygo.Bind(api)
 
 	mygo.App.OnQuit(func() {
+		if api.bot != nil {
+			api.bot.Apply(feishu.Config{})
+		}
 		if mgr != nil {
 			mgr.Shutdown()
 		}

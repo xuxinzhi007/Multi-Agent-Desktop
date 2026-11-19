@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -27,7 +28,16 @@ func FrontApp() (string, error) {
 }
 
 func ShotDisplay(path string) error {
-	cmd := exec.Command("/usr/sbin/screencapture", "-x", "-t", "jpg", "-D", "1", path)
+	if id := frontWindow(); id > 0 {
+		if err := capture(path, "-l", strconv.Itoa(id)); err == nil {
+			return nil
+		}
+	}
+	return capture(path, "-D", "1")
+}
+
+func capture(path, flag, value string) error {
+	cmd := exec.Command("/usr/sbin/screencapture", "-x", "-t", "jpg", flag, value, path)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -41,6 +51,20 @@ func ShotDisplay(path string) error {
 		return errors.New("截屏是空的，先在系统设置 → 隐私与安全性 → 屏幕录制里允许本应用")
 	}
 	return nil
+}
+
+func frontWindow() int {
+	bin, err := ocrBinary()
+	if err != nil {
+		return 0
+	}
+	own := strings.ToLower(strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe"))
+	out, err := exec.Command(bin, "--front-window", own).Output()
+	if err != nil {
+		return 0
+	}
+	id, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return id
 }
 
 func ReadText(path string) (string, error) {

@@ -22,13 +22,23 @@ import (
 // FileName 是配置文件名。
 const FileName = "config.json"
 
-// Settings 是应用级设置。零值是安全的默认值（mock provider）。
+// Settings 是应用级设置。模型不在这里预置。
 type Settings struct {
 	LLM llm.Config `json:"llm"`
 	// Providers 是已保存的服务厂商。模型不在这里选，只存地址和 Key。
 	Providers []llm.Config `json:"providers,omitempty"`
 	// WorkDir 是新建会话的默认工作目录。空则用应用数据目录下的 workspace，不用用户主目录。
 	WorkDir string `json:"workDir,omitempty"`
+	// Feishu 是企业自建机器人。Secret 与模型 Key 放在同一份 0600 文件里。
+	Feishu Feishu `json:"feishu,omitempty"`
+}
+
+// Feishu 是飞书机器人的接入配置。
+type Feishu struct {
+	Enabled   bool   `json:"enabled"`
+	AppID     string `json:"appId,omitempty"`
+	AppSecret string `json:"appSecret,omitempty"`
+	AgentID   string `json:"agentId,omitempty"`
 }
 
 // Store 读写配置文件，并发安全。
@@ -40,7 +50,7 @@ type Store struct {
 
 // Open 打开（或创建）配置文件。path 为空时只在内存里工作。
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, cur: Settings{LLM: llm.Config{Provider: "mock"}}}
+	s := &Store{path: path, cur: Settings{}}
 	if path == "" {
 		return s, nil
 	}
@@ -65,8 +75,8 @@ func (s *Store) load() error {
 		_ = os.Rename(s.path, s.path+".corrupt")
 		return fmt.Errorf("config: parse %s (已备份为 .corrupt): %w", s.path, err)
 	}
-	if st.LLM.Provider == "" {
-		st.LLM.Provider = "mock"
+	if st.LLM.Provider == "mock" {
+		st.LLM.Provider = ""
 	}
 	s.cur = st
 	return nil
@@ -118,6 +128,15 @@ func (s *Store) UpsertProvider(cfg llm.Config) ([]llm.Config, error) {
 	snap := s.cur
 	s.mu.Unlock()
 	return out, s.write(snap)
+}
+
+// SetFeishu 更新飞书机器人配置并落盘。
+func (s *Store) SetFeishu(f Feishu) error {
+	s.mu.Lock()
+	s.cur.Feishu = f
+	next := s.cur
+	s.mu.Unlock()
+	return s.write(next)
 }
 
 // SetWorkDir 更新默认工作目录并落盘。

@@ -59,7 +59,14 @@ func shellFor() (string, []string) {
 
 // Run 执行一条命令并等待完成。ctx 取消会杀整个进程组。
 func (r *Runner) Run(ctx context.Context, command string) Result {
-	dir := r.Dir()
+	return r.RunIn(ctx, r.Dir(), command)
+}
+
+// RunIn 在指定目录执行，不改 Runner 记住的目录。
+func (r *Runner) RunIn(ctx context.Context, dir, command string) Result {
+	if dir == "" {
+		return Result{Stderr: "这个会话还没有文件夹\n", ExitCode: -1}
+	}
 	if workdir.TooBroad(dir) {
 		return Result{Stderr: workdir.RejectReason + "\n", ExitCode: -1}
 	}

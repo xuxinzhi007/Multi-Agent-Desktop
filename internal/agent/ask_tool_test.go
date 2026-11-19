@@ -38,7 +38,7 @@ func TestAskAgentReportsPeerFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res := (&askAgentTool{m: m, fromID: a.ID}).Execute(ctx, []byte(`{"name":"乙","task":"看一下"}`))
-	if res.Status == tool.StatusOK || !strings.Contains(res.Content, "异常结束") || !strings.Contains(res.Content, "真实模型") {
+	if res.Status == tool.StatusOK || !strings.Contains(res.Content, "异常结束") || !strings.Contains(res.Content, "还没有模型") {
 		t.Fatalf("status=%s content=%s", res.Status, res.Content)
 	}
 }

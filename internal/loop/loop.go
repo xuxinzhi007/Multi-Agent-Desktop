@@ -104,6 +104,13 @@ type Model interface {
 	Turn(ctx context.Context, msgs []llm.Message, tools []tool.Spec) (llm.Turn, error)
 }
 
+// StreamModel 在一轮调用进行中把文本和推理增量交出来。
+// 工具调用仍然要等这一轮流结束、Turn 返回之后才执行。
+type StreamModel interface {
+	Model
+	TurnStream(ctx context.Context, msgs []llm.Message, tools []tool.Spec, onDelta func(llm.Delta)) (llm.Turn, error)
+}
+
 // Store 持久化运行状态，用于崩溃恢复。
 type Store interface {
 	Save(ctx context.Context, st *State) error
@@ -264,11 +271,12 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		r.checkpoint(runCtx, st)
 
 		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
+		// 增量只往外推，不在这里写检查点。
 		msgs := llm.Compact(raw, budget)
-		turn, err := r.Model.Turn(runCtx, msgs, r.specs())
+		turn, streamed, err := r.turn(runCtx, msgs)
 		if err != nil && budget > 0 && llm.IsContextOverflow(err.Error()) && runCtx.Err() == nil {
 			msgs = llm.Compact(raw, budget/2)
-			turn, err = r.Model.Turn(runCtx, msgs, r.specs())
+			turn, streamed, err = r.turn(runCtx, msgs)
 		}
 		if err != nil {
 			if runCtx.Err() != nil {
@@ -288,8 +296,9 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			return st
 		}
 
-		// ── 5. 把模型这轮说的话记进历史
-		if turn.Reasoning != "" {
+		// ── 5. 把模型这轮说的话记进历史。
+		// 流式路径的推理已经按增量推过，这里不再整段重发。
+		if turn.Reasoning != "" && !streamed {
 			r.emit(Event{Kind: "reasoning", Phase: st.Phase, Iter: st.Iteration, Text: turn.Reasoning})
 		}
 		if turn.Text != "" || turn.Reasoning != "" || len(turn.Calls) > 0 {
@@ -384,6 +393,23 @@ func (r *Runner) context(st *State) []llm.Message {
 	}
 	out = append(out, st.Messages...)
 	return out
+}
+
+func (r *Runner) turn(ctx context.Context, msgs []llm.Message) (llm.Turn, bool, error) {
+	specs := r.specs()
+	if sm, ok := r.Model.(StreamModel); ok {
+		turn, err := sm.TurnStream(ctx, msgs, specs, func(d llm.Delta) {
+			if d.Text != "" {
+				r.emit(Event{Kind: "delta", Phase: PhaseThinking, Text: d.Text})
+			}
+			if d.Reasoning != "" {
+				r.emit(Event{Kind: "reasoning", Phase: PhaseThinking, Text: d.Reasoning})
+			}
+		})
+		return turn, true, err
+	}
+	turn, err := r.Model.Turn(ctx, msgs, specs)
+	return turn, false, err
 }
 
 func (r *Runner) specs() []tool.Spec {

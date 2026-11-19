@@ -5,14 +5,8 @@ import { toast } from './Toast'
 /**
  * 会话里的模型选择。
  *
- * 选中态只看这次对话自己的模型。列表接口上的 current 是连接配置里
- * 残留的名字，拿它当选中会让按钮显示一个其实没写进这次对话的模型，
- * 发出去用的是另一份配置，必须再点一次才对得上。
- *
- * 对话还没有模型时，把第一个可用模型写进去。按钮上看到的就是
- * 下一条消息会用的那个，不用再点一次。
- *
- * 向上弹出：它长在输入框底栏，向下弹会被输入区挡住。
+ * 选中态只看这次对话自己记下的模型。没选就停在「选择模型」，
+ * 不会把别的会话或连接里的名字写进来。
  */
 /** shortModel 把长模型名压成能读的样子：
  *  qwen2.5-0.5b-instruct-q4_k_m.gguf → qwen2.5-0.5b
@@ -32,15 +26,12 @@ export default function ModelPicker({
   agentId,
   model,
   provider,
-  preferred,
   onPick,
 }: {
   agentId: string
   /** 这次对话已经记下的模型。空字符串表示还没选。 */
   model: string
   provider?: string
-  /** 会话还没有模型时，优先用这个名字（它在可用列表里才算）。 */
-  preferred?: string
   onPick: (m: ModelChoice) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -48,8 +39,6 @@ export default function ModelPicker({
   const [loading, setLoading] = useState(false)
   const [bound, setBound] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
-  const onPickRef = useRef(onPick)
-  onPickRef.current = onPick
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -70,28 +59,6 @@ export default function ModelPicker({
   useEffect(() => {
     setBound('')
   }, [agentId])
-
-  // 这场对话还没有模型：读到列表后把第一个可用的写进去。
-  // 只跑一次；失败或列表为空就停在「选择模型」，不再反复请求。
-  useEffect(() => {
-    if (model) return
-    let stop = false
-    API.listAllModels()
-      .then((list) => {
-        if (stop) return
-        setItems(list)
-        const pick =
-          list.find((m) => m.ready && !!preferred && m.model === preferred) ??
-          list.find((m) => m.ready)
-        if (!pick) return
-        setBound(pick.model)
-        onPickRef.current(pick)
-      })
-      .catch(() => {})
-    return () => {
-      stop = true
-    }
-  }, [agentId, model, preferred])
 
   // 点击外部收起。用 mousedown 而不是 click：
   // click 在元素被移除后才触发，会漏判。

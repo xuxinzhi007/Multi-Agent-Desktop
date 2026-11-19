@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import { API, type ProviderEndpoint } from '../mygo'
+import { API, type AgentView, type FeishuView, type ProviderEndpoint } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
 import DiagnosePanel from './DiagnosePanel'
 
@@ -247,11 +247,257 @@ function ProviderBoard() {
   )
 }
 
-type TabId = 'appearance' | 'model' | 'diagnose' | 'about'
+const PERMS: { kind: string; title: string; detail: string; grant: string }[] = [
+  {
+    kind: 'screen',
+    title: '屏幕录制',
+    detail: '协助要看当前屏幕上的字，才能给出和这一屏有关的建议。',
+    grant: '系统设置 → 隐私与安全性 → 屏幕录制',
+  },
+  {
+    kind: 'accessibility',
+    title: '辅助功能',
+    detail: '要操作 IDE 或其他应用的界面，需要这项。现在还没接上，授权先记在这里。',
+    grant: '系统设置 → 隐私与安全性 → 辅助功能',
+  },
+  {
+    kind: 'automation',
+    title: '自动化',
+    detail: '读取前台是哪个应用时会用到。网页的打开、读取和点击只在应用自己的浏览器窗口里。',
+    grant: '系统设置 → 隐私与安全性 → 自动化',
+  },
+]
+
+function AccessBoard() {
+  const [err, setErr] = useState('')
+  const [grants, setGrants] = useState<Record<string, string>>({})
+  useEffect(() => {
+    API.privacyStatus()
+      .then((rows) => {
+        const next: Record<string, string> = {}
+        for (const row of rows) next[row.kind] = row.state
+        setGrants(next)
+      })
+      .catch((e: unknown) => setErr(errText(e)))
+  }, [])
+  const open = (kind: string) => {
+    setErr('')
+    API.openPrivacy(kind).catch((e: unknown) => setErr(errText(e)))
+  }
+  const mark = (state: string | undefined) => {
+    if (state === 'yes') return '已授权'
+    if (state === 'no') return '未授权'
+    return '未能读取'
+  }
+  return (
+    <>
+      <section className="c-settings__card">
+        <div className="c-settings__card-head">
+          <div>
+            <div className="c-settings__card-title">系统权限</div>
+            <div className="c-settings__card-sub">已开通的标成已授权。未授权时再去系统设置打开。</div>
+          </div>
+        </div>
+        <div className="c-settings__card-body">
+          <div className="c-providers" role="list">
+            {PERMS.map((item) => {
+              const state = grants[item.kind]
+              const on = state === 'yes'
+              return (
+                <div key={item.kind} className="c-providers__row" role="listitem">
+                  <div className="c-providers__main">
+                    <span className="c-providers__name">{item.title}</span>
+                    <span className={`c-providers__badge ${on ? 'is-ok' : 'is-bad'}`}>{mark(state)}</span>
+                    {!on && (
+                      <button type="button" className="c-btn c-btn--ghost c-btn--sm" onClick={() => open(item.kind)}>
+                        去授权
+                      </button>
+                    )}
+                  </div>
+                  <p className="c-settings__hint">{item.detail}</p>
+                  <p className="c-settings__hint">{item.grant}</p>
+                </div>
+              )
+            })}
+          </div>
+          {err && (
+            <p className="c-settings__hint" role="status">
+              {err}
+            </p>
+          )}
+        </div>
+      </section>
+      <section className="c-settings__card">
+        <div className="c-settings__card-head">
+          <div>
+            <div className="c-settings__card-title">这些不是权限</div>
+            <div className="c-settings__card-sub">系统设置里没有对应开关</div>
+          </div>
+        </div>
+        <div className="c-settings__card-body">
+          <p className="c-settings__prose">
+            读写代码、跑测试、问其他会话、写笔记、看图片、删除会话，要等产品自己接上。选好这个会话的文件夹和模型之后，读文件和跑命令才会落在那个目录里。
+          </p>
+        </div>
+      </section>
+    </>
+  )
+}
+
+function FeishuBoard() {
+  const [view, setView] = useState<FeishuView | null>(null)
+  const [agents, setAgents] = useState<AgentView[]>([])
+  const [enabled, setEnabled] = useState(false)
+  const [appId, setAppId] = useState('')
+  const [secret, setSecret] = useState('')
+  const [agentId, setAgentId] = useState('')
+  const [showSecret, setShowSecret] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  const load = async () => {
+    const [next, list] = await Promise.all([API.getFeishu(), API.listAgents()])
+    setView(next)
+    setAgents(list)
+    setEnabled(next.enabled)
+    setAppId(next.appId)
+    setAgentId(next.agentId)
+  }
+
+  useEffect(() => {
+    void load().catch((e: unknown) => setErr(errText(e)))
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      API.getFeishu()
+        .then(setView)
+        .catch(() => {})
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      const next = await API.saveFeishu({
+        enabled,
+        appId,
+        appSecret: secret,
+        agentId,
+      })
+      setView(next)
+      setSecret('')
+    } catch (e) {
+      setErr(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusText = (state: string | undefined) => {
+    if (state === 'connected') return '已连接'
+    if (state === 'connecting') return '连接中'
+    if (state === 'error') return '连接失败'
+    return '未连接'
+  }
+
+  return (
+    <section className="c-settings__card">
+      <div className="c-settings__card-head">
+        <div>
+          <div className="c-settings__card-title">飞书机器人</div>
+          <div className="c-settings__card-sub">私聊和群聊文本交给一个会话，回复发回原消息</div>
+        </div>
+        <span className={`c-providers__badge ${view?.status === 'connected' ? 'is-ok' : 'is-bad'}`}>
+          {statusText(view?.status)}
+        </span>
+      </div>
+      <div className="c-settings__card-body">
+        <label className="c-settings__field">
+          <span className="c-settings__field-label">启用</span>
+          <input
+            type="checkbox"
+            aria-label="启用飞书机器人"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+        </label>
+        <label className="c-settings__field">
+          <span className="c-settings__field-label">App ID</span>
+          <input
+            className="c-settings__input"
+            aria-label="飞书 App ID"
+            value={appId}
+            spellCheck={false}
+            onChange={(e) => setAppId(e.target.value)}
+          />
+        </label>
+        <label className="c-settings__field">
+          <span className="c-settings__field-label">App Secret</span>
+          <span className="c-settings__input-row">
+            <input
+              className="c-settings__input"
+              aria-label="飞书 App Secret"
+              type={showSecret ? 'text' : 'password'}
+              autoComplete="off"
+              spellCheck={false}
+              value={secret}
+              placeholder={view?.hasSecret ? '已保存，留空则不修改' : ''}
+              onChange={(e) => setSecret(e.target.value)}
+            />
+            <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowSecret((v) => !v)}>
+              {showSecret ? '隐藏' : '显示'}
+            </button>
+          </span>
+        </label>
+        <label className="c-settings__field">
+          <span className="c-settings__field-label">绑定会话</span>
+          <select
+            className="c-settings__input"
+            aria-label="绑定会话"
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+          >
+            <option value="">选择一个会话</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="c-settings__hint">
+          私聊和群聊的文本都会交给这个会话，并回复到原消息。把机器人拉进群。飞书后台要选「使用长连接接收事件」，并订阅 im.message.receive_v1。应用退出后机器人离线。
+        </p>
+        {view?.detail && (
+          <p className="c-settings__hint" role="status">
+            {view.detail}
+          </p>
+        )}
+        <div className="c-settings__field">
+          <button type="button" className="c-btn c-btn--primary" disabled={busy} onClick={() => void save()}>
+            {busy ? '正在保存…' : '保存'}
+          </button>
+          {err && (
+            <span className="c-settings__hint" role="status">
+              {err}
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type TabId = 'appearance' | 'model' | 'feishu' | 'access' | 'diagnose' | 'about'
 
 const TABS: { id: TabId; icon: string; label: string }[] = [
   { id: 'appearance', icon: '◐', label: '外观' },
   { id: 'model', icon: '✦', label: '连接' },
+  { id: 'feishu', icon: '✉', label: '飞书' },
+  { id: 'access', icon: '⏻', label: '权限' },
   { id: 'diagnose', icon: '⚕', label: '诊断' },
   { id: 'about', icon: 'ⓘ', label: '关于' },
 ]
@@ -268,7 +514,15 @@ const TAB_HEAD: Record<TabId, { title: string; desc: string }> = {
   },
   model: {
     title: '连接',
-    desc: '每个厂商单独保存。保存后检查是否生效，生效的会标出来，并列出它加载到的模型。',
+    desc: '这里只保存厂商的地址和 Key。用哪个模型、哪个文件夹，在每个会话里单独选。',
+  },
+  feishu: {
+    title: '飞书',
+    desc: '把一个企业自建机器人的私聊和群聊接到本机的一个会话上。',
+  },
+  access: {
+    title: '权限',
+    desc: '这些是系统或浏览器里的开关。打开对应页面授权之后，相关能力才能用。',
   },
   about: {
     title: '关于',
@@ -291,9 +545,8 @@ const THEME_OPTIONS: { id: Theme; icon: string; label: string; desc: string }[] 
  * 内容装进分组卡片里，靠边框和间距分层而不是靠底色深浅。
  */
 export default function SettingsModal(p: Props) {
-  const { open, llm, version, onClose } = p
+  const { open, version, onClose } = p
 
-  const [cfg, setCfg] = useState<LLMConfig>(llm)
   const { theme, setTheme } = useTheme()
   const [tab, setTab] = useState<TabId>('appearance')
   const [settingsPath, setSettingsPath] = useState('')
@@ -311,11 +564,6 @@ export default function SettingsModal(p: Props) {
     if (!open) return
     setTab('appearance')
   }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    setCfg(llm)
-  }, [open, llm])
 
   return (
     <Modal
@@ -403,6 +651,10 @@ export default function SettingsModal(p: Props) {
 
             {tab === 'model' && <ProviderBoard />}
 
+            {tab === 'feishu' && <FeishuBoard />}
+
+            {tab === 'access' && <AccessBoard />}
+
             {tab === 'diagnose' && <DiagnosePanel />}
 
             {tab === 'about' && (
@@ -439,14 +691,8 @@ export default function SettingsModal(p: Props) {
                         <dd className="c-settings__kv-val mono">{version || '—'}</dd>
                       </div>
                       <div className="c-settings__kv-row">
-                        <dt className="c-settings__kv-key">当前提供方</dt>
-                        <dd className="c-settings__kv-val">{cfg.provider || '未设置'}</dd>
-                      </div>
-                      <div className="c-settings__kv-row">
-                        <dt className="c-settings__kv-key">API Key</dt>
-                        <dd className="c-settings__kv-val">
-                          {cfg.apiKey ? '已填写' : '未填写'}
-                        </dd>
+                        <dt className="c-settings__kv-key">模型和文件夹</dt>
+                        <dd className="c-settings__kv-val">每个会话自己一份</dd>
                       </div>
                     </dl>
                   </div>

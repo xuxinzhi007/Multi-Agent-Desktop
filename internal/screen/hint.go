@@ -50,3 +50,40 @@ func Glimpse(text string) string {
 	}
 	return oneLine(text, 42)
 }
+
+// DropIsland 去掉悬浮窗自己的字。整屏截图会把上一条建议读进去，下一条就重复它。
+func DropIsland(text, prev string) string {
+	prev = strings.TrimSpace(prev)
+	var keep []string
+	for _, line := range strings.Split(text, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" || islandLine(s, prev) {
+			continue
+		}
+		keep = append(keep, s)
+	}
+	return strings.Join(keep, "\n")
+}
+
+func islandLine(s, prev string) bool {
+	if prev != "" && strings.Contains(s, prev) {
+		return true
+	}
+	for _, p := range []string{
+		"正在看 ",
+		"这一屏上的字",
+		"这一屏上先看到",
+		"还没有建议",
+		"画面还在动",
+		"画面变了，停一下再读",
+		"依据是这一屏",
+		"来自当前窗口",
+		"来自 Feishu",
+		"协助",
+	} {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}

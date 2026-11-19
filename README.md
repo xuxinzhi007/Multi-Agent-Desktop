@@ -24,7 +24,7 @@
 - **Agent 间协作**：`Route` 显式派发消息给对方 agent
 - **群聊频道**：共享 transcript、@提及路由、三种回合策略（discuss / direct / roundrobin）
 - **知识库**：手写笔记（约定、术语、偏好），标签筛选 + 全文检索，显示引用情况并支持挂/摘
-- **CLI backend**：接 `claude -p` / `codex exec`，让 agent 真正读写代码
+- **loop backend**：进程内循环调用模型。一轮里文字和推理按增量推到界面，工具调用等这一轮流结束、参数拼成完整 JSON 后再执行
 - shell 命令执行：结果内联在对话流里，不另开面板（同步等待，见「已知限制」）
 - 检查器面板：工具调用、活动流、知识库
 - **知识库**按「被谁引用」排序与展示，能直接看到每条笔记正在被哪些 agent 使用
@@ -84,8 +84,7 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 │  internal/agent   会话管理、Queue/Worker、持久化  │
 │  internal/channel 频道、回合判定、transcript      │
 │  internal/knowledge 知识库（JSONL 存储）          │
-│  internal/llm     mock / openai 兼容流式客户端    │
-│  internal/cli     claude / codex 子进程编排       │
+│  internal/llm     带 tools 的流式模型调用          │
 │  internal/pty     跨平台 shell 执行               │
 ├──────────────────────────────────────────────────┤
 │ React 19 前端（Vite）                             │
@@ -101,7 +100,7 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 |---|---|---|
 | 绑定层 | `main.go` 的 `API` | 参数校验、错误转换、事件发射，不做业务判断 |
 | 业务层 | `internal/agent`、`internal/channel`、`internal/knowledge` | 会话、回合、知识 |
-| 基础设施 | `internal/llm`、`internal/cli`、`internal/pty` | 外部依赖 |
+| 基础设施 | `internal/llm`、`internal/pty` | 外部依赖 |
 
 **「谁该回」的判定**统一在 `channel.DecideReplies` 一个纯函数里，
 绑定层只负责投递与回填，不重复实现规则。

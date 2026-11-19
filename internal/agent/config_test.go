@@ -52,11 +52,11 @@ func TestSetAgentWorkDir(t *testing.T) {
 			wantInA1: "/tmp/a1",
 		},
 		{
-			name:     "TC-003 空串回落全局",
+			name:     "TC-003 空目录不再借用别的目录",
 			global:   "/global",
 			setA1:    "",
-			wantA1:   "/global",
-			wantA2:   "/global",
+			wantA1:   "",
+			wantA2:   "",
 			wantInA1: "",
 		},
 		{
@@ -64,7 +64,7 @@ func TestSetAgentWorkDir(t *testing.T) {
 			global:   "/global",
 			setA1:    "/tmp/a1",
 			wantA1:   "/tmp/a1",
-			wantA2:   "/global",
+			wantA2:   "",
 			wantInA1: "/tmp/a1",
 		},
 		{
@@ -185,11 +185,11 @@ func TestLoadLegacyAgentsJSON(t *testing.T) {
 	if a.Status != StatusIdle {
 		t.Errorf("Load legacy: Status = %q, want %q (restart resets to idle)", a.Status, StatusIdle)
 	}
-	if got := a.EffectiveWorkDir(m); got != "/global" {
-		t.Errorf("Load legacy: EffectiveWorkDir() = %q, want fallback %q", got, "/global")
+	if got := a.EffectiveWorkDir(m); got != "" {
+		t.Errorf("Load legacy: EffectiveWorkDir() = %q, want empty", got)
 	}
-	if got := a.EffectiveLLM(m); got.Model != "global-model" {
-		t.Errorf("Load legacy: EffectiveLLM().Model = %q, want fallback %q", got.Model, "global-model")
+	if got := a.EffectiveLLM(m); got.Model != "" || got.Provider != "" {
+		t.Errorf("Load legacy: EffectiveLLM() = %+v, want empty", got)
 	}
 }
 
@@ -202,10 +202,10 @@ func TestSessionLLMConfig(t *testing.T) {
 		want     llm.Config
 	}{
 		{
-			name:     "TC-008 nil 回落全局",
+			name:     "TC-008 没选模型就是空的",
 			global:   llm.Config{Provider: "mock", Model: "global-m"},
 			agentCfg: nil,
-			want:     llm.Config{Provider: "mock", Model: "global-m"},
+			want:     llm.Config{},
 		},
 		{
 			name:     "TC-007/009 会话覆盖全局",
@@ -220,10 +220,10 @@ func TestSessionLLMConfig(t *testing.T) {
 			want:     llm.Config{},
 		},
 		{
-			name:     "会话没写模型时仍用连接上的模型",
+			name:     "会话没写模型时不借用连接上的模型名",
 			global:   llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080", APIKey: "k", Model: "local-m"},
 			agentCfg: &llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080"},
-			want:     llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080", APIKey: "k", Model: "local-m"},
+			want:     llm.Config{Provider: "llamacpp", BaseURL: "http://127.0.0.1:8080", APIKey: "k"},
 		},
 		{
 			name:     "会话只选定模型，凭据仍用连接",
@@ -252,11 +252,10 @@ func TestSessionLLMConfig(t *testing.T) {
 				t.Errorf("LLMConfigFor(\"a1\") global=%+v: got %+v, want %+v",
 					tc.global, got, tc.want)
 			}
-			// 未设置的另一个会话必须仍然跟随全局。
+			// 另一个会话没选模型，不能看到这份配置。
 			m.Create("a2", "A2", "r")
-			if got := m.LLMConfigFor("a2"); got != tc.global {
-				t.Errorf("LLMConfigFor(\"a2\") global=%+v: got %+v, want %+v (isolation)",
-					tc.global, got, tc.global)
+			if got := m.LLMConfigFor("a2"); got != (llm.Config{}) {
+				t.Errorf("LLMConfigFor(\"a2\") = %+v, want empty", got)
 			}
 		})
 	}

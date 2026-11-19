@@ -10,6 +10,7 @@ import SettingsModal from './components/SettingsModal'
 import ToastContainer from './components/Toast'
 import { useBackend } from './lib/useBackend'
 import type { AgentView as Agent } from './mygo'
+import { API } from './mygo'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
 
@@ -119,6 +120,9 @@ export default function App() {
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenBrowser={() => {
+          API.openWorkbench('').catch(() => {})
+        }}
         createOpen={createOpen}
         onCreateOpenChange={setCreateOpen}
       />
@@ -139,7 +143,7 @@ export default function App() {
         <ChannelView
           channel={activeChannel}
           agents={s.agents}
-          streaming={s.streaming}
+          streaming={s.channelStreaming}
           onSend={(text, mentions) =>
             s.send('channel.send', {
               channelId: activeChannel.id,
@@ -148,6 +152,9 @@ export default function App() {
               text,
               mentions,
             })
+          }
+          onSetSpeaker={(agentId) =>
+            s.send('channel.speaker', { channelId: activeChannel.id, agentId })
           }
         />
       ) : (

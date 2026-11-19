@@ -73,6 +73,7 @@ test('点进频道不白屏，且渲染出已有消息', async ({ page }) => {
   // 必须看到频道内容，而不是空白
   await expect(page.getByText('大家看下这个方案')).toBeVisible()
   await expect(page.getByText('接口字段定了吗', { exact: false })).toBeVisible()
+  await expect(page.getByLabel('默认接话人')).toBeVisible()
 
   expect(errors, `页面抛异常: ${errors.join(' | ')}`).toEqual([])
 })
