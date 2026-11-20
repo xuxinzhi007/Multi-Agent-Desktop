@@ -1156,14 +1156,37 @@
   align-items: center;
   gap: var(--space-2);
 }
-.c-feishu__row .c-providers__pick {
-  width: auto;
-  flex: 0 1 auto;
+.c-feishu__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   min-width: 0;
   max-width: 46%;
 }
-.c-feishu__row .c-providers__url {
-  flex: 0 1 auto;
+.c-feishu__edit {
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-feishu__edit:hover {
+  background: var(--bg-surface-hover);
+}
+.c-feishu__edit--muted {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+.c-feishu__inline {
+  width: 8em;
+  min-width: 0;
+  padding: 2px 6px;
 }
 .c-feishu__auth {
   margin-left: auto;
@@ -1543,6 +1566,65 @@
 .mp__item.is-on {
   background: var(--accent-soft);
   font-weight: 600;
+}
+
+.mp__row {
+  position: relative;
+}
+
+.mp__side {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: calc(100% + 8px);
+  z-index: 3;
+  min-width: 112px;
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.mp__row:hover > .mp__side,
+.mp__row:focus-within > .mp__side {
+  display: block;
+}
+
+.mp__side::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -10px;
+  width: 10px;
+  height: 100%;
+}
+
+.mp__side button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mp__side button:hover,
+.mp__side button.is-on {
+  background: var(--bg-surface-hover);
+}
+
+.mp__side button svg {
+  width: 12px;
+  height: 12px;
+  margin-left: auto;
+  color: var(--accent-bright);
 }
 
 .mp__item-name {

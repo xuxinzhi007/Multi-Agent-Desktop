@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -108,6 +109,7 @@ type Manager struct {
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
 	feed      Feed
+	feishuOn  bool
 	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
 	waiting map[string]string
 	// routed 记录转发出去、还没结束的目标。
@@ -115,7 +117,8 @@ type Manager struct {
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
-	saveMu sync.Mutex
+	saveMu   sync.Mutex
+	assistMu sync.Mutex
 	// saveWG 跟踪异步 Save，测试可用 waitSaves 等待落盘结束。
 	saveWG sync.WaitGroup
 }
@@ -271,10 +274,53 @@ func (m *Manager) Shutdown() {
 // writeFileAtomic 先写同目录临时文件再 rename，避免并发/崩溃留下半个文件。
 func writeFileAtomic(path string, buf []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	_, werr := f.Write(buf)
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil || serr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		if werr != nil {
+			return werr
+		}
+		if serr != nil {
+			return serr
+		}
+		return cerr
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func uniqueAgentID(now int64, existing map[string]*Agent) string {
+	id := fmt.Sprintf("agent-%d", now)
+	if _, ok := existing[id]; !ok {
+		return id
+	}
+	for n := 2; ; n++ {
+		next := fmt.Sprintf("agent-%d-%d", now, n)
+		if _, ok := existing[next]; !ok {
+			return next
+		}
+	}
+}
+
+func (m *Manager) SetFeishuOn(on bool) {
+	m.mu.Lock()
+	m.feishuOn = on
+	m.mu.Unlock()
+}
+
+func (m *Manager) FeishuOn() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.feishuOn
 }
 
 // Load 从磁盘恢复 agent。
@@ -544,7 +590,7 @@ func (m *Manager) create(id, name, role, parentID string) *Agent {
 	defer m.mu.Unlock()
 
 	if id == "" {
-		id = fmt.Sprintf("agent-%d", time.Now().UnixNano())
+		id = uniqueAgentID(time.Now().UnixNano(), m.agents)
 	}
 	if name == "" {
 		name = fmt.Sprintf("Agent %d", len(m.order)+1)
@@ -578,6 +624,81 @@ func (m *Manager) create(id, name, role, parentID string) *Agent {
 	go m.emit("agent.created", a.viewMap())
 	m.goSave() // 异步保存
 	return a
+}
+
+// ErrAssistBusy 表示主会话和它的飞书助手都在忙，调用方等一轮结束再要。
+var ErrAssistBusy = errors.New("busy")
+
+const assistCap = 3
+
+// Assist 给一条飞书消息挑会话。主会话空闲就用它，否则用它名下空闲的助手。
+// 没有空闲助手时新建一个，沿用主会话的模型和工作目录。超过 assistCap 个助手则返回 ErrAssistBusy。
+// busy 是飞书已经派出去、还没还的会话。
+func (m *Manager) Assist(parentID string, busy map[string]bool) (string, error) {
+	if m == nil {
+		return "", fmt.Errorf("会话还没准备好")
+	}
+	m.assistMu.Lock()
+	defer m.assistMu.Unlock()
+
+	parent, ok := m.Get(parentID)
+	if !ok {
+		return "", fmt.Errorf("agent %s not found", parentID)
+	}
+	if agentFree(parent.Snapshot(), busy) {
+		return parentID, nil
+	}
+	var helpers int
+	for _, a := range m.List() {
+		sn := a.Snapshot()
+		if !isFeishuHelper(sn, parentID) {
+			continue
+		}
+		helpers++
+		if agentFree(sn, busy) {
+			return sn.ID, nil
+		}
+	}
+	if helpers >= assistCap || len(m.List()) >= maxAgents {
+		return "", ErrAssistBusy
+	}
+	from := parent.Snapshot()
+	name := helperName(m, from.Name)
+	role := fmt.Sprintf("协助「%s」直接回答飞书里的一条消息。", from.Name)
+	created := m.create("", name, role, parentID)
+	if from.LLMCfg != nil && from.LLMCfg.Provider != "" {
+		_ = m.SetAgentLLM(created.ID, *from.LLMCfg)
+	}
+	if dir := parent.EffectiveWorkDir(m); dir != "" {
+		_ = m.SetAgentWorkDir(created.ID, dir)
+	}
+	return created.ID, nil
+}
+
+func agentFree(sn *Agent, busy map[string]bool) bool {
+	if sn == nil || busy[sn.ID] {
+		return false
+	}
+	switch sn.Status {
+	case StatusRunning, StatusQueued, StatusBlocked:
+		return false
+	default:
+		return sn.QueueLen == 0
+	}
+}
+
+func isFeishuHelper(sn *Agent, parentID string) bool {
+	return sn != nil && sn.ParentID == parentID && strings.Contains(sn.Name, "的协助")
+}
+
+func helperName(m *Manager, parentName string) string {
+	for i := 1; i <= assistCap; i++ {
+		name := fmt.Sprintf("%s的协助%d", parentName, i)
+		if _, err := m.FindByName(name); err != nil {
+			return name
+		}
+	}
+	return fmt.Sprintf("%s的协助", parentName)
 }
 
 // CreateWithBackend 新建一个指定 backend 的 agent。
@@ -1099,6 +1220,7 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID,
 	}
 	a.mu.Unlock()
 	llm.LoadImages(m.ImageDir(), history)
+	history = llm.WithoutRuntimeErrors(history)
 
 	stream, err := client.Stream(runCtx, history)
 	if err != nil {
@@ -1252,11 +1374,12 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 		a.LastError = msg
 		a.turnKind = "error"
 		a.turnReason = msg
-		// 失败原文要留在会话里。只打状态的话，下一句「这个错误是什么」看不见它。
+		// 失败留在会话里给界面看，但不是助手说过的话，下一轮不会回灌给模型。
 		if strings.TrimSpace(msg) != "" {
+			content := llm.RuntimeErrorPrefix + msg
 			n := len(a.Messages)
-			if n == 0 || a.Messages[n-1].Role != "assistant" || a.Messages[n-1].Content != msg {
-				note = llm.Message{Role: "assistant", Content: msg, Timestamp: time.Now().Unix()}
+			if n == 0 || a.Messages[n-1].Content != content {
+				note = llm.Message{Role: "system", Content: content, Timestamp: time.Now().Unix()}
 				a.Messages = append(a.Messages, note)
 				writeNote = true
 			}
@@ -1400,9 +1523,7 @@ func (a *Agent) playLater(m *Manager) bool {
 }
 
 func (a *Agent) settle(m *Manager, req PromptRequest) {
-	if a.turnKind == "" || a.turnKind == "ok" {
-		a.noteBio(m, req.Text)
-	}
+	// 用户刚说的那句话不是简介。领域变化由 evolveProfile 收，人改简介走 set_profile。
 	if req.outcome == nil {
 		if req.Done != nil {
 			close(req.Done)

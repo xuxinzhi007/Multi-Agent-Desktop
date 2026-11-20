@@ -447,12 +447,36 @@ func TestRenamePersistsAcrossSave(t *testing.T) {
 	}
 }
 
+func TestUniqueAgentIDSkipsTaken(t *testing.T) {
+	taken := map[string]*Agent{"agent-1": {}}
+	if got := uniqueAgentID(1, taken); got != "agent-1-2" {
+		t.Fatalf("id=%q", got)
+	}
+	if got := uniqueAgentID(2, taken); got != "agent-2" {
+		t.Fatalf("id=%q", got)
+	}
+}
+
 func TestTurnRewritesUnpinnedBio(t *testing.T) {
 	m := newTestManager(t)
 	a := m.Create("", "甲", "前端")
 	a.noteBio(m, "帮我看登录超时")
 	if got := a.Snapshot().Role; got != "帮我看登录超时" {
 		t.Fatalf("role = %q", got)
+	}
+}
+
+func TestSettleDoesNotCopyUserText(t *testing.T) {
+	m := newTestManager(t)
+	const role = "Go 专家，关注 API 设计、并发安全与查询效率"
+	a := m.Create("", "甲", role)
+	a.settle(m, PromptRequest{Text: "奇怪你刚刚还创建了一个agent 吗 ？"})
+	sn := a.Snapshot()
+	if sn.Role != role {
+		t.Fatalf("role=%q", sn.Role)
+	}
+	if sn.Proposal != "" {
+		t.Fatalf("proposal=%q", sn.Proposal)
 	}
 }
 

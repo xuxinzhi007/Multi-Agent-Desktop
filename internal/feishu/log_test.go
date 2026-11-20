@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -28,5 +29,21 @@ func TestRoomTitleUsesLatestWhenNameMissing(t *testing.T) {
 	rooms := l.Rooms()
 	if len(rooms) != 1 || rooms[0].Name != "登录超时了" {
 		t.Fatalf("rooms = %+v", rooms)
+	}
+}
+
+func TestLiveCardSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feishu-rooms.json")
+	l := NewLog()
+	l.SetPath(path)
+	l.Remember("om_card")
+	again := NewLog()
+	again.SetPath(path)
+	if again.Recall() != "om_card" {
+		t.Fatalf("recall=%q", again.Recall())
+	}
+	again.Forget()
+	if again.Recall() != "" {
+		t.Fatal("card still remembered")
 	}
 }

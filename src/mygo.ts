@@ -198,6 +198,14 @@ export interface FeishuSave {
   mentionOnly: boolean;
 }
 
+/** FeishuScopeView 是这个机器人还缺的飞书权限。 */
+export interface FeishuScopeView {
+  ok: boolean;
+  missing?: string[];
+  url?: string;
+  detail?: string;
+}
+
 /** FeishuView 是设置页看到的一个飞书机器人。Secret 不回传。 */
 export interface FeishuView {
   id: string;
@@ -324,6 +332,10 @@ export interface ModelChoice {
   current: boolean;
   /** Ready 表示这一项现在就能用（凭据齐 / 本地服务） */
   ready: boolean;
+  /** Reasoning 表示这个模型能思考。Qoder 用账号拉到的目录，没有目录时用内置表。 */
+  reasoning: boolean;
+  /** Efforts 是这次拿到的思考档位。没有档位就不给界面编一套。 */
+  efforts?: string[];
   note?: string;
 }
 
@@ -507,6 +519,10 @@ export const API = {
   blockAgent(id: string, reason: string): Promise<void> {
     return call("API.BlockAgent", id, reason);
   },
+  /** CheckFeishuScopes 对照发消息、表情、历史、单聊、群消息和群列表，看租户已经授予了哪些。 */
+  checkFeishuScopes(id: string): Promise<FeishuScopeView> {
+    return call("API.CheckFeishuScopes", id);
+  },
   /** ClearAgentLLM 清掉这个会话自己的模型。清掉之后它没有模型，直到再次选择。 */
   clearAgentLLM(agentId: string): Promise<AgentView> {
     return call("API.ClearAgentLLM", agentId);
@@ -657,6 +673,10 @@ export const API = {
   /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
+  },
+  /** OpenFeishuScopes 打开飞书开通页，一次带上还缺的全部权限，并向管理员补一次申请。 */
+  openFeishuScopes(id: string): Promise<FeishuScopeView> {
+    return call("API.OpenFeishuScopes", id);
   },
   /** OpenPrivacy 打开系统设置里对应的权限页，方便之后授权。 */
   openPrivacy(kind: string): Promise<void> {

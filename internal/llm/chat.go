@@ -64,8 +64,8 @@ func chatBudget(cfg Config) time.Duration {
 	if !ThinkingEnabled(cfg) {
 		return 180 * time.Second
 	}
-	switch Effort(cfg) {
-	case "high", "xhigh":
+	switch wireEffort(cfg) {
+	case "high", "xhigh", "max":
 		return 5 * time.Minute
 	default:
 		return 180 * time.Second
@@ -75,11 +75,16 @@ func chatBudget(cfg Config) time.Duration {
 // Effort 是这一轮的推理强度。空值和 on 都是 medium。
 func Effort(cfg Config) string {
 	switch cfg.Thinking {
-	case "off", "low", "medium", "high", "xhigh":
+	case "off", "low", "medium", "high", "xhigh", "max":
 		return cfg.Thinking
 	default:
 		return "medium"
 	}
+}
+
+// ModelReasons 表示这个模型带思考。空思考档也算开着；显式关掉不算。
+func ModelReasons(provider, model string) bool {
+	return ThinkingEnabled(Config{Provider: provider, Model: model})
 }
 
 // ThinkingEnabled 表示这次请求会把思考发给上游。
@@ -99,8 +104,23 @@ func ThinkingEnabled(cfg Config) bool {
 }
 
 func wireEffort(cfg Config) string {
+	if cfg.Provider == "qoder" {
+		m := qoderModelByID(cfg.Model)
+		if len(m.efforts) > 0 {
+			want := Effort(cfg)
+			for _, e := range m.efforts {
+				if e == want {
+					return e
+				}
+			}
+			if m.defaultEffort != "" {
+				return m.defaultEffort
+			}
+			return m.efforts[0]
+		}
+	}
 	switch Effort(cfg) {
-	case "low", "high", "xhigh":
+	case "low", "high", "xhigh", "max":
 		return Effort(cfg)
 	default:
 		return "medium"
@@ -111,13 +131,15 @@ func thinkingLabel(cfg Config) string {
 	if !ThinkingEnabled(cfg) {
 		return "思考关"
 	}
-	switch Effort(cfg) {
+	switch wireEffort(cfg) {
 	case "low":
 		return "快"
 	case "high":
 		return "高"
 	case "xhigh":
 		return "更高"
+	case "max":
+		return "最高"
 	default:
 		return "中"
 	}

@@ -175,7 +175,7 @@ test('模型下拉向上弹出，不遮挡输入框', async ({ page }) => {
   }
 })
 
-test('点未配置的模型：给出提示且不切换、下拉保持展开', async ({ page }) => {
+test('未配置的模型不出现在下拉里', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
@@ -183,13 +183,43 @@ test('点未配置的模型：给出提示且不切换、下拉保持展开', as
 
   await page.locator('.mp__trigger').click()
   const pop = page.getByRole('listbox', { name: '可用模型' })
-  const off = pop.getByRole('option').filter({ hasText: '未配置' }).first()
-  await expect(off).toBeVisible()
-  await off.click()
+  await expect(pop.getByRole('option', { name: 'deepseek-chat' })).toBeVisible()
+  await expect(pop.getByText('未配置')).toHaveCount(0)
+  await expect(pop.getByRole('option', { name: /OpenAI/ })).toHaveCount(0)
+})
 
-  // 拦截选择：下拉必须还开着，否则用户要再点一次才能回到这里
+test('悬停模型才在旁边列出推理档位', async ({ page }) => {
+  await mockRuntime(page, {
+    agents: [{ ...AGENTS[0], llm: { provider: 'deepseek', model: 'deepseek-chat', thinking: 'medium' } }],
+    channels: [],
+    notes: [],
+  })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+  await openChatView(page)
+
+  await page.locator('.mp__trigger').click()
+  const pop = page.getByRole('listbox', { name: '可用模型' })
+  const option = pop.getByRole('option', { name: 'deepseek-chat' })
+  await expect(pop.getByRole('menuitem', { name: '快', exact: true })).toBeHidden()
+  await expect(pop.getByText('快问')).toHaveCount(0)
+  await expect(pop.getByText('推理')).toHaveCount(0)
+  await pop.getByRole('option', { name: /qwen/ }).hover()
+  await expect(pop.getByRole('menuitem', { name: '快', exact: true })).toBeHidden()
+  await option.hover()
+  const low = pop.getByRole('menuitem', { name: '快', exact: true })
+  const high = pop.getByRole('menuitem', { name: '高', exact: true })
+  await expect(low).toBeVisible()
+  await expect(high).toBeVisible()
+  const optionBox = await option.boundingBox()
+  const lowBox = await low.boundingBox()
+  expect(optionBox).not.toBeNull()
+  expect(lowBox).not.toBeNull()
+  if (optionBox && lowBox) {
+    expect(lowBox.x).toBeGreaterThan(optionBox.x + optionBox.width - 8)
+  }
+  await high.click()
   await expect(pop).toBeVisible()
-  await expect(page.getByText(/尚未配置/)).toBeVisible()
 })
 
 // 右键菜单位置的自动化断言暂时移除：在 mock runtime 下 mouse.click(button:'right')

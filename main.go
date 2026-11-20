@@ -757,6 +757,13 @@ func (s *API) agentSees(id string) bool {
 	return llm.SeesImages(cfg.Provider, cfg.Model)
 }
 
+func (s *API) claimFeishu(parent string, busy map[string]bool) (string, error) {
+	if s.mgr == nil {
+		return "", fmt.Errorf("会话还没准备好")
+	}
+	return s.mgr.Assist(parent, busy)
+}
+
 func (s *API) runFeishu(ctx context.Context, req feishu.RunRequest) (string, error) {
 	blocks, text, err := s.blocksFrom(req)
 	if err != nil {
@@ -1024,8 +1031,12 @@ type ModelChoice struct {
 	// Current 标记当前正在用的那个
 	Current bool `json:"current"`
 	// Ready 表示这一项现在就能用（凭据齐 / 本地服务）
-	Ready bool   `json:"ready"`
-	Note  string `json:"note,omitempty"`
+	Ready bool `json:"ready"`
+	// Reasoning 表示这个模型能思考。Qoder 用账号拉到的目录，没有目录时用内置表。
+	Reasoning bool `json:"reasoning"`
+	// Efforts 是这次拿到的思考档位。没有档位就不给界面编一套。
+	Efforts []string `json:"efforts,omitempty"`
+	Note    string   `json:"note,omitempty"`
 }
 
 // ListAllModels 返回一个扁平的可用模型列表。
@@ -1067,7 +1078,7 @@ func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 
 		listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		models, err := llm.ListModels(listCtx, cfg)
+		models, err := llm.ListModelMetas(listCtx, cfg)
 		if err != nil {
 			out = append(out, ModelChoice{
 				Model:    providerLabel(provider),
@@ -1081,12 +1092,14 @@ func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 		}
 		for _, m := range models {
 			out = append(out, ModelChoice{
-				Model:    m,
-				Provider: provider,
-				BaseURL:  cfg.BaseURL,
-				Local:    local,
-				Current:  provider == base.Provider && base.Model == m,
-				Ready:    true,
+				Model:     m.Name,
+				Provider:  provider,
+				BaseURL:   cfg.BaseURL,
+				Local:     local,
+				Current:   provider == base.Provider && base.Model == m.Name,
+				Ready:     true,
+				Reasoning: m.Reasoning,
+				Efforts:   m.Efforts,
 			})
 		}
 	}
@@ -1502,6 +1515,77 @@ func (s *API) SetAgentProfile(id, name, role string) (AgentView, error) {
 	return toAgentView(a), nil
 }
 
+// FeishuScopeView 是这个机器人还缺的飞书权限。
+type FeishuScopeView struct {
+	OK      bool     `json:"ok"`
+	Missing []string `json:"missing,omitempty"`
+	URL     string   `json:"url,omitempty"`
+	Detail  string   `json:"detail,omitempty"`
+}
+
+// CheckFeishuScopes 对照发消息、表情、历史、单聊、群消息和群列表，看租户已经授予了哪些。
+func (s *API) CheckFeishuScopes(id string) (FeishuScopeView, error) {
+	cfg, err := s.feishuBot(id)
+	if err != nil {
+		return FeishuScopeView{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rep, err := feishu.InspectScopes(ctx, cfg.AppID, cfg.AppSecret)
+	if err != nil {
+		return FeishuScopeView{}, err
+	}
+	return scopeView(rep), nil
+}
+
+// OpenFeishuScopes 打开飞书开通页，一次带上还缺的全部权限，并向管理员补一次申请。
+func (s *API) OpenFeishuScopes(id string) (FeishuScopeView, error) {
+	cfg, err := s.feishuBot(id)
+	if err != nil {
+		return FeishuScopeView{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rep, err := feishu.InspectScopes(ctx, cfg.AppID, cfg.AppSecret)
+	if err != nil {
+		return FeishuScopeView{}, err
+	}
+	view := scopeView(rep)
+	if view.OK || view.URL == "" {
+		return view, nil
+	}
+	if err := feishu.ApplyScopes(ctx, cfg.AppID, cfg.AppSecret); err != nil {
+		log.Printf("feishu scopes apply: %v", err)
+	}
+	if err := mygo.Shell.OpenExternal(view.URL); err != nil {
+		return view, err
+	}
+	return view, nil
+}
+
+func scopeView(rep feishu.ScopeReport) FeishuScopeView {
+	view := FeishuScopeView{OK: rep.OK, Missing: rep.Missing, URL: rep.URL}
+	if !rep.OK {
+		view.Detail = "还缺这些权限：" + strings.Join(rep.Missing, "、") + "。开通后要发布版本，飞书才会放行。"
+	}
+	return view
+}
+
+func (s *API) feishuBot(id string) (config.FeishuBot, error) {
+	if s.settings == nil {
+		return config.FeishuBot{}, fmt.Errorf("会话还没准备好")
+	}
+	for _, b := range s.settings.Get().FeishuBots {
+		if b.ID == id {
+			if b.AppID == "" || b.AppSecret == "" {
+				return config.FeishuBot{}, fmt.Errorf("先保存 App ID 和 App Secret")
+			}
+			return b, nil
+		}
+	}
+	return config.FeishuBot{}, fmt.Errorf("机器人不存在")
+}
+
 // ListFeishu 返回全部飞书机器人和各自的长连接状态。
 func (s *API) ListFeishu() []FeishuView {
 	bots := []config.FeishuBot{}
@@ -1616,8 +1700,15 @@ func (s *API) syncFeishu() {
 		bots = s.settings.Get().FeishuBots
 	}
 	list := make([]feishu.Bot, 0, len(bots))
+	on := false
 	for _, b := range bots {
+		if b.Enabled {
+			on = true
+		}
 		list = append(list, feishu.Bot{ID: b.ID, Config: feishuConfig(b)})
+	}
+	if s.mgr != nil {
+		s.mgr.SetFeishuOn(on)
 	}
 	s.bot.Sync(list)
 }
@@ -2874,6 +2965,8 @@ func main() {
 		Working: feishu.ReplyWorking,
 		Patch:   feishu.PatchCard,
 		Dial:    feishu.Dial,
+		React:   feishu.React,
+		Claim:   api.claimFeishu,
 	})
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.syncFeishu()

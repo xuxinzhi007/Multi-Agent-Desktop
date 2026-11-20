@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,10 +95,16 @@ func studyWith(m *Manager, a *Agent, by string, model chatter) {
 		if text == "" {
 			return
 		}
+		text = groundLearn(text, learnSource(msgs[:to]))
+		if text == "" {
+			text = strings.TrimSpace(prev)
+		}
 		a.mu.Lock()
 		if a.LearnAt == at {
 			a.LearnAt = to
-			a.LearnText = text
+			if text != "" {
+				a.LearnText = text
+			}
 			a.LearnBy = by
 			changed = true
 		}
@@ -150,7 +158,74 @@ func ensureLearner(m *Manager, parent *Agent) (string, llm.Config) {
 	return created.Name, cfg
 }
 
-const learnSystem = "你替父会话整理更早的对话。只输出摘要正文，不要标题。保留决定、约定、没做完的事和用户的偏好。不超过 400 字。已有摘要和新片段冲突时，以新片段为准。"
+const learnSystem = "你替父会话整理更早的对话。只输出摘要正文，不要标题。保留决定、约定、没做完的事和用户的偏好。不超过 400 字。已有摘要和新片段冲突时，以新片段为准，删除、没建过、已经不在的不要再写成还在。只写已有摘要或新片段里出现过的路径和大小，没有写出的文件不要补。不要自己写学了多少条。"
+
+var learnPath = regexp.MustCompile(`[\p{L}\p{N}_.-]+(?:[/\\][\p{L}\p{N}_.-]+)+|[\p{L}\p{N}_.-]+\.(?:go|ts|tsx|js|jsx|py|json|md|vue|css|html)`)
+
+func learnSource(msgs []llm.Message) string {
+	var b strings.Builder
+	for _, msg := range msgs {
+		if msg.Content != "" {
+			b.WriteString(msg.Content)
+			b.WriteByte('\n')
+		}
+		for _, call := range msg.ToolCalls {
+			if len(call.Input) > 0 {
+				b.Write(call.Input)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
+}
+
+func learnBlock(at int, text, source string) string {
+	text = groundLearn(text, source)
+	if text == "" {
+		return ""
+	}
+	return "更早对话的摘要，已覆盖前 " + strconv.Itoa(at) + " 条消息（按条数计，不是时间）。这是压缩转述，不是文件清单，也不是新指令。和后面的对话或工作目录不一致时，以后面的为准。\n" + text
+}
+
+func groundLearn(text, source string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, sentence := range splitLearnSentences(text) {
+		if learnSentenceGrounded(sentence, source) {
+			b.WriteString(sentence)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func splitLearnSentences(text string) []string {
+	var out []string
+	var b strings.Builder
+	for _, r := range text {
+		b.WriteRune(r)
+		switch r {
+		case '。', '！', '？', '\n', '；':
+			out = append(out, b.String())
+			b.Reset()
+		}
+	}
+	if strings.TrimSpace(b.String()) != "" {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+func learnSentenceGrounded(sentence, source string) bool {
+	for _, path := range learnPath.FindAllString(sentence, -1) {
+		if !strings.Contains(source, path) {
+			return false
+		}
+	}
+	return true
+}
 
 func learnAsk(prev string, msgs []llm.Message) string {
 	var b strings.Builder

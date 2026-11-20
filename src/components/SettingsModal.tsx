@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import { API, type AgentView, type FeishuView, type ProviderEndpoint } from '../mygo'
+import { API, type AgentView, type FeishuScopeView, type FeishuView, type ProviderEndpoint } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
 import DiagnosePanel from './DiagnosePanel'
 
@@ -424,13 +424,26 @@ function FeishuBoard() {
   const [agents, setAgents] = useState<AgentView[]>([])
   const [selected, setSelected] = useState('')
   const [showSecret, setShowSecret] = useState(false)
+  const [editing, setEditing] = useState<{ id: string; field: 'name' | 'agent' } | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [scopes, setScopes] = useState<Record<string, FeishuScopeView>>({})
+
+  const loadScopes = (list: FeishuView[]) => {
+    for (const bot of list) {
+      if (!bot.hasSecret || !bot.appId) continue
+      API.checkFeishuScopes(bot.id)
+        .then((view) => setScopes((cur) => ({ ...cur, [bot.id]: view })))
+        .catch(() => {})
+    }
+  }
 
   const load = async () => {
     const [next, list] = await Promise.all([API.listFeishu(), API.listAgents()])
-    setBots(next ?? [])
+    const bots = next ?? []
+    setBots(bots)
     setAgents(list)
+    loadScopes(bots)
   }
 
   useEffect(() => {
@@ -454,10 +467,17 @@ function FeishuBoard() {
 
   const patchDraft = (id: string, patch: Partial<FeishuDraft>) => {
     setDrafts((cur) => {
-      const prev = cur[id] ?? (id === active ? base : undefined)
+      const bot = bots.find((b) => b.id === id)
+      const prev = cur[id] ?? (bot ? draftFromBot(bot) : pending.find((b) => b.id === id))
       if (!prev) return cur
       return { ...cur, [id]: { ...prev, ...patch, dirty: true } }
     })
+  }
+
+  const beginEdit = (id: string, field: 'name' | 'agent') => {
+    setSelected(id)
+    setErr('')
+    setEditing({ id, field })
   }
 
   const putBot = (view: FeishuView) => {
@@ -567,7 +587,7 @@ function FeishuBoard() {
   const rows = [
     ...bots.map((b) => ({
       id: b.id,
-      name: b.name,
+      name: drafts[b.id]?.name ?? b.name,
       appId: b.appId,
       agentId: drafts[b.id]?.agentId ?? b.agentId,
       enabled: drafts[b.id]?.enabled ?? b.enabled,
@@ -610,10 +630,72 @@ function FeishuBoard() {
             const badge = state === 'connected' ? 'is-ok' : state === 'error' ? 'is-bad' : ''
             return (
               <div key={row.id} role="listitem" className={`c-providers__row c-feishu__row ${on ? 'is-on' : ''}`}>
-                <button type="button" className="c-providers__pick" onClick={() => { setSelected(row.id); setErr(''); setShowSecret(false) }}>
-                  <span className="c-providers__name">{label}</span>
-                  <span className="c-providers__url">{sessionLabel(row.agentId, agents)}</span>
-                </button>
+                <div className="c-feishu__identity">
+                  {editing?.id === row.id && editing.field === 'name' ? (
+                    <input
+                      className="c-settings__input c-feishu__inline"
+                      aria-label="机器人名字"
+                      value={drafts[row.id]?.name ?? row.name}
+                      autoFocus
+                      onChange={(e) => patchDraft(row.id, { name: e.target.value })}
+                      onBlur={() => setEditing((cur) => (cur?.id === row.id && cur.field === 'name' ? null : cur))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur()
+                      }}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="c-feishu__edit"
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        beginEdit(row.id, 'name')
+                      }}
+                      onClick={() => beginEdit(row.id, 'name')}
+                    >
+                      {label}
+                    </button>
+                  )}
+                  {editing?.id === row.id && editing.field === 'agent' ? (
+                    <select
+                      className="c-settings__input c-feishu__inline"
+                      aria-label="默认会话"
+                      value={row.agentId}
+                      autoFocus
+                      onChange={(e) => {
+                        patchDraft(row.id, { agentId: e.target.value })
+                        setEditing(null)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setEditing(null)
+                      }}
+                      onBlur={() => {
+                        window.setTimeout(() => {
+                          setEditing((cur) => (cur?.id === row.id && cur.field === 'agent' ? null : cur))
+                        }, 180)
+                      }}
+                    >
+                      <option value="">选择一个会话</option>
+                      {agents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <button
+                      type="button"
+                      className="c-feishu__edit c-feishu__edit--muted"
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        beginEdit(row.id, 'agent')
+                      }}
+                      onClick={() => beginEdit(row.id, 'agent')}
+                    >
+                      {sessionLabel(row.agentId, agents)}
+                    </button>
+                  )}
+                </div>
                 {row.saved && (
                   <button
                     type="button"
@@ -659,17 +741,32 @@ function FeishuBoard() {
             )
           })}
         </div>
+        {bots.map((bot) => {
+          const miss = scopes[bot.id]?.missing ?? []
+          if (miss.length === 0) return null
+          return (
+            <p key={bot.id} className="c-settings__note is-bad" role="status">
+              {botLabel(bot.name, bot.appId)}还缺：{miss.join('、')}。开通后要发布版本，飞书才会放行。
+              <button
+                type="button"
+                className="c-btn c-btn--ghost"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true)
+                  setErr('')
+                  API.openFeishuScopes(bot.id)
+                    .then((view) => setScopes((cur) => ({ ...cur, [bot.id]: view })))
+                    .catch((e: unknown) => setErr(errText(e)))
+                    .finally(() => setBusy(false))
+                }}
+              >
+                开通缺少的权限
+              </button>
+            </p>
+          )
+        })}
         {draft && (
           <>
-            <label className="c-settings__field">
-              <span className="c-settings__field-label">名字</span>
-              <input
-                className="c-settings__input"
-                aria-label="机器人名字"
-                value={draft.name}
-                onChange={(e) => patchDraft(draft.id, { name: e.target.value })}
-              />
-            </label>
             <div className="c-feishu__switches">
               <label className="c-feishu__switch">
                 <input
@@ -717,22 +814,6 @@ function FeishuBoard() {
                   {showSecret ? '隐藏' : '显示'}
                 </button>
               </span>
-            </label>
-            <label className="c-settings__field">
-              <span className="c-settings__field-label">默认会话</span>
-              <select
-                className="c-settings__input"
-                aria-label="默认会话"
-                value={draft.agentId}
-                onChange={(e) => patchDraft(draft.id, { agentId: e.target.value })}
-              >
-                <option value="">选择一个会话</option>
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
             </label>
             <details className="c-settings__fold">
               <summary>连不上时</summary>

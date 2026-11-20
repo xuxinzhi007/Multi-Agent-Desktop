@@ -9,6 +9,17 @@ import (
 	"multi-agent-desktop/internal/llm"
 )
 
+func TestLoopSystemPromptOmitsFeishuWhenOff(t *testing.T) {
+	off := loopSystemPrompt("D:/work", false)
+	if strings.Contains(off, "飞书里的一句") {
+		t.Fatalf("off prompt contains feishu: %s", off)
+	}
+	on := loopSystemPrompt("D:/work", true)
+	if !strings.Contains(on, "飞书里的一句") {
+		t.Fatal("on prompt missing feishu")
+	}
+}
+
 func TestLegacyCLIBackendUsesLoop(t *testing.T) {
 	m := newTestManager(t)
 	a := m.CreateWithBackend("a1", "测试", "通用开发助手", "claude")
@@ -47,6 +58,18 @@ func TestLoopBackendWithoutProviderFails(t *testing.T) {
 		if v.Status == StatusError {
 			if !strings.Contains(v.LastError, "模型") {
 				t.Fatalf("错误信息没说清原因: %q", v.LastError)
+			}
+			var noted bool
+			for _, msg := range v.Messages {
+				if msg.Role == "assistant" && strings.Contains(msg.Content, "没有模型") {
+					t.Fatalf("error stored as assistant: %q", msg.Content)
+				}
+				if msg.Role == "system" && strings.HasPrefix(msg.Content, llm.RuntimeErrorPrefix) && strings.Contains(msg.Content, "没有模型") {
+					noted = true
+				}
+			}
+			if !noted {
+				t.Fatal("runtime error was not kept on the session")
 			}
 			return
 		}

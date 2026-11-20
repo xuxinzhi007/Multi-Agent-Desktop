@@ -32,11 +32,30 @@ type Hooks struct {
 	Working func(ctx context.Context, appID, secret, messageID, text, stopID string) (string, error)
 	Patch   func(ctx context.Context, appID, secret, messageID, text, stopID string) error
 	Dial    func(ctx context.Context, appID, secret string, on func(Turn), mark func(state, detail string)) error
+	// React 给用户刚发的那条消息加表情。处理还没结束时先让对方看见标记。
+	React func(ctx context.Context, appID, secret, messageID, emoji string) error
+	// Claim 给这条消息挑一个会话。busy 是还在答飞书的会话。
+	// 主会话空闲时返回它。都在忙时返回内容为 busy 的错误，调用方等一轮结束再要。
+	Claim func(parentID string, busy map[string]bool) (string, error)
+}
+
+// liveRun 是一条飞书消息正在由哪个会话回答。多条消息各有一轮。
+type liveRun struct {
+	agent  string
+	card   string
+	key    string
+	cancel context.CancelFunc
+	lines  []string
+	say    string
+	closed bool
 }
 
 const (
 	taskLead    = "这是从飞书来的一件任务。可以用这台电脑上的工具完成。\n"
 	workingLine = "已在这台电脑上处理"
+	repliedLine = "已回复"
+	// processingEmoji 是飞书表情类型。Typing 是「敲键盘」，表示这条还在处理。
+	processingEmoji = "Typing"
 )
 
 const (
@@ -48,30 +67,30 @@ const (
 type Service struct {
 	hooks Hooks
 
-	mu      sync.Mutex
-	cfg     Config
-	cancel  context.CancelFunc
-	gen     int
-	state   string
-	detail  string
-	gate    Gate
-	holds   map[string]held
-	log     *Log
-	botID   string
-	owner   string
-	history func(ctx context.Context, appID, secret, chatID string, since int64) ([]Line, error)
-	load    func(ctx context.Context, appID, secret, messageID string) ([]Item, error)
-	grab    func(ctx context.Context, cfg Config, messageID, key string) ([]byte, string, error)
+	mu         sync.Mutex
+	cfg        Config
+	cancel     context.CancelFunc
+	gen        int
+	state      string
+	detail     string
+	gate       Gate
+	holds      map[string]held
+	log        *Log
+	botID      string
+	owner      string
+	history    func(ctx context.Context, appID, secret, chatID string, since int64) ([]Line, error)
+	listChats  func(ctx context.Context, appID, secret string) ([]listedChat, error)
+	scopes     func(ctx context.Context, appID, secret string) (map[string]bool, error)
+	stops      func(ctx context.Context, appID, secret, chatID string) ([]string, error)
+	scopeEvery time.Duration
+	load       func(ctx context.Context, appID, secret, messageID string) ([]Item, error)
+	grab       func(ctx context.Context, cfg Config, messageID, key string) ([]byte, string, error)
 
-	once      sync.Once
-	jobs      chan Turn
-	runCancel context.CancelFunc
-	runAgent  string
-	runKey    string
-	cardID    string
-	closed    bool
-	lines     []string
-	say       string
+	once  sync.Once
+	jobs  chan Turn
+	runs  map[string]*liveRun
+	wake  *sync.Cond
+	epoch int
 }
 
 // Config 是当前生效的机器人配置。
@@ -204,6 +223,7 @@ func (s *Service) Apply(cfg Config) {
 }
 
 func (s *Service) run(ctx context.Context, gen int, appID, secret string) {
+	// 飞书要求收到事件后 3 秒内返回。这里只入队，模型调用在 loop 里。
 	err := s.hooks.Dial(ctx, appID, secret, func(t Turn) {
 		if t.Action == "stop" {
 			s.halt(t.ActionID)
@@ -216,6 +236,7 @@ func (s *Service) run(ctx context.Context, gen int, appID, secret string) {
 		}
 	}, func(state, detail string) {
 		if ctx.Err() != nil {
+			s.dropRun()
 			return
 		}
 		s.mu.Lock()
@@ -223,7 +244,10 @@ func (s *Service) run(ctx context.Context, gen int, appID, secret string) {
 		s.detail = detail
 		s.mu.Unlock()
 		if state == "connected" {
-			go s.catchUp(ctx, appID, secret)
+			go s.closeStale(appID, secret)
+			go s.watchScopes(ctx, appID, secret)
+		} else {
+			s.dropRun()
 		}
 	})
 	s.mu.Lock()
@@ -256,11 +280,11 @@ func (s *Service) StopRun(agentID string) {
 		return
 	}
 	s.mu.Lock()
-	if s.runAgent != agentID && s.cfg.AgentID != agentID {
-		s.mu.Unlock()
-		return
+	run := s.runs[agentID]
+	var cancel context.CancelFunc
+	if run != nil {
+		cancel = run.cancel
 	}
-	cancel := s.runCancel
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -269,7 +293,12 @@ func (s *Service) StopRun(agentID string) {
 
 func (s *Service) loop() {
 	for t := range s.jobs {
-		s.dispatch(t)
+		t := t
+		if t.Action != "" || t.Joined {
+			s.dispatch(t)
+			continue
+		}
+		go s.dispatch(t)
 	}
 }
 
@@ -287,8 +316,8 @@ func (s *Service) dispatch(t Turn) {
 	}
 	fresh := s.log != nil && t.ChatID != "" && !s.log.Known(t.ChatID)
 	s.noteLine(t)
-	if fresh {
-		go s.fill(cfg, t.ChatID, 0)
+	if fresh && !strings.HasPrefix(t.EventID, "catch-") {
+		go s.replayChat(cfg, listedChat{ID: t.ChatID, Name: t.ChatName, Kind: t.ChatType}, time.Now().Unix())
 	}
 	if t.ChatType == "group" && s.fromSelf(t) {
 		return
@@ -306,6 +335,7 @@ func (s *Service) dispatch(t Turn) {
 	if !d.Pass {
 		return
 	}
+	s.markSeen(cfg, t.MessageID)
 	s.expand(cfg, &t)
 	pieces, miss := s.attach(cfg, t)
 	if miss != "" {
@@ -324,17 +354,21 @@ func (s *Service) dispatch(t Turn) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	parent := s.AgentFor(t.ChatID)
+	run, pickErr := s.reserve(parent, t.MessageID, cancel)
+	if pickErr != nil {
+		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, pickErr.Error())
+		return
+	}
+	defer s.release(run)
 	cardID := s.sendWorking(cfg.AppID, cfg.AppSecret, t.MessageID, workingLine, t.MessageID)
-	agentID := s.AgentFor(t.ChatID)
+	if cardID != "" && s.log != nil {
+		s.log.Remember(cardID)
+	}
 	s.mu.Lock()
-	s.closed = false
-	s.cardID = cardID
-	s.runKey = t.MessageID
-	s.runCancel = cancel
-	s.runAgent = agentID
-	s.lines = nil
-	s.say = ""
+	run.card = cardID
 	s.mu.Unlock()
+	agentID := run.agent
 	reply, err := s.hooks.Run(ctx, RunRequest{AgentID: agentID, Text: text, Pieces: pieces})
 	final := reply
 	if ctx.Err() != nil {
@@ -345,19 +379,27 @@ func (s *Service) dispatch(t Turn) {
 		final = "没有给出文字回复"
 	}
 	s.mu.Lock()
-	s.closed = true
-	s.cardID = ""
-	s.runKey = ""
-	s.runAgent = ""
-	s.runCancel = nil
+	run.closed = true
+	cardID = run.card
 	s.mu.Unlock()
+	sent := ""
+	if final != "已停止" {
+		sent = s.send(cfg.AppID, cfg.AppSecret, t.MessageID, withMentions(t, final))
+	}
 	if cardID == "" {
-		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, final)
-	} else {
-		s.paint(cfg, cardID, final, "")
+		// 没有进度卡片时，上面这条新消息就是回复。
+	} else if sent == "" {
+		if s.paint(cfg, cardID, final, "") == nil && s.log != nil {
+			s.log.Release(cardID)
+		}
+	} else if s.paint(cfg, cardID, repliedLine, "") == nil && s.log != nil {
+		s.log.Release(cardID)
 	}
 	if s.log != nil && t.ChatID != "" {
-		id := cardID
+		id := sent
+		if id == "" {
+			id = cardID
+		}
 		if id == "" {
 			id = "self:" + t.MessageID
 		}
@@ -365,16 +407,157 @@ func (s *Service) dispatch(t Turn) {
 	}
 }
 
+// withMentions 在群里的最终回复前 @ 提问的人，以及这条消息里点到的其他成员。
+// 进度仍改原来的卡片。答完另发一条，群里才会有提醒。
+func withMentions(t Turn, text string) string {
+	if t.ChatType != "group" {
+		return text
+	}
+	var tags []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if !openID(id) || seen[id] {
+			return
+		}
+		seen[id] = true
+		tags = append(tags, "<at id="+id+"></at>")
+	}
+	if t.SenderType == "" || t.SenderType == "user" {
+		add(t.SenderID)
+	}
+	for _, m := range t.Mentions {
+		if m.Bot {
+			continue
+		}
+		add(m.OpenID)
+	}
+	if len(tags) == 0 {
+		return text
+	}
+	return strings.Join(tags, " ") + "\n" + text
+}
+
+func openID(id string) bool {
+	if len(id) < 4 || !strings.HasPrefix(id, "ou_") {
+		return false
+	}
+	for _, r := range id[3:] {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) halt(id string) {
 	if s == nil || id == "" {
 		return
 	}
 	s.mu.Lock()
-	cancel := s.runCancel
-	ok := id == s.runKey && cancel != nil
+	var run *liveRun
+	for _, cur := range s.runs {
+		if cur.key == id && cur.cancel != nil {
+			run = cur
+			break
+		}
+	}
+	if run == nil {
+		s.mu.Unlock()
+		return
+	}
+	run.closed = true
+	cancel := run.cancel
+	cardID := run.card
+	cfg := s.cfg
 	s.mu.Unlock()
-	if ok {
-		cancel()
+	cancel()
+	if cardID != "" && s.paint(cfg, cardID, "已停止", "") == nil && s.log != nil {
+		s.log.Release(cardID)
+	}
+}
+
+const droppedLine = "服务已经停了，这一轮没有做完"
+
+// dropRun 连接不在时，把还挂着停止按钮的卡片收掉，并停掉这一轮。
+func (s *Service) dropRun() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cfg := s.cfg
+	var runs []*liveRun
+	for _, run := range s.runs {
+		if run.closed {
+			continue
+		}
+		run.closed = true
+		runs = append(runs, run)
+	}
+	s.epoch++
+	if s.wake != nil {
+		s.wake.Broadcast()
+	}
+	s.mu.Unlock()
+	for _, run := range runs {
+		if run.cancel != nil {
+			run.cancel()
+		}
+		if run.card != "" && s.paint(cfg, run.card, droppedLine, "") == nil && s.log != nil {
+			s.log.Release(run.card)
+		}
+	}
+}
+
+// closeStale 上次进程停掉时没来得及改的卡片，连上后补成已结束。
+func (s *Service) closeStale(appID, secret string) {
+	if s == nil || s.log == nil {
+		return
+	}
+	s.mu.Lock()
+	open := map[string]bool{}
+	for _, run := range s.runs {
+		if run.card != "" {
+			open[run.card] = true
+		}
+	}
+	s.mu.Unlock()
+	cfg := Config{AppID: appID, AppSecret: secret}
+	for _, id := range s.log.OpenCards() {
+		if id == "" || open[id] {
+			continue
+		}
+		if s.paint(cfg, id, droppedLine, "") == nil {
+			s.log.Release(id)
+		}
+	}
+	s.closeHung(appID, secret, open)
+}
+
+func (s *Service) closeHung(appID, secret string, open map[string]bool) {
+	if s.log == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pull := s.stops
+	if pull == nil {
+		pull = OpenStops
+	}
+	cfg := Config{AppID: appID, AppSecret: secret}
+	for _, room := range s.log.Rooms() {
+		ids, err := pull(ctx, appID, secret, room.ID)
+		if err != nil {
+			log.Printf("feishu stuck %s: %v", room.ID, err)
+			continue
+		}
+		for _, id := range ids {
+			if id == "" || open[id] {
+				continue
+			}
+			_ = s.paint(cfg, id, droppedLine, "")
+		}
 	}
 }
 
@@ -395,19 +578,20 @@ func (s *Service) NoteDelta(data any) {
 		return
 	}
 	s.mu.Lock()
-	if s.closed || s.runAgent != id || s.cardID == "" {
+	run := s.runs[id]
+	if run == nil || run.closed || run.card == "" {
 		s.mu.Unlock()
 		return
 	}
-	s.say += text
+	run.say += text
 	var ready []string
 	for {
-		i := strings.IndexAny(s.say, "\n。")
+		i := strings.IndexAny(run.say, "\n。")
 		if i < 0 {
 			break
 		}
-		ready = append(ready, s.say[:i+1])
-		s.say = s.say[i+1:]
+		ready = append(ready, run.say[:i+1])
+		run.say = run.say[i+1:]
 	}
 	s.mu.Unlock()
 	for _, line := range ready {
@@ -437,8 +621,12 @@ func (s *Service) NoteTool(data any) {
 
 func (s *Service) flushSay(agentID string) {
 	s.mu.Lock()
-	text := strings.TrimSpace(s.say)
-	s.say = ""
+	run := s.runs[agentID]
+	text := ""
+	if run != nil {
+		text = strings.TrimSpace(run.say)
+		run.say = ""
+	}
 	s.mu.Unlock()
 	if text != "" {
 		s.addLine(agentID, text)
@@ -454,20 +642,99 @@ func (s *Service) addLine(agentID, line string) {
 		return
 	}
 	s.mu.Lock()
-	if s.closed || s.runAgent != agentID || s.cardID == "" {
+	run := s.runs[agentID]
+	if run == nil || run.closed || run.card == "" {
 		s.mu.Unlock()
 		return
 	}
-	s.lines = append(s.lines, line)
-	if len(s.lines) > 8 {
-		s.lines = s.lines[len(s.lines)-8:]
+	run.lines = append(run.lines, line)
+	if len(run.lines) > 8 {
+		run.lines = run.lines[len(run.lines)-8:]
 	}
-	text := strings.Join(s.lines, "\n")
+	text := strings.Join(run.lines, "\n")
 	cfg := s.cfg
-	card := s.cardID
-	key := s.runKey
+	card := run.card
+	key := run.key
 	s.mu.Unlock()
 	s.paint(cfg, card, text, key)
+}
+
+func busyClaim(err error) bool {
+	return err != nil && err.Error() == "busy"
+}
+
+// reserve 占住一个还没在答飞书的会话。主会话忙时由 Claim 交给它的助手。
+func (s *Service) reserve(parent, key string, cancel context.CancelFunc) (*liveRun, error) {
+	for {
+		s.mu.Lock()
+		busy := map[string]bool{}
+		for id, run := range s.runs {
+			if run != nil {
+				busy[id] = true
+			}
+		}
+		claim := s.hooks.Claim
+		seen := s.epoch
+		s.mu.Unlock()
+
+		var id string
+		if claim == nil {
+			if busy[parent] {
+				s.waitEpoch(seen)
+				continue
+			}
+			id = parent
+		} else {
+			got, err := claim(parent, busy)
+			if busyClaim(err) || (err == nil && (got == "" || busy[got])) {
+				s.waitEpoch(seen)
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			id = got
+		}
+
+		s.mu.Lock()
+		if s.runs[id] != nil {
+			s.mu.Unlock()
+			continue
+		}
+		if s.runs == nil {
+			s.runs = map[string]*liveRun{}
+		}
+		run := &liveRun{agent: id, key: key, cancel: cancel}
+		s.runs[id] = run
+		s.mu.Unlock()
+		return run, nil
+	}
+}
+
+func (s *Service) waitEpoch(seen int) {
+	s.mu.Lock()
+	if s.wake == nil {
+		s.wake = sync.NewCond(&s.mu)
+	}
+	for s.epoch == seen {
+		s.wake.Wait()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) release(run *liveRun) {
+	if s == nil || run == nil {
+		return
+	}
+	s.mu.Lock()
+	if cur := s.runs[run.agent]; cur == run {
+		delete(s.runs, run.agent)
+	}
+	s.epoch++
+	if s.wake != nil {
+		s.wake.Broadcast()
+	}
+	s.mu.Unlock()
 }
 
 func clipLine(s string) string {
@@ -703,6 +970,17 @@ func (s *Service) download(cfg Config, messageID, key string) ([]byte, string, e
 	return FetchImageToken(ctx, cfg.UserAccess, messageID, key)
 }
 
+func (s *Service) markSeen(cfg Config, messageID string) {
+	if s.hooks.React == nil || messageID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := s.hooks.React(ctx, cfg.AppID, cfg.AppSecret, messageID, processingEmoji); err != nil {
+		s.noteFault(err)
+	}
+}
+
 func (s *Service) sendWorking(appID, secret, messageID, text, stopID string) string {
 	if messageID == "" || text == "" {
 		return ""
@@ -712,23 +990,25 @@ func (s *Service) sendWorking(appID, secret, messageID, text, stopID string) str
 	}
 	id, err := s.hooks.Working(context.Background(), appID, secret, messageID, text, stopID)
 	if err != nil {
-		log.Printf("feishu card: %v", err)
+		s.noteFault(err)
 		return ""
 	}
 	return id
 }
 
-func (s *Service) paint(cfg Config, cardID, text, stopID string) {
+func (s *Service) paint(cfg Config, cardID, text, stopID string) error {
 	if cardID == "" || text == "" {
-		return
+		return nil
 	}
 	if s.hooks.Patch == nil {
 		s.send(cfg.AppID, cfg.AppSecret, cardID, text)
-		return
+		return nil
 	}
 	if err := s.hooks.Patch(context.Background(), cfg.AppID, cfg.AppSecret, cardID, text, stopID); err != nil {
 		log.Printf("feishu card: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (s *Service) send(appID, secret, messageID, text string) string {
@@ -737,10 +1017,77 @@ func (s *Service) send(appID, secret, messageID, text string) string {
 	}
 	id, err := s.hooks.Reply(context.Background(), appID, secret, messageID, text)
 	if err != nil {
-		log.Printf("feishu reply: %v", err)
+		s.noteFault(err)
 		return ""
 	}
 	return id
+}
+
+func (s *Service) watchScopes(ctx context.Context, appID, secret string) {
+	wait := s.scopeEvery
+	if wait <= 0 {
+		wait = 20 * time.Second
+	}
+	pulled := ""
+	blind := false
+	for {
+		got, err := s.loadScopes(ctx, appID, secret)
+		if err != nil {
+			log.Printf("feishu scopes: %v", err)
+			if !blind {
+				s.catchUp(ctx, appID, secret)
+				blind = true
+			}
+		} else if historyReady(got) {
+			stamp := scopeStamp(got)
+			if stamp != pulled {
+				s.catchUp(ctx, appID, secret)
+				pulled = stamp
+			}
+			s.mu.Lock()
+			miss := MissingScopes(got)
+			if len(miss) == 0 && strings.HasPrefix(s.detail, "还缺这些权限") {
+				s.detail = ""
+			} else if len(miss) > 0 {
+				s.detail = scopeDetail(miss)
+			}
+			s.mu.Unlock()
+		} else {
+			s.mu.Lock()
+			s.detail = scopeDetail(MissingScopes(got))
+			s.mu.Unlock()
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Service) loadScopes(ctx context.Context, appID, secret string) (map[string]bool, error) {
+	if s.scopes != nil {
+		return s.scopes(ctx, appID, secret)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return AppScopes(ctx, appID, secret)
+}
+
+func (s *Service) noteFault(err error) {
+	if err == nil {
+		return
+	}
+	log.Printf("feishu: %v", err)
+	msg := err.Error()
+	if strings.Contains(msg, "Access denied") || strings.Contains(msg, "权限") {
+		msg = "飞书没给这个应用发消息和标表情的权限。开通「获取与发送单聊、群组消息」并发布版本后，会自己把还没回复的消息拉下来。"
+	}
+	s.mu.Lock()
+	s.detail = msg
+	s.mu.Unlock()
 }
 
 func (s *Service) noteLine(t Turn) {
@@ -830,22 +1177,160 @@ func (s *Service) arrive(cfg Config, t Turn) {
 	if s.log != nil {
 		s.log.Name(t.ChatID, t.ChatName)
 	}
-	s.fill(cfg, t.ChatID, 0)
+	s.replayChat(cfg, listedChat{ID: t.ChatID, Name: t.ChatName, Kind: "group"}, time.Now().Unix())
 }
 
+const catchWindow = 7 * 24 * time.Hour
+
+// catchUp 把已经见过的会话，以及机器人所在的群里还没回复的消息补进队列。
+// 权限是后来才有的时候也会再跑一遍，不必等一个新会话。
+// 飞书群列表不含单聊；从没进过本机记录的单聊，仍然要等这个会话里的下一条。
 func (s *Service) catchUp(ctx context.Context, appID, secret string) {
 	s.ensureBot(ctx, appID, secret)
-	if s.log == nil {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	cfg.AppID = appID
+	cfg.AppSecret = secret
+	if s.jobs == nil {
+		s.start()
+	}
+	seen := map[string]listedChat{}
+	if s.log != nil {
+		for _, room := range s.log.Rooms() {
+			seen[room.ID] = listedChat{ID: room.ID, Name: room.Name, Kind: room.Kind}
+		}
+	}
+	pull := s.listChats
+	if pull == nil {
+		pull = ListChats
+	}
+	more, err := pull(ctx, appID, secret)
+	if err != nil {
+		log.Printf("feishu chats: %v", err)
+	} else {
+		for _, c := range more {
+			prev := seen[c.ID]
+			if c.Name == "" {
+				c.Name = prev.Name
+			}
+			if c.Kind == "" {
+				c.Kind = prev.Kind
+			}
+			if c.Kind == "" {
+				c.Kind = "group"
+			}
+			seen[c.ID] = c
+		}
+	}
+	now := time.Now().Unix()
+	for _, c := range seen {
+		s.replayChat(cfg, c, now)
+	}
+}
+
+func (s *Service) replayChat(cfg Config, c listedChat, now int64) {
+	if c.ID == "" || cfg.AppID == "" {
 		return
 	}
-	cfg := Config{AppID: appID, AppSecret: secret}
-	for _, room := range s.log.Chats() {
-		var since int64
-		if len(room.Messages) > 0 {
-			since = room.Messages[0].At
-		}
-		s.fill(cfg, room.ID, since)
+	kind := c.Kind
+	if kind == "topic" {
+		kind = "group"
 	}
+	if cfg.MentionOnly && kind == "group" {
+		return
+	}
+	if s.jobs == nil {
+		s.start()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pull := s.history
+	if pull == nil {
+		pull = History
+	}
+	lines, err := pull(ctx, cfg.AppID, cfg.AppSecret, c.ID, 0)
+	if err != nil {
+		log.Printf("feishu history %s: %v", c.ID, err)
+		return
+	}
+	if s.log != nil {
+		if c.Name != "" {
+			s.log.Name(c.ID, c.Name)
+		}
+		if kind != "" {
+			s.log.Kind(c.ID, kind)
+		}
+		for _, line := range lines {
+			if line.ChatID == "" {
+				line.ChatID = c.ID
+			}
+			if line.At == 0 {
+				line.At = now
+			}
+			s.log.Add(line)
+		}
+	}
+	if kind == "" {
+		kind = "p2p"
+	}
+	for _, line := range unanswered(lines, now) {
+		t := Turn{
+			EventID:    "catch-" + line.ID,
+			ChatType:   kind,
+			MsgType:    "text",
+			Text:       line.Text,
+			MessageID:  line.ID,
+			ChatID:     c.ID,
+			ChatName:   c.Name,
+			Sender:     line.From,
+			SenderID:   line.FromID,
+			SenderType: "user",
+			At:         line.At,
+		}
+		select {
+		case s.jobs <- t:
+		default:
+			log.Printf("feishu catch-up queue full")
+			return
+		}
+	}
+}
+
+// unanswered 取最后一条机器人回复之后、还没人接的用户消息。超过 7 天或超过 5 条的不补。
+func unanswered(lines []Line, now int64) []Line {
+	end := len(lines)
+	for end > 0 && !lines[end-1].Self && strings.TrimSpace(lines[end-1].Text) == "" {
+		end--
+	}
+	if end == 0 || lines[end-1].Self {
+		return nil
+	}
+	start := end - 1
+	for start > 0 && !lines[start-1].Self {
+		start--
+	}
+	var out []Line
+	for _, line := range lines[start:end] {
+		if line.Self || strings.TrimSpace(line.Text) == "" || line.ID == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) > 5 {
+		out = out[len(out)-5:]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	newest := out[len(out)-1].At
+	if newest == 0 {
+		newest = now
+	}
+	if now > 0 && now-newest > int64(catchWindow/time.Second) {
+		return nil
+	}
+	return out
 }
 
 func (s *Service) ensureBot(ctx context.Context, appID, secret string) {
@@ -863,27 +1348,4 @@ func (s *Service) ensureBot(ctx context.Context, appID, secret string) {
 	s.mu.Lock()
 	s.botID = id
 	s.mu.Unlock()
-}
-
-func (s *Service) fill(cfg Config, chatID string, since int64) {
-	if s.log == nil || chatID == "" || cfg.AppID == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	pull := s.history
-	if pull == nil {
-		pull = History
-	}
-	lines, err := pull(ctx, cfg.AppID, cfg.AppSecret, chatID, since)
-	if err != nil {
-		log.Printf("feishu history %s: %v", chatID, err)
-		return
-	}
-	for _, line := range lines {
-		if line.At == 0 {
-			line.At = time.Now().Unix()
-		}
-		s.log.Add(line)
-	}
 }

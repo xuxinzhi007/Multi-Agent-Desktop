@@ -448,7 +448,7 @@ func (r *Runner) context(st *State) []llm.Message {
 	if r.System != "" {
 		out = append(out, llm.Message{Role: "system", Content: r.System})
 	}
-	out = append(out, st.Messages...)
+	out = append(out, llm.WithoutRuntimeErrors(st.Messages)...)
 	return out
 }
 

@@ -2,12 +2,40 @@ package feishu
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"multi-agent-desktop/internal/llm"
 )
+
+func TestServiceReactsBeforeReply(t *testing.T) {
+	var emoji, id string
+	ran := false
+	reactedFirst := false
+	s := New(Hooks{
+		React: func(_ context.Context, _, _, messageID, got string) error {
+			emoji, id = got, messageID
+			reactedFirst = !ran
+			return nil
+		},
+		Run: func(context.Context, RunRequest) (string, error) {
+			ran = true
+			return "好", nil
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_reply", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.dispatch(Turn{EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "你好呀", MessageID: "om_1"})
+	if !reactedFirst || emoji != "Typing" || id != "om_1" {
+		t.Fatalf("emoji=%s id=%s first=%v", emoji, id, reactedFirst)
+	}
+}
 
 func TestServiceDispatchesPrivateText(t *testing.T) {
 	var gotAgent, gotText string
@@ -290,6 +318,65 @@ func TestWorkingCardThenResult(t *testing.T) {
 	}
 }
 
+func TestDropRunRemovesStop(t *testing.T) {
+	started := make(chan struct{})
+	var patched, stop string
+	s := New(Hooks{
+		Run: func(ctx context.Context, _ RunRequest) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		Working: func(context.Context, string, string, string, string, string) (string, error) {
+			return "om_card", nil
+		},
+		Patch: func(_ context.Context, _, _, _, text, stopID string) error {
+			patched, stop = text, stopID
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	done := make(chan struct{})
+	go func() {
+		s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "hi", MessageID: "om"})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model call did not start")
+	}
+	s.dropRun()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not stop")
+	}
+	if stop != "" || (patched != droppedLine && patched != "已停止") {
+		t.Fatalf("patched=%q stop=%q", patched, stop)
+	}
+}
+
+func TestCloseStaleCard(t *testing.T) {
+	var id, text, stop string
+	s := New(Hooks{
+		Patch: func(_ context.Context, _, _, cardID, got, stopID string) error {
+			id, text, stop = cardID, got, stopID
+			return nil
+		},
+	})
+	s.log.SetPath(filepath.Join(t.TempDir(), "feishu-rooms.json"))
+	s.log.Remember("om_old")
+	s.stops = func(context.Context, string, string, string) ([]string, error) { return nil, nil }
+	s.closeStale("cli", "sec")
+	if id != "om_old" || text != droppedLine || stop != "" {
+		t.Fatalf("id=%s text=%q stop=%q", id, text, stop)
+	}
+	if s.log.Recall() != "" {
+		t.Fatal("stale card still remembered")
+	}
+}
+
 func TestStopButtonCancelsAndUpdatesCard(t *testing.T) {
 	started := make(chan struct{})
 	var patched string
@@ -382,5 +469,298 @@ func TestProgressIsOneLineOnTheSameCard(t *testing.T) {
 	}
 	if strings.Contains(lines[1], "rm ") {
 		t.Fatal("progress included the command")
+	}
+}
+
+func TestPermissionFailureShowsOnTheBot(t *testing.T) {
+	s := New(Hooks{
+		Run: func(context.Context, RunRequest) (string, error) { return "好", nil },
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "", fmt.Errorf("feishu reply: Access denied. im:message")
+		},
+		Working: func(context.Context, string, string, string, string, string) (string, error) {
+			return "", fmt.Errorf("feishu card: Access denied")
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.dispatch(Turn{EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "你好呀", MessageID: "om_1"})
+	if !strings.Contains(s.Status().Detail, "获取与发送单聊、群组消息") {
+		t.Fatalf("detail=%s", s.Status().Detail)
+	}
+}
+
+func TestUnansweredStopsAtBotLine(t *testing.T) {
+	now := time.Now().Unix()
+	lines := []Line{
+		{ID: "a", Text: "更早", At: now - 30},
+		{ID: "b", Text: "", At: now - 20, Self: true},
+		{ID: "c", Text: "你好呀", At: now - 10},
+		{ID: "d", Text: "", At: now - 9},
+	}
+	got := unanswered(lines, now)
+	if len(got) != 1 || got[0].Text != "你好呀" {
+		t.Fatalf("got=%+v", got)
+	}
+	answered := []Line{
+		{ID: "c", Text: "你好呀", At: now - 10},
+		{ID: "e", Text: "", At: now - 1, Self: true},
+	}
+	if unanswered(answered, now) != nil {
+		t.Fatal("机器人已经回过")
+	}
+	old := []Line{{ID: "z", Text: "你好呀", At: now - int64(8*24*time.Hour/time.Second)}}
+	if unanswered(old, now) != nil {
+		t.Fatal("超过 7 天不补")
+	}
+}
+
+func TestScopesThenPullsKnownChat(t *testing.T) {
+	got := make(chan string, 2)
+	s := New(Hooks{
+		Run: func(_ context.Context, req RunRequest) (string, error) {
+			got <- req.Text
+			return "在的", nil
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_r", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.log = NewLog()
+	s.log.Kind("oc_p", "p2p")
+	now := time.Now().Unix()
+	s.log.Add(Line{ID: "seed", ChatID: "oc_p", Text: "占位", At: now - 30})
+	checks := 0
+	s.scopes = func(context.Context, string, string) (map[string]bool, error) {
+		checks++
+		if checks == 1 {
+			return map[string]bool{}, nil
+		}
+		return map[string]bool{"im:message": true, "im:message.p2p_msg:readonly": true}, nil
+	}
+	s.listChats = func(context.Context, string, string) ([]listedChat, error) {
+		return nil, nil
+	}
+	s.history = func(context.Context, string, string, string, int64) ([]Line, error) {
+		return []Line{{ID: "om_hi", ChatID: "oc_p", Text: "你好呀", At: now}}, nil
+	}
+	s.scopeEvery = 15 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.watchScopes(ctx, "cli", "sec")
+	select {
+	case text := <-got:
+		if !strings.Contains(text, "你好呀") {
+			t.Fatalf("text=%s", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("权限齐了之后没有拉取已有会话")
+	}
+}
+
+func TestCatchUpRunsUnanswered(t *testing.T) {
+	got := make(chan string, 4)
+	s := New(Hooks{
+		Run: func(_ context.Context, req RunRequest) (string, error) {
+			got <- req.Text
+			return "在的", nil
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_r", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.log = NewLog()
+	s.log.Kind("oc_p", "p2p")
+	now := time.Now().Unix()
+	s.listChats = func(context.Context, string, string) ([]listedChat, error) {
+		return []listedChat{{ID: "oc_g", Name: "一组", Kind: "group"}}, nil
+	}
+	s.history = func(_ context.Context, _, _, chatID string, since int64) ([]Line, error) {
+		if since != 0 {
+			t.Errorf("since=%d", since)
+		}
+		if chatID == "oc_g" {
+			return []Line{{ID: "om_g", ChatID: chatID, Text: "群里没点名", At: now}}, nil
+		}
+		return []Line{
+			{ID: "om_old", ChatID: chatID, Text: "更早一句", At: now - 100, Self: true},
+			{ID: "om_hi", ChatID: chatID, Text: "你好呀", At: now - 10},
+		}, nil
+	}
+	s.cfg.MentionOnly = true
+	s.catchUp(context.Background(), "cli", "sec")
+	select {
+	case text := <-got:
+		if !strings.Contains(text, "你好呀") || strings.Contains(text, "群里没点名") || strings.Contains(text, "更早一句") {
+			t.Fatalf("text=%s", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("没补上你好呀")
+	}
+	select {
+	case extra := <-got:
+		t.Fatalf("多跑了：%s", extra)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestFreshChatReplaysEarlier(t *testing.T) {
+	got := make(chan string, 4)
+	s := New(Hooks{
+		Run: func(_ context.Context, req RunRequest) (string, error) {
+			got <- req.Text
+			return "在的", nil
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_r", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.log = NewLog()
+	now := time.Now().Unix()
+	s.history = func(context.Context, string, string, string, int64) ([]Line, error) {
+		return []Line{
+			{ID: "om_hi", Text: "你好呀", At: now - 20},
+			{ID: "om_now", Text: "在吗", At: now},
+		}, nil
+	}
+	s.dispatch(Turn{
+		EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "在吗",
+		MessageID: "om_now", ChatID: "oc_p", At: now,
+	})
+	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case text := <-got:
+			if strings.Contains(text, "你好呀") {
+				seen["hi"] = true
+			}
+			if strings.Contains(text, "在吗") {
+				seen["now"] = true
+			}
+		case <-deadline:
+			t.Fatalf("seen=%v", seen)
+		}
+	}
+}
+
+func TestGroupAnswerMentionsAndDoesNotStayOnTheCard(t *testing.T) {
+	var reply, patched, stop string
+	s := New(Hooks{
+		Run: func(context.Context, RunRequest) (string, error) {
+			return "看完了", nil
+		},
+		Working: func(context.Context, string, string, string, string, string) (string, error) {
+			return "om_card", nil
+		},
+		Reply: func(_ context.Context, _, _, _, text string) (string, error) {
+			reply = text
+			return "om_answer", nil
+		},
+		Patch: func(_ context.Context, _, _, id, text, stopID string) error {
+			if id != "om_card" {
+				t.Fatalf("patch id=%s", id)
+			}
+			patched, stop = text, stopID
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.dispatch(Turn{
+		EventID: "e", ChatType: "group", MsgType: "text", Text: "看一下",
+		MessageID: "om", SenderID: "ou_asker", SenderType: "user",
+		Mentions: []Who{{OpenID: "ou_asker", Name: "甲"}, {OpenID: "ou_bot", Name: "机器人", Bot: true}, {OpenID: "ou_other", Name: "乙"}},
+	})
+	if !strings.Contains(reply, "<at id=ou_asker></at>") || !strings.Contains(reply, "<at id=ou_other></at>") || !strings.Contains(reply, "看完了") {
+		t.Fatalf("reply=%s", reply)
+	}
+	if strings.Contains(reply, "ou_bot") || strings.Contains(reply, "id=all") {
+		t.Fatalf("reply mentioned the bot or everyone: %s", reply)
+	}
+	if patched != repliedLine || stop != "" {
+		t.Fatalf("card=%q stop=%q", patched, stop)
+	}
+}
+
+func TestParseChatList(t *testing.T) {
+	list, err := parseChatList([]byte(`{"code":0,"data":{"items":[{"chat_id":"oc_1","name":"一组","chat_mode":"group"},{"chat_id":""}]}}`))
+	if err != nil || len(list) != 1 || list[0].ID != "oc_1" || list[0].Kind != "group" {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+}
+
+func TestTwoMessagesReplyAtOnce(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	patches := map[string]string{}
+	s := New(Hooks{
+		Claim: func(parent string, busy map[string]bool) (string, error) {
+			if !busy[parent] {
+				return parent, nil
+			}
+			if !busy["child"] {
+				return "child", nil
+			}
+			return "", fmt.Errorf("busy")
+		},
+		Run: func(_ context.Context, req RunRequest) (string, error) {
+			started <- req.AgentID
+			<-release
+			return req.AgentID + "答完", nil
+		},
+		Working: func(_ context.Context, _, _, messageID, _, _ string) (string, error) {
+			return "card-" + messageID, nil
+		},
+		Patch: func(_ context.Context, _, _, id, text, stopID string) error {
+			if stopID != "" && text != "" && !strings.Contains(text, "正在") {
+				t.Errorf("final card kept stop %q", stopID)
+			}
+			mu.Lock()
+			patches[id] = text
+			mu.Unlock()
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "main"}
+	go s.dispatch(Turn{EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "一", MessageID: "m1"})
+	go s.dispatch(Turn{EventID: "e2", ChatType: "p2p", MsgType: "text", Text: "二", MessageID: "m2"})
+	got := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(got) < 2 {
+		select {
+		case id := <-started:
+			got[id] = true
+		case <-deadline:
+			t.Fatalf("started=%v", got)
+		}
+	}
+	if !got["main"] || !got["child"] {
+		t.Fatalf("agents=%v", got)
+	}
+	close(release)
+	wait := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		done := patches["card-m1"] != "" && patches["card-m2"] != ""
+		mu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-wait:
+			t.Fatalf("patches=%v", patches)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if patches["card-m1"] == patches["card-m2"] {
+		t.Fatalf("same reply on both cards: %v", patches)
+	}
+	if !strings.Contains(patches["card-m1"]+patches["card-m2"], "main答完") || !strings.Contains(patches["card-m1"]+patches["card-m2"], "child答完") {
+		t.Fatalf("patches=%v", patches)
 	}
 }

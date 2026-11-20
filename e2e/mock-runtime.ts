@@ -40,8 +40,8 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.GetWorkDir': () => '',
       'API.IsAlwaysOnTop': () => false,
       'API.ListAllModels': () => [
-        { model: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', provider: 'llamacpp', local: true, ready: true, current: true },
-        { model: 'deepseek-chat', provider: 'deepseek', local: false, ready: true, current: false },
+        { model: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', provider: 'llamacpp', local: true, ready: true, current: true, reasoning: false },
+        { model: 'deepseek-chat', provider: 'deepseek', local: false, ready: true, current: false, reasoning: true, efforts: ['low', 'medium', 'high', 'xhigh'] },
         { model: 'OpenAI（未配置 Key）', provider: 'openai', local: false, ready: false, note: '未配置 Key' },
       ],
       'API.Diagnose': () => ({

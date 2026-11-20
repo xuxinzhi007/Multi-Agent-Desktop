@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -50,6 +51,109 @@ type room struct {
 
 func NewLog() *Log {
 	return &Log{rooms: map[string]*room{}}
+}
+
+// Remember 记下还挂着「停止」的那张卡片。同时可以有多张。进程掉了之后，下次连上再收掉。
+func (l *Log) Remember(id string) {
+	if l == nil || id == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	path := livePath(l.path)
+	if path == "" {
+		return
+	}
+	ids := readLive(path)
+	for _, have := range ids {
+		if have == id {
+			return
+		}
+	}
+	ids = append(ids, id)
+	_ = os.WriteFile(path, []byte(strings.Join(ids, "\n")+"\n"), 0o600)
+}
+
+// OpenCards 返回还没收掉的卡片。
+func (l *Log) OpenCards() []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return readLive(livePath(l.path))
+}
+
+// Recall 返回还没收掉的第一张卡片。
+func (l *Log) Recall() string {
+	ids := l.OpenCards()
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// Release 这一张已经改完。还有别的卡片时，文件留下。
+func (l *Log) Release(id string) {
+	if l == nil || id == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	path := livePath(l.path)
+	if path == "" {
+		return
+	}
+	var keep []string
+	for _, have := range readLive(path) {
+		if have != id {
+			keep = append(keep, have)
+		}
+	}
+	if len(keep) == 0 {
+		_ = os.Remove(path)
+		return
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600)
+}
+
+// Forget 全部卡片都已经改完，不再补收。
+func (l *Log) Forget() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	path := livePath(l.path)
+	l.mu.Unlock()
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+func readLive(path string) []string {
+	if path == "" {
+		return nil
+	}
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, line := range strings.Split(string(buf), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids
+}
+
+func livePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(path), "feishu-live.json")
 }
 
 func (l *Log) SetPath(path string) {

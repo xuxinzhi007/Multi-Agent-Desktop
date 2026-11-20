@@ -11,7 +11,7 @@ import { API, type AgentView as Agent, type Config, type Message } from '../mygo
 import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
 import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
-import { groupShellLogs, type ShellGroup } from '../lib/transcriptPresent'
+import { foldAssistantTranscript, groupShellLogs, type ShellGroup } from '../lib/transcriptPresent'
 import {
   agentTone,
   elapsedBetween,
@@ -87,145 +87,6 @@ function stepText(tool: string, target: string) {
   return line.length > 80 ? `${label} ${line.slice(0, 80)}…` : `${label} ${line}`
 }
 
-const QODER_REASONING = new Set([
-  'Auto',
-  'Ultimate',
-  'Performance',
-  'Cantus',
-  'Qwen3.8-Max',
-  'DeepSeek-V4-Pro',
-  'DeepSeek-V4-Flash',
-  'GLM-5.2',
-])
-
-const EFFORTS = [
-  { id: 'low', label: '快' },
-  { id: 'medium', label: '中' },
-  { id: 'high', label: '高' },
-  { id: 'xhigh', label: '更高' },
-] as const
-
-function effortOf(thinking?: string): string {
-  if (thinking === 'low' || thinking === 'high' || thinking === 'xhigh' || thinking === 'off') return thinking
-  return 'medium'
-}
-
-function EffortControl({
-  provider,
-  model,
-  thinking,
-  onPick,
-}: {
-  provider: string
-  model?: string
-  thinking?: string
-  onPick: (next: string) => void
-}) {
-  const supported = provider === 'deepseek' || (provider === 'qoder' && (!model || QODER_REASONING.has(model)))
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
-  const back = useRef('medium')
-  useEffect(() => {
-    if (!open) return
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
-  }, [open])
-  if (!supported) return null
-  const current = effortOf(thinking)
-  const fast = current === 'low'
-  const label = EFFORTS.find((e) => e.id === current)?.label ?? '关'
-  return (
-    <div ref={rootRef} style={{ display: 'flex', alignItems: 'center', gap: 4, position: 'relative' }}>
-      <button
-        type="button"
-        onClick={() => {
-          if (fast) {
-            onPick(back.current === 'low' ? 'medium' : back.current)
-            return
-          }
-          back.current = current
-          onPick('low')
-        }}
-        title={fast ? '快问开着' : '打开快问'}
-        style={{
-          border: '1px solid var(--border)',
-          background: fast ? 'var(--accent-dim)' : 'transparent',
-          color: fast ? 'var(--accent-bright)' : 'var(--text-tertiary)',
-          borderRadius: 'var(--radius-sm)',
-          fontSize: 'var(--text-xs)',
-          padding: '2px 8px',
-          cursor: 'pointer',
-          flexShrink: 0,
-        }}
-      >
-        快问
-      </button>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title="推理强度"
-        style={{
-          border: '1px solid var(--border)',
-          background: 'transparent',
-          color: 'var(--text-secondary)',
-          borderRadius: 'var(--radius-sm)',
-          fontSize: 'var(--text-xs)',
-          padding: '2px 8px',
-          cursor: 'pointer',
-          flexShrink: 0,
-        }}
-      >
-        {label}
-      </button>
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 'calc(100% + 6px)',
-            right: 0,
-            zIndex: 20,
-            minWidth: 88,
-            padding: 4,
-            background: 'var(--bg-elevated)',
-            border: '1px solid var(--border-default)',
-            borderRadius: 'var(--radius-md)',
-            boxShadow: 'var(--shadow-lg)',
-          }}
-        >
-          {EFFORTS.map((e) => (
-            <button
-              key={e.id}
-              type="button"
-              onClick={() => {
-                back.current = e.id
-                onPick(e.id)
-                setOpen(false)
-              }}
-              style={{
-                display: 'block',
-                width: '100%',
-                textAlign: 'left',
-                border: 0,
-                background: e.id === current ? 'var(--bg-surface-active)' : 'transparent',
-                color: 'var(--text-primary)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 'var(--text-xs)',
-                padding: '6px 8px',
-                cursor: 'pointer',
-              }}
-            >
-              {e.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 type Shown = { m: Message; calls: PeerCall[] }
 
 type TranscriptRow = { kind: 'msg'; m: Message; calls: PeerCall[]; idx: number } | { kind: 'err'; text: string }
@@ -245,23 +106,10 @@ function transcriptRows(visible: Shown[], errorAt: number, error?: string): Tran
 function presentTranscript(messages: Message[]): Shown[] {
   const byId = toolTextById(messages)
   const out: Shown[] = []
-  let chain: string[] = []
-  for (const m of messages) {
-    if (m.role === 'system' || m.role === 'tool') continue
-    const calls = m.role === 'assistant' ? peerCallsOf(m, byId) : []
-    if (m.role === 'assistant' && !(m.content || '').trim()) {
-      if (m.reasoning) chain.push(m.reasoning)
-      if (calls.length === 0) continue
-    }
-    if (m.role === 'assistant') {
-      const parts = [...chain]
-      if (m.reasoning) parts.push(m.reasoning)
-      chain = []
-      out.push({ m: parts.length ? { ...m, reasoning: parts.join('\n\n') } : m, calls })
-      continue
-    }
-    chain = []
-    out.push({ m, calls })
+  for (const row of foldAssistantTranscript(messages)) {
+    const calls = row.sources.flatMap((m) => (m.role === 'assistant' ? peerCallsOf(m, byId) : []))
+    if (row.item.role === 'assistant' && !(row.item.content || '').trim() && !row.item.reasoning && calls.length === 0) continue
+    out.push({ m: row.item, calls })
   }
   return out
 }
@@ -1050,33 +898,23 @@ export default function AgentView(p: Props) {
                 agentId={p.agent.id}
                 model={p.agent.llm?.model || ''}
                 provider={p.agent.llm?.provider}
-                mark={
-                  (p.agent.llm?.provider || p.connection?.provider) === 'deepseek' ||
-                  ((p.agent.llm?.provider || p.connection?.provider) === 'qoder' &&
-                    (!p.agent.llm?.model || QODER_REASONING.has(p.agent.llm.model)))
-                    ? EFFORTS.find((e) => e.id === effortOf(p.agent?.llm?.thinking))?.label
-                    : undefined
-                }
-                onPick={(m) => {
+                thinking={p.agent.llm?.thinking}
+                onPick={(m, nextThinking) => {
                   const conn = p.connection
                   const same = !!conn && conn.provider === m.provider
-                  const thinking = p.agent?.llm?.thinking
+                  const thinking = nextThinking ?? p.agent?.llm?.thinking
+                  const keep = thinking && (m.efforts ?? []).includes(thinking) ? thinking : undefined
                   p.onConfig({
                     llm: {
                       provider: m.provider,
                       baseUrl: m.baseUrl || (same ? conn.baseUrl : ''),
                       apiKey: same ? conn.apiKey : '',
                       model: m.model,
-                      ...(thinking ? { thinking } : {}),
+                      ...(keep ? { thinking: keep } : {}),
                     },
                   })
                 }}
-              />
-              <EffortControl
-                provider={p.agent.llm?.provider || p.connection?.provider || ''}
-                model={p.agent.llm?.model}
-                thinking={p.agent.llm?.thinking}
-                onPick={(next) => {
+                onThinking={(next) => {
                   const llm = p.agent?.llm
                   const conn = p.connection
                   p.onConfig({
@@ -1721,6 +1559,26 @@ function BubbleImpl({
   onOpenKnowledge,
 }: BubbleProps) {
   const [routeOpen, setRouteOpen] = useState(false)
+  if (m.role === 'system' && (m.content || '').startsWith('运行错误：')) {
+    return (
+      <div
+        style={{
+          marginTop: 'var(--space-3)',
+          marginBottom: 'var(--space-4)',
+          background: 'var(--danger-dim)',
+          border: '1px solid var(--danger-border)',
+          borderRadius: 'var(--radius-md)',
+          padding: '9px 12px',
+          fontSize: 'var(--text-sm)',
+          color: 'var(--danger)',
+          lineHeight: 'var(--leading-normal)',
+        }}
+      >
+        {m.content.slice('运行错误：'.length)}
+      </div>
+    )
+  }
+
   const isUser = m.role === 'user'
   const parsed = parseMessage(m.content)
   const isRouted = parsed.isRouted

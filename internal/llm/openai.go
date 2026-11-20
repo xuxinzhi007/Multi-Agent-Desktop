@@ -110,7 +110,12 @@ func ListModels(ctx context.Context, cfg Config) ([]string, error) {
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("%w", ErrMissingAPIKey)
 		}
-		return QoderModelNames(), nil
+		models := qoderResolve(ctx, cfg)
+		names := make([]string, len(models))
+		for i, m := range models {
+			names[i] = m.id
+		}
+		return names, nil
 	}
 	base := strings.TrimSuffix(cfg.BaseURL, "/")
 	base = strings.TrimSuffix(base, "/v1")

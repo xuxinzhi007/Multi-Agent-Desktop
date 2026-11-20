@@ -80,7 +80,14 @@ func session(ctx context.Context, appID, secret string, on func(Turn), mark func
 		if err != nil {
 			continue
 		}
-		if f.Method != 1 || f.header("type") != "event" {
+		if pong, ok := answerControl(f); ok {
+			writeMu.Lock()
+			_ = conn.WriteMessage(websocket.BinaryMessage, pong.marshal())
+			writeMu.Unlock()
+			continue
+		}
+		kind := inboundKind(f)
+		if kind == "" {
 			continue
 		}
 		payload := f.Payload
@@ -114,7 +121,7 @@ func session(ctx context.Context, appID, secret string, on func(Turn), mark func
 			delete(parts, id)
 			payload = all
 		}
-		ack(conn, writeMu, f)
+		ack(conn, writeMu, f, kind)
 		if turn, ok := actionFromPayload(payload); ok {
 			on(turn)
 			continue
@@ -130,7 +137,7 @@ func session(ctx context.Context, appID, secret string, on func(Turn), mark func
 }
 
 func ping(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, serviceID int32, done <-chan struct{}) {
-	ticker := time.NewTicker(2 * time.Minute)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -151,10 +158,35 @@ func ping(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, serviceID i
 	}
 }
 
-func ack(conn *websocket.Conn, mu *sync.Mutex, f frame) {
-	body, err := json.Marshal(struct {
-		Code int `json:"code"`
-	}{Code: http.StatusOK})
+// answerControl 回应飞书服务端的 ping。不回的话长连接会被拆掉，之后的消息到不了本机。
+func answerControl(f frame) (frame, bool) {
+	if f.header("type") != "ping" {
+		return frame{}, false
+	}
+	for i := range f.Headers {
+		if f.Headers[i].Key == "type" {
+			f.Headers[i].Value = "pong"
+		}
+	}
+	f.Payload = nil
+	return f, true
+}
+
+// inboundKind 是长连接里要处理的数据包。卡片按钮的类型是 card，不是 event。
+func inboundKind(f frame) string {
+	if f.Method != 1 {
+		return ""
+	}
+	switch f.header("type") {
+	case "event", "card":
+		return f.header("type")
+	default:
+		return ""
+	}
+}
+
+func ack(conn *websocket.Conn, mu *sync.Mutex, f frame, kind string) {
+	body, err := ackBody(kind)
 	if err != nil {
 		return
 	}
@@ -162,6 +194,19 @@ func ack(conn *websocket.Conn, mu *sync.Mutex, f frame) {
 	mu.Lock()
 	defer mu.Unlock()
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.marshal())
+}
+
+func ackBody(kind string) ([]byte, error) {
+	msg := struct {
+		Code int `json:"code"`
+		Data any `json:"data,omitempty"`
+	}{Code: http.StatusOK}
+	if kind == "card" {
+		msg.Data = map[string]any{
+			"toast": map[string]string{"type": "info", "content": "已停止"},
+		}
+	}
+	return json.Marshal(msg)
 }
 
 func fetchEndpoint(ctx context.Context, appID, secret string) (string, int32, error) {
@@ -415,14 +460,21 @@ func actionFromPayload(raw []byte) (Turn, bool) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return Turn{}, false
 	}
-	if body.Header.EventType != "card.action.trigger" {
+	if body.Header.EventType != "" && body.Header.EventType != "card.action.trigger" {
 		return Turn{}, false
 	}
 	var v struct {
 		Act string `json:"act"`
 		ID  string `json:"id"`
 	}
-	_ = json.Unmarshal(body.Event.Action.Value, &v)
+	rawValue := body.Event.Action.Value
+	if len(rawValue) > 0 && rawValue[0] == '"' {
+		var s string
+		if json.Unmarshal(rawValue, &s) == nil {
+			rawValue = []byte(s)
+		}
+	}
+	_ = json.Unmarshal(rawValue, &v)
 	if v.Act == "" || v.ID == "" {
 		return Turn{}, false
 	}
@@ -500,6 +552,46 @@ func postReply(ctx context.Context, appID, secret, messageID string, body []byte
 		return "", fmt.Errorf("feishu reply %s: %s", messageID, out.Msg)
 	}
 	return out.Data.MessageID, nil
+}
+
+// React 给一条消息加表情。emoji 用飞书的 emoji_type，例如 Typing。
+func React(ctx context.Context, appID, secret, messageID, emoji string) error {
+	if messageID == "" || emoji == "" {
+		return fmt.Errorf("feishu reaction: missing message")
+	}
+	body, err := json.Marshal(map[string]any{
+		"reaction_type": map[string]string{"emoji_type": emoji},
+	})
+	if err != nil {
+		return err
+	}
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, feishuHost+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("feishu reaction %s: %w", messageID, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("feishu reaction %s: %s", messageID, strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return fmt.Errorf("feishu reaction %s: %s", messageID, out.Msg)
+	}
+	return nil
 }
 
 // PatchCard 更新已经发出的那张卡片。stopID 为空时去掉停止按钮。
@@ -632,14 +724,14 @@ func History(ctx context.Context, appID, secret, chatID string, since int64) ([]
 	for i := len(out.Data.Items) - 1; i >= 0; i-- {
 		it := out.Data.Items[i]
 		text, _ := readContent(it.MsgType, it.Body.Content, nil)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
 		at, _ := strconv.ParseInt(it.CreateTime, 10, 64)
 		if at > 1_000_000_000_000 {
 			at /= 1000
 		}
 		self := it.Sender.SenderType == "app" || it.Sender.SenderType == "bot"
+		if strings.TrimSpace(text) == "" && !self {
+			continue
+		}
 		from := "有人"
 		if self {
 			from = "机器人"
@@ -655,6 +747,128 @@ func History(ctx context.Context, appID, secret, chatID string, since int64) ([]
 		})
 	}
 	return lines, nil
+}
+
+// OpenStops 找出这个会话里还带着停止按钮的机器人卡片。
+func OpenStops(ctx context.Context, appID, secret, chatID string) ([]string, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("container_id_type", "chat")
+	q.Set("container_id", chatID)
+	q.Set("page_size", "20")
+	q.Set("sort_type", "ByCreateTimeDesc")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feishuHost+"/open-apis/im/v1/messages?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu history %s: %w", chatID, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	return stopCards(raw)
+}
+
+func stopCards(raw []byte) ([]string, error) {
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				MessageID string `json:"message_id"`
+				Sender    struct {
+					SenderType string `json:"sender_type"`
+				} `json:"sender"`
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("feishu history: %s", strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return nil, fmt.Errorf("feishu history: %s", out.Msg)
+	}
+	var ids []string
+	for _, it := range out.Data.Items {
+		self := it.Sender.SenderType == "app" || it.Sender.SenderType == "bot"
+		if !self || it.MessageID == "" || !strings.Contains(it.Body.Content, "停止") {
+			continue
+		}
+		ids = append(ids, it.MessageID)
+	}
+	return ids, nil
+}
+
+type listedChat struct {
+	ID   string
+	Name string
+	Kind string
+}
+
+// ListChats 取机器人所在的群。飞书这个接口不返回单聊。
+func ListChats(ctx context.Context, appID, secret string) ([]listedChat, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("page_size", "50")
+	q.Set("sort_type", "ByActiveTimeDesc")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feishuHost+"/open-apis/im/v1/chats?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu chats: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	return parseChatList(raw)
+}
+
+func parseChatList(raw []byte) ([]listedChat, error) {
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				ChatID   string `json:"chat_id"`
+				Name     string `json:"name"`
+				ChatMode string `json:"chat_mode"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("feishu chats: %s", strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		if out.Msg == "" {
+			out.Msg = "没有群列表"
+		}
+		return nil, fmt.Errorf("feishu chats: %s", out.Msg)
+	}
+	list := make([]listedChat, 0, len(out.Data.Items))
+	for _, it := range out.Data.Items {
+		if it.ChatID == "" {
+			continue
+		}
+		kind := it.ChatMode
+		if kind == "" {
+			kind = "group"
+		}
+		list = append(list, listedChat{ID: it.ChatID, Name: it.Name, Kind: kind})
+	}
+	return list, nil
 }
 
 // replyCard 把回复装成飞书消息卡片。卡片里的 markdown 会排版，纯文本会把 ** 原样显示。

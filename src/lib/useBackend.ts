@@ -212,12 +212,6 @@ export function useBackend() {
       reasonGap.delete(id)
     }
 
-    const pendingDelta = (id: string) => {
-      const item = deltaBuf.get(id)
-      if (!item || item.g !== (deltaGen.get(id) ?? 0)) return ''
-      return item.text
-    }
-
     const sub = <T>(evt: { on: (cb: (p: T) => void) => () => void }, cb: (p: T) => void) => {
       unsubs.push(evt.on((p) => alive && cb(p)))
     }
@@ -405,9 +399,8 @@ export function useBackend() {
         tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
       }))
     })
-    // loop 内工具调用：start 时记一条「正在做什么」，
-    // end 时补上结果。这些信息让用户能看到循环真的在推进，
-    // 而不是只看到一个「运行中」然后干等。
+    // loop 内工具调用：start 时只记下正在做什么，并清掉还没落成回复的过程句。
+    // 过程句不进对话。end 时补上这一步的结果摘要。
     sub(events.agentReasoning, (e) => {
       if (!e.reasoning || !e.id) return
       if (openedRef.current && openedRef.current !== e.id) return
@@ -424,32 +417,15 @@ export function useBackend() {
             : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
               ? 'error'
               : 'ok'
-      let folded = ''
       if (e.phase === 'start') {
-        folded = (pendingDelta(e.id))
         dropDeltas(e.id)
         reasonGap.add(e.id)
       }
       const detail = e.phase === 'end' ? oneLine(e.content) : ''
       setState((s) => {
         if (e.phase === 'start') {
-          const text = s.opened === e.id ? (s.streaming[e.id] ?? '') + folded : ''
-          const agents = text
-            ? s.agents.map((a) =>
-                a.id === e.id
-                  ? {
-                      ...a,
-                      messages: [
-                        ...(a.messages ?? []),
-                        { role: 'assistant', content: text, timestamp: Math.floor(Date.now() / 1000) },
-                      ],
-                    }
-                  : a,
-              )
-            : s.agents
           return {
             ...s,
-            agents,
             streaming: omit(s.streaming, e.id),
             pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
             tools: [

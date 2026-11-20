@@ -92,3 +92,15 @@ func TestDecideDuplicateEvent(t *testing.T) {
 		t.Fatalf("duplicate = %+v, want drop", second)
 	}
 }
+
+func TestDecideRetryUsesMessageID(t *testing.T) {
+	var g Gate
+	first := g.Decide(Turn{EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "你好呀", MessageID: "om_1"})
+	retry := g.Decide(Turn{EventID: "e2", ChatType: "p2p", MsgType: "text", Text: "你好呀", MessageID: "om_1"})
+	if !first.Pass {
+		t.Fatalf("first = %+v", first)
+	}
+	if retry.Pass || retry.Prompt != "" {
+		t.Fatalf("retry = %+v", retry)
+	}
+}

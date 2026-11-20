@@ -35,9 +35,11 @@ const (
 var qoderRefreshURL = "https://center.qoder.sh/algo/api/v3/user/refresh_token"
 
 type qoderModel struct {
-	id        string
-	key       string
-	reasoning bool
+	id            string
+	key           string
+	reasoning     bool
+	efforts       []string
+	defaultEffort string
 }
 
 var qoderModels = []qoderModel{
@@ -61,12 +63,27 @@ func qoderModelByID(id string) qoderModel {
 	if id == "" {
 		id = DefaultQoderModel
 	}
-	for _, m := range qoderModels {
+	if m, ok := qoderCatalogLookup(id); ok {
+		return m
+	}
+	for _, m := range qoderStatic() {
 		if m.id == id || m.key == id {
 			return m
 		}
 	}
 	return qoderModel{id: id, key: id}
+}
+
+func qoderStatic() []qoderModel {
+	out := make([]qoderModel, len(qoderModels))
+	copy(out, qoderModels)
+	for i := range out {
+		if out[i].reasoning && len(out[i].efforts) == 0 {
+			out[i].efforts = []string{"low", "medium", "high", "xhigh"}
+			out[i].defaultEffort = "medium"
+		}
+	}
+	return out
 }
 
 func QoderModelNames() []string {
