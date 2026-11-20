@@ -18,6 +18,7 @@ export type AgentRowData = {
   blockedReason?: string
   queueLen?: number
   messages?: { role: string; content: string }[]
+  last?: string
   /** 本轮开始时间（Unix 秒），显示年龄用 */
   startedAt?: number
   /** 本轮已生成字符数 */
@@ -55,6 +56,7 @@ function activityText(a: AgentRowData): string {
     return parts.length > 0 ? parts.join(' · ') : '正在处理…'
   }
   if (a.status === 'queued') return `排队中 (${a.queueLen ?? 0})`
+  if (a.last) return a.last
   const last = a.messages?.filter((m) => m.role !== 'system').at(-1)
   if (last) {
     const t = last.content.replace(/\s+/g, ' ').trim()

@@ -85,6 +85,8 @@ export interface AgentView {
   chars?: number;
   /** Busy 非空时，这个会话正在该群里回答。 */
   busy?: string;
+  /** Last 是最后一句非 system 内容，截断后给列表用。 */
+  last?: string;
 }
 
 export interface Channel {
@@ -424,6 +426,10 @@ export const API = {
   acceptScreenHint(): Promise<void> {
     return call("API.AcceptScreenHint");
   },
+  /** AgentMessages 返回这个会话最近的一页。磁盘上的历史不在这里截断。 */
+  agentMessages(id: string, limit: number): Promise<Message[]> {
+    return call("API.AgentMessages", id, limit);
+  },
   /**
    * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
    * 后续对话会把它作为上下文。返回更新后的会话视图。
@@ -686,12 +692,10 @@ export const API = {
     return call("API.StopAllAgents");
   },
   /**
-   * ToggleMiniWindow 显示/隐藏迷你悬浮窗。
    * ToggleMiniWindow 在主窗与悬浮岛之间切换。
    *
-   * 顺序很重要：先让目标窗口可见、再隐藏另一个。
-   * 反过来的话，如果隐藏操作把「最后一个可见窗口」藏掉，
-   * 进程可能进入两个窗口都不可见的状态 —— 用户就再也切不回来了。
+   * 岛用时才创建。回到主窗口时先让主窗口可见并聚焦，再销毁岛。
+   * 创建失败时主窗口保持可见。
    */
   toggleMiniWindow(show: boolean): Promise<boolean> {
     return call("API.ToggleMiniWindow", show);

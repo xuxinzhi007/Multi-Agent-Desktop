@@ -176,6 +176,13 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 	if url == "" {
 		page.LoadHTML(`<!doctype html><meta charset="utf-8"><title>浏览器</title><body style="font:15px -apple-system;padding:32px;color:#1c2430">把要测的页面地址交给会话，它会在这个窗口里打开。登录会留在这里。</body>`, "about:blank")
 	}
+	w.OnClosed(func() {
+		d.mu.Lock()
+		if d.win == w {
+			d.win = nil
+		}
+		d.mu.Unlock()
+	})
 	d.mu.Lock()
 	d.win = w
 	d.mu.Unlock()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   API,
   events,
@@ -49,6 +49,8 @@ type State = {
   tokenUsage: Record<string, { in: number; out: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
+  /** 正在看的会话。其它会话不留全文。 */
+  opened: string
   /** 已经乐观插入消息、但后端还没回执的 agent */
   pending: Record<string, boolean>
   /** 最近一次停止的原因与进度。「为什么停」必须能说清，不能只显示「已停止」。 */
@@ -74,12 +76,37 @@ const EMPTY: State = {
   reasoning: {},
   tokenUsage: {},
   focusAgentId: null,
+  opened: '',
   pending: {},
   stops: {},
 }
 
+const PAGE = 40
+
+function clipSentence(text: string): string {
+  const s = text.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(s)
+  return chars.length > 48 ? chars.slice(0, 48).join('') + '…' : s
+}
+
+function lastFrom(messages?: { role: string; content: string }[]): string {
+  if (!messages) return ''
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'system' || !m.content?.trim()) continue
+    return clipSentence(m.content)
+  }
+  return ''
+}
+
+function shellAgent<T extends Agent>(a: T): T {
+  return { ...a, messages: [], last: a.last || lastFrom(a.messages) }
+}
+
 export function useBackend() {
   const [state, setState] = useState<State>(EMPTY)
+  const openedRef = useRef('')
+  const pageGen = useRef(0)
 
   useEffect(() => {
     let alive = true
@@ -185,7 +212,19 @@ export function useBackend() {
       })
     }
 
-    load(API.listAgents(), (agents) => setState((s) => ({ ...s, agents: agents ?? [] })))
+    load(API.listAgents(), (agents) =>
+      setState((s) => {
+        const opened = s.opened
+        return {
+          ...s,
+          agents: (agents ?? []).map((a) => {
+            if (a.id !== opened) return shellAgent(a)
+            const cur = s.agents.find((x) => x.id === a.id)
+            return { ...shellAgent(a), messages: cur?.messages ?? [], last: a.last || cur?.last || '' }
+          }),
+        }
+      }),
+    )
     load(API.listChannels(), (channels) => setState((s) => ({ ...s, channels: channels ?? [] })))
     load(API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }), (notes) =>
       setState((s) => ({ ...s, notes: notes ?? [] })),
@@ -194,7 +233,7 @@ export function useBackend() {
     load(API.getWorkDir(), (workDir) => setState((s) => ({ ...s, workDir })))
 
     sub(events.agentCreated, (a) =>
-      setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, a] })),
+      setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, shellAgent(a)] })),
     )
     sub(events.agentDeleted, (id) =>
       setState((s) => ({
@@ -208,8 +247,12 @@ export function useBackend() {
     sub(events.agentFocused, ({ agentId }) => setState((s) => ({ ...s, focusAgentId: agentId })))
     sub(events.agentDelta, ({ id, delta, channelId }) => {
       if (!delta || !id) return
-      if (channelId) pushBuf(channelBuf, channelGen, id, delta)
-      else pushBuf(deltaBuf, deltaGen, id, delta)
+      if (channelId) {
+        pushBuf(channelBuf, channelGen, id, delta)
+        return
+      }
+      if (openedRef.current && openedRef.current !== id) return
+      pushBuf(deltaBuf, deltaGen, id, delta)
     })
     sub(events.agentStatus, ({ id, status, busy }) => {
       if (status !== 'running') {
@@ -250,13 +293,15 @@ export function useBackend() {
             if (message.role === 'user' && last?.role === 'user' && last.content === message.content) {
               return a
             }
+            const spoken = clipSentence(message.content) || a.last
+            if (s.opened !== id) return { ...a, messages: [], last: spoken }
             if (message.role === 'assistant' && last?.role === 'assistant' && last.content === message.content) {
               if (message.reasoning && message.reasoning !== last.reasoning) {
-                return { ...a, messages: [...list.slice(0, -1), { ...last, reasoning: message.reasoning }] }
+                return { ...a, last: spoken, messages: [...list.slice(0, -1), { ...last, reasoning: message.reasoning }] }
               }
-              return a
+              return { ...a, last: spoken }
             }
-            return { ...a, messages: [...list, message] }
+            return { ...a, last: spoken, messages: [...list, message] }
           }),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
           channelStreaming: message.role === 'assistant' ? omit(s.channelStreaming, id) : s.channelStreaming,
@@ -294,6 +339,7 @@ export function useBackend() {
     // 而不是只看到一个「运行中」然后干等。
     sub(events.agentReasoning, (e) => {
       if (!e.reasoning || !e.id) return
+      if (openedRef.current && openedRef.current !== e.id) return
       pushBuf(reasonBuf, reasonGen, e.id, e.reasoning)
     })
     sub(events.agentTool, (e) => {
@@ -315,7 +361,7 @@ export function useBackend() {
       }
       setState((s) => {
         if (e.phase === 'start') {
-          const text = (s.streaming[e.id] ?? '') + folded
+          const text = s.opened === e.id ? (s.streaming[e.id] ?? '') + folded : ''
           const agents = text
             ? s.agents.map((a) =>
                 a.id === e.id
@@ -416,7 +462,14 @@ export function useBackend() {
 
     // 会话级配置变更：整体替换该 agent
     sub(events.agentConfig, (a) =>
-      setState((s) => ({ ...s, agents: s.agents.map((x) => (x.id === a.id ? a : x)) })),
+      setState((s) => ({
+        ...s,
+        agents: s.agents.map((x) => {
+          if (x.id !== a.id) return x
+          if (s.opened === a.id) return { ...x, ...a, messages: x.messages, last: a.last || x.last }
+          return shellAgent({ ...x, ...a, messages: [] })
+        }),
+      })),
     )
 
     // 频道
@@ -554,7 +607,11 @@ export function useBackend() {
             if (view?.id) {
               setState((s) => ({
                 ...s,
-                agents: s.agents.map((x) => (x.id === view.id ? { ...x, ...view } : x)),
+                agents: s.agents.map((x) => {
+                  if (x.id !== view.id) return x
+                  if (s.opened === x.id) return { ...x, ...view, messages: x.messages, last: view.last || x.last }
+                  return shellAgent({ ...x, ...view, messages: [] })
+                }),
               }))
             }
             return view
@@ -621,6 +678,55 @@ export function useBackend() {
     [],
   )
 
+  const openAgent = useCallback((id: string) => {
+    if (!id) return
+    const ticket = ++pageGen.current
+    openedRef.current = id
+    setState((s) => ({
+      ...s,
+      opened: id,
+      agents: s.agents.map((a) => (a.id === id ? a : shellAgent(a))),
+      streaming: s.streaming[id] !== undefined ? { [id]: s.streaming[id] } : {},
+      reasoning: s.reasoning[id] !== undefined ? { [id]: s.reasoning[id] } : {},
+    }))
+    API.agentMessages(id, PAGE)
+      .then((messages) => {
+        if (pageGen.current !== ticket || openedRef.current !== id) return
+        const list = messages ?? []
+        setState((s) => {
+          if (s.opened !== id) return s
+          const cur = s.agents.find((a) => a.id === id)
+          const curMsgs = cur?.messages ?? []
+          const prefix =
+            curMsgs.length >= list.length &&
+            list.every((m, i) => curMsgs[i]?.role === m.role && curMsgs[i]?.content === m.content)
+          const extra = curMsgs.filter(
+            (m) => m.role === 'user' && !list.some((x) => x.role === 'user' && x.content === m.content),
+          )
+          const next = prefix ? curMsgs : [...list, ...extra]
+          return {
+            ...s,
+            agents: s.agents.map((a) =>
+              a.id === id ? { ...a, messages: next, last: lastFrom(next) || a.last } : shellAgent(a),
+            ),
+          }
+        })
+      })
+      .catch(() => {})
+  }, [])
+
+  const parkAgents = useCallback(() => {
+    pageGen.current++
+    openedRef.current = ''
+    setState((s) => ({
+      ...s,
+      opened: '',
+      agents: s.agents.map(shellAgent),
+      streaming: {},
+      reasoning: {},
+    }))
+  }, [])
+
   const refreshNotes = useCallback(() => {
     API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 })
       .then((notes) => setState((s) => ({ ...s, notes: notes ?? [] })))
@@ -640,7 +746,7 @@ export function useBackend() {
     }
   }, [refreshNotes])
 
-  return { ...state, send, approveTool, rejectTool, clearFocus, refreshNotes }
+  return { ...state, send, approveTool, rejectTool, clearFocus, refreshNotes, openAgent, parkAgents }
 }
 
 function rememberError(s: State, id: string, text: string): Record<string, SessionError> {

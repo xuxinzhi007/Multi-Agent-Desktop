@@ -21,20 +21,14 @@ function MiniApp() {
   const [assist, setAssist] = useState<ScreenHint>({ on: false })
   const [draft, setDraft] = useState('')
   const [sayErr, setSayErr] = useState('')
-  const [act, setAct] = useState('')
   const [bound, setBound] = useState<{ provider: string; model: string } | null>(null)
   const [focusId, setFocusId] = useState('')
   const [choices, setChoices] = useState<ModelChoice[] | null>(null)
   const [pickerOn, setPickerOn] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
-  const streamRef = useRef<HTMLDivElement>(null)
-  const stickRef = useRef(true)
-  const speakerRef = useRef('')
-  const agentsRef = useRef<MiniAgentStatus[]>([])
-  agentsRef.current = model.agents
   const agentRef = useRef('')
-  const answerRef = useRef('')
   const focus = focusId || model.agents[0]?.id || ''
+  const sentence = statusSentence(model.agents, focus)
   agentRef.current = focus
   const focusAgent = model.agents.find((a) => a.id === focus)
 
@@ -98,60 +92,20 @@ function MiniApp() {
       .catch(() => {})
   }, [demo, focus])
 
-  const line = (text: string) => text.replace(/\s+/g, ' ').trim().slice(-48)
-
   useEffect(() => {
     if (demo) return
-    const mine = (id: string) => !agentRef.current || id === agentRef.current
-    const unsubDelta = events.agentDelta.on(({ id, delta }) => {
-      if (!delta) return
-      setRows((prev) => upsertAgent(prev, id, agentsRef.current, speakerRef, (row) => ({ ...row, text: row.text + delta, live: true })))
+    return events.agentTool.on((e) => {
+      if (e.phase !== 'start') return
+      setFocusId(e.id)
     })
-    const unsubReason = events.agentReasoning.on(({ id, reasoning }) => {
-      if (!reasoning) return
-      setRows((prev) => upsertAgent(prev, id, agentsRef.current, speakerRef, (row) => ({ ...row, reasoning: row.reasoning + reasoning, fold: false, live: true })))
-    })
-    const unsubMessage = events.agentMessage.on(({ id, message }) => {
-      if (message.role !== 'assistant') return
-      setFocusId(id)
-      const text = showText(message.content)
-      setRows((prev) =>
-        upsertAgent(prev, id, agentsRef.current, speakerRef, (row) => ({
-          ...row,
-          text: text || showText(row.text),
-          reasoning: message.reasoning || row.reasoning,
-          live: false,
-          fold: true,
-          finalAt: row.finalAt ?? Date.now(),
-        })),
-      )
-    })
-    const unsubTool = events.agentTool.on((e) => {
-      if (!mine(e.id) || e.phase !== 'start') return
-      answerRef.current = ''
-      const name = e.tool === 'web' ? (e.content || '操作网页') : e.tool
-      setAct('正在' + name)
-    })
-    const unsubError = events.agentError.on(({ id, error }) => {
-      if (!mine(id)) return
-      setAct(line(error) || '出错了')
-    })
-    return () => {
-      unsubDelta()
-      unsubReason()
-      unsubMessage()
-      unsubTool()
-      unsubError()
-    }
   }, [demo])
 
-  const floats = rows.filter((r) => r.kind === 'user' || r.kind === 'agent')
-  const reply = [...floats].reverse().find((r): r is AgentRow => r.kind === 'agent')
+  const floats = rows.filter((r) => r.kind === 'user')
   const hint = !demo && (assist.text || assist.err)
   const [hover, setHover] = useState(false)
-  const showRise = floats.length > 0 || !!hint
+  const showRise = floats.length > 0 || !!hint || !!sentence
   const pickerRows = pickerOn ? Math.min(grouped(choices).reduce((n, g) => n + 1 + g.items.length, 0) || 1, 6) : 0
-  const extra = Math.min(3, floats.length + (hint && !reply ? 1 : 0)) * 78 + (assist.on ? 58 : 0) + (pickerRows ? pickerRows * 28 + 12 : 0)
+  const extra = Math.min(3, floats.length + (sentence ? 1 : 0) + (hint ? 1 : 0)) * 78 + (assist.on ? 58 : 0) + (pickerRows ? pickerRows * 28 + 12 : 0)
 
   useEffect(() => {
     if (hover) return
@@ -260,42 +214,20 @@ function MiniApp() {
           onMouseEnter={() => setHover(true)}
           onMouseLeave={() => setHover(false)}
         >
-          {floats.map((row) =>
-            row.kind === 'user' ? (
-              <p
-                key={row.id}
-                className={row.leaving ? 'rise__me is-gone' : 'rise__me'}
-                onAnimationEnd={(e) => {
-                  if (e.animationName !== 'rise-away') return
-                  setRows((prev) => prev.filter((r) => r.id !== row.id))
-                }}
-              >
-                {row.text}
-              </p>
-            ) : (
-              <article
-                key={row.id}
-                className={row.leaving ? 'rise__card is-gone' : 'rise__card'}
-                style={{ ['--accent' as string]: row.color }}
-                onAnimationEnd={(e) => {
-                  if (e.animationName !== 'rise-away') return
-                  setRows((prev) => prev.filter((r) => r.id !== row.id))
-                }}
-              >
-                <header>
-                  <i style={{ background: row.color }} />
-                  <b>{row.name}</b>
-                  {row.live && (
-                    <button type="button" onClick={() => API.stopAgent(row.agentId).catch(() => {})}>
-                      停止
-                    </button>
-                  )}
-                </header>
-                <p>{row.text || (row.live ? '在想' : '')}</p>
-              </article>
-            ),
-          )}
-          {!reply && hint && (
+          {floats.map((row) => (
+            <p
+              key={row.id}
+              className={row.leaving ? 'rise__me is-gone' : 'rise__me'}
+              onAnimationEnd={(e) => {
+                if (e.animationName !== 'rise-away') return
+                setRows((prev) => prev.filter((r) => r.id !== row.id))
+              }}
+            >
+              {row.text}
+            </p>
+          ))}
+          {sentence && <p className="rise__me">{sentence}</p>}
+          {hint && (
             <article className="rise__card" style={{ ['--accent' as string]: 'var(--cyan)' }}>
               <header>
                 <i style={{ background: 'var(--cyan)' }} />
@@ -422,24 +354,6 @@ type Row =
   | { kind: 'hand'; id: string; text: string }
 
 let rowSeq = 0
-function spoken(text: string) {
-  const header = '## 群聊上下文'
-  const at = text.lastIndexOf(header)
-  if (at < 0) return text.trim()
-  const lines = text
-    .slice(at + header.length)
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const last = lines[lines.length - 1] ?? ''
-  const sep = last.indexOf(': ')
-  return (sep >= 0 ? last.slice(sep + 2) : last).trim()
-}
-
-function showText(text: string) {
-  const body = text.startsWith('## 群聊上下文') ? spoken(text) : text.trim()
-  return body.replace(/\*\*/g, '')
-}
 
 function watchCopy(a: { app?: string; seen?: string; text?: string; busy?: string; err?: string }) {
   const app = a.app || '当前窗口'
@@ -472,39 +386,6 @@ function rid() {
 
 function trim(rows: Row[]) {
   return rows.length > 40 ? rows.slice(rows.length - 40) : rows
-}
-
-function upsertAgent(
-  prev: Row[],
-  id: string,
-  agents: MiniAgentStatus[],
-  speaker: { current: string },
-  patch: (row: AgentRow) => AgentRow,
-) {
-  const who = agents.find((a) => a.id === id)
-  const name = who?.name || '助手'
-  const hit = prev.findIndex((r) => r.kind === 'agent' && r.agentId === id && r.live)
-  if (hit >= 0) {
-    const cur = prev[hit]
-    if (cur.kind !== 'agent') return prev
-    const next = prev.slice()
-    next[hit] = patch(cur)
-    return next
-  }
-  speaker.current = id
-  const blank: AgentRow = {
-    kind: 'agent',
-    id: rid(),
-    agentId: id,
-    name,
-    role: who?.role || '',
-    color: who?.color || '#54d9ff',
-    text: '',
-    reasoning: '',
-    live: true,
-    fold: true,
-  }
-  return trim([...prev, patch(blank)])
 }
 
 const VENDORS: Record<string, string> = {
@@ -548,8 +429,19 @@ function fromList(agents: AgentView[]): MiniStatus {
       lastTool: a.lastTool ?? '',
       startedAt: a.startedAt ?? 0,
       blockedReason: a.blockedReason ?? '',
+      task: a.last || '',
     })),
   }
+}
+
+function statusSentence(agents: MiniAgentStatus[], focus: string): string {
+  const a =
+    agents.find((x) => x.id === focus) ||
+    agents.find((x) => x.status === 'running' || x.status === 'blocked' || x.status === 'error') ||
+    agents[0]
+  if (!a) return ''
+  const raw = a.errMsg || a.logs?.[0]?.text || a.task || ''
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 48)
 }
 
 const SCENES: { id: Scene; label: string }[] = [

@@ -182,6 +182,7 @@ function FleetColumn({
   const msgs = agent.messages ?? []
   const task = [...msgs].reverse().find((m) => m.role === 'user')
   const lastReply = [...msgs].reverse().find((m) => m.role === 'assistant')
+  const preview = lastReply?.content || agent.last || ''
   const chars = agent.chars ?? 0
 
   return (
@@ -294,10 +295,10 @@ function FleetColumn({
               <span className="c-caret" style={{ background: agent.color }} />
             </div>
           </div>
-        ) : lastReply ? (
+        ) : preview ? (
           <div style={{ marginTop: 'var(--space-3)' }}>
             <div style={labelStyle}>最近产出</div>
-            <div className="c-fleet-reply">{lastReply.content}</div>
+            <div className="c-fleet-reply">{preview}</div>
           </div>
         ) : null}
       </div>

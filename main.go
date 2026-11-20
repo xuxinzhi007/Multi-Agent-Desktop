@@ -40,6 +40,7 @@ type API struct {
 	settings   *config.Store
 	bot        *feishu.Service
 	win        *mygo.Window
+	islands    *islandSwitch
 	desk       *browser.Desk
 	screen     *screen.Loop
 	screenOnce sync.Once
@@ -377,6 +378,8 @@ type AgentView struct {
 	Chars    int    `json:"chars,omitempty"`
 	// Busy 非空时，这个会话正在该群里回答。
 	Busy string `json:"busy,omitempty"`
+	// Last 是最后一句非 system 内容，截断后给列表用。
+	Last string `json:"last,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -460,9 +463,59 @@ func (s *API) ListAgents() []AgentView {
 	list := s.mgr.List()
 	out := make([]AgentView, len(list))
 	for i, a := range list {
-		out[i] = toAgentView(a)
+		out[i] = catalogView(toAgentView(a))
 	}
 	return out
+}
+
+// AgentMessages 返回这个会话最近的一页。磁盘上的历史不在这里截断。
+func (s *API) AgentMessages(id string, limit int) []llm.Message {
+	if s.mgr == nil {
+		return []llm.Message{}
+	}
+	a, ok := s.mgr.Get(id)
+	if !ok {
+		return []llm.Message{}
+	}
+	return messageTail(a.Snapshot().Messages, limit)
+}
+
+const agentMessagePage = 40
+
+func messageTail(msgs []llm.Message, limit int) []llm.Message {
+	if limit <= 0 || limit > 80 {
+		limit = agentMessagePage
+	}
+	if len(msgs) > limit {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	return append([]llm.Message(nil), msgs...)
+}
+
+func lastSentence(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role == "system" || strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		s := strings.TrimSpace(m.Content)
+		if n := strings.IndexByte(s, '\n'); n >= 0 {
+			s = s[:n]
+		}
+		s = strings.Join(strings.Fields(s), " ")
+		r := []rune(s)
+		if len(r) > 48 {
+			return string(r[:48]) + "…"
+		}
+		return s
+	}
+	return ""
+}
+
+func catalogView(v AgentView) AgentView {
+	v.Last = lastSentence(v.Messages)
+	v.Messages = []llm.Message{}
+	return v
 }
 
 // CreateAgent 新建一个 agent。
@@ -528,8 +581,9 @@ func (s *API) StopAllAgents() int {
 
 // pushMini 主动推一次迷你窗状态，让全局操作立刻反映到折叠态。
 func (s *API) pushMini() {
-	if miniWindowRef != nil && !miniWindowRef.IsDestroyed() {
-		MiniStatusEvent.Emit(miniWindowRef, buildMiniStatus(s.mgr))
+	w := s.currentMini()
+	if w != nil && !w.IsDestroyed() {
+		MiniStatusEvent.Emit(w, buildMiniStatus(s.mgr))
 	}
 }
 
@@ -581,7 +635,7 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 	}
 
 	// 2. 推消息到前端。悬浮岛也要收到，才能把投递画成胶囊里的信封。
-	emitChannelMessage(msg, s.win, miniWindowRef)
+	emitChannelMessage(msg, s.win, s.currentMini())
 
 	// 3. 取频道快照
 	ch, ok := s.channels.Get(channelId)
@@ -669,7 +723,7 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		log.Printf("set deliveries: %v", err)
 	} else {
 		// 重发同一 ID 的事件；前端按 ID 去重并覆盖旧记录
-		emitChannelMessage(msg, s.win, miniWindowRef)
+		emitChannelMessage(msg, s.win, s.currentMini())
 	}
 
 	if len(errs) > 0 {
@@ -1243,7 +1297,7 @@ func (s *API) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
 		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
 	}
 	v := toAgentView(a)
-	AgentConfig.Emit(s.win, v)
+	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
 
@@ -1257,7 +1311,7 @@ func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
 	}
 	v := toAgentView(a)
-	AgentConfig.Emit(s.win, v)
+	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
 
@@ -1271,7 +1325,7 @@ func (s *API) ClearAgentLLM(agentId string) (AgentView, error) {
 		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
 	}
 	v := toAgentView(a)
-	AgentConfig.Emit(s.win, v)
+	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
 
@@ -1708,7 +1762,7 @@ func (s *API) AttachNoteToAgent(noteId, agentId string) (AgentView, error) {
 
 	a, _ := s.mgr.Get(agentId)
 	v := toAgentView(a)
-	AgentConfig.Emit(s.win, v)
+	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
 
@@ -1722,7 +1776,7 @@ func (s *API) DetachNoteFromAgent(noteId, agentId string) (AgentView, error) {
 	}
 	a, _ := s.mgr.Get(agentId)
 	v := toAgentView(a)
-	AgentConfig.Emit(s.win, v)
+	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
 
@@ -1760,38 +1814,74 @@ func (s *API) PickDirectory() string {
 	return paths[0]
 }
 
-// ToggleMiniWindow 显示/隐藏迷你悬浮窗。
 // ToggleMiniWindow 在主窗与悬浮岛之间切换。
 //
-// 顺序很重要：先让目标窗口可见、再隐藏另一个。
-// 反过来的话，如果隐藏操作把「最后一个可见窗口」藏掉，
-// 进程可能进入两个窗口都不可见的状态 —— 用户就再也切不回来了。
+// 岛用时才创建。回到主窗口时先让主窗口可见并聚焦，再销毁岛。
+// 创建失败时主窗口保持可见。
 func (s *API) ToggleMiniWindow(show bool) bool {
-	mini := miniWindowRef
-	if mini == nil || mini.IsDestroyed() {
-		// 悬浮岛不可用时确保主窗可见，别把用户关在门外
+	if s.islands == nil {
 		if s.win != nil && !s.win.IsDestroyed() {
 			s.win.Show()
 			s.win.Focus()
 		}
 		return false
 	}
-
-	if show {
-		mini.Show()
-		mini.Focus()
+	ok := s.islands.toggle(show)
+	if ok {
 		s.pushMini()
-		if s.win != nil && !s.win.IsDestroyed() {
-			s.win.Hide()
-		}
-	} else {
-		if s.win != nil && !s.win.IsDestroyed() {
-			s.win.Show()
-			s.win.Focus()
-		}
-		mini.Hide()
 	}
-	return show
+	return ok
+}
+
+func (s *API) currentMini() *mygo.Window {
+	if s == nil || s.islands == nil {
+		return nil
+	}
+	w, _ := s.islands.current().(*mygo.Window)
+	return w
+}
+
+func (s *API) openMini() (surface, error) {
+	var w *mygo.Window
+	err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("悬浮岛: %v", r)
+			}
+		}()
+		w = mygo.NewWindow(mygo.WindowOptions{
+			Title:           "Agent 舰队",
+			Width:           islandW,
+			Height:          islandH,
+			MinWidth:        islandW,
+			MaxWidth:        islandW,
+			MinHeight:       islandH,
+			MaxHeight:       islandH,
+			FitContent:      false,
+			Panel:           true,
+			Frameless:       true,
+			AlwaysOnTop:     true,
+			SkipTaskbar:     true,
+			Transparent:     true,
+			BackgroundColor: "#00000000",
+			DisableMove:     false,
+			StateKey:        "mini",
+			URL:             "/mini.html",
+		})
+		return nil
+	}()
+	if err != nil || w == nil {
+		return nil, err
+	}
+	denyPagePermissions(w)
+	w.OnClose(func(*mygo.CloseEvent) {
+		s.islands.showMain()
+	})
+	w.OnClosed(func() {
+		s.islands.clear(w)
+	})
+	s.applyMiniTo(w)
+	return w, nil
 }
 
 // 灵动岛只有胶囊一种尺寸。宽度变化发生在窗口内部，窗口本身不再展开成面板。
@@ -1805,7 +1895,7 @@ const (
 // IslandResize 保持悬浮窗为胶囊窗口。
 // 历史版本会在这里把窗口拉到 392×468 的面板；那个形态已经去掉。
 func (s *API) IslandResize(_ bool) bool {
-	w := miniWindowRef
+	w := s.currentMini()
 	if w == nil || w.IsDestroyed() {
 		return false
 	}
@@ -1838,15 +1928,10 @@ func emitChannelMessage(msg channel.Message, wins ...*mygo.Window) {
 
 // FocusAgent 聚焦主窗口并切换到指定 agent。
 func (s *API) FocusAgent(agentId string) {
-	if s.win != nil {
-		s.win.Show()
-		s.win.Focus()
+	s.ToggleMiniWindow(false)
+	if s.win != nil && !s.win.IsDestroyed() {
+		AgentFocused.Emit(s.win, AgentFocusedEvent{AgentID: agentId})
 	}
-	if miniWindowRef != nil {
-		miniWindowRef.Hide()
-	}
-	// 发送事件让前端切换 agent
-	AgentFocused.Emit(s.win, AgentFocusedEvent{AgentID: agentId})
 }
 
 // AgentFocusedEvent 是聚焦 agent 事件。
@@ -1856,9 +1941,6 @@ type AgentFocusedEvent struct {
 
 // AgentFocused 事件。
 var AgentFocused = mygo.NewEvent[AgentFocusedEvent]("agent.focused")
-
-// miniWindowRef 包级引用，main 里赋值。
-var miniWindowRef *mygo.Window
 
 // getStr 从 map 安全取 string。
 func getStr(m map[string]any, key string) string {
@@ -2151,23 +2233,14 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.delta":
 			if v, ok := toAgentDelta(data); ok {
 				AgentDelta.Emit(win, v)
-				if miniWin != nil && !miniWin.IsDestroyed() {
-					AgentDelta.Emit(miniWin, v)
-				}
 			}
 		case "agent.message":
 			if v, ok := toAgentMessage(data); ok {
 				AgentMessage.Emit(win, v)
-				if miniWin != nil && !miniWin.IsDestroyed() {
-					AgentMessage.Emit(miniWin, v)
-				}
 			}
 		case "agent.error":
 			if v, ok := toAgentError(data); ok {
 				AgentError.Emit(win, v)
-				if miniWin != nil && !miniWin.IsDestroyed() {
-					AgentError.Emit(miniWin, v)
-				}
 				if mgr != nil {
 					if a, ok := mgr.Get(v.ID); ok {
 						notifyError(a.Snapshot().Name, v.Error)
@@ -2183,14 +2256,12 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 				AgentTool.Emit(win, v)
 				if miniWin != nil && !miniWin.IsDestroyed() {
 					AgentTool.Emit(miniWin, v)
+					tellMini("agent.tool")
 				}
 			}
 		case "agent.reasoning":
 			if v, ok := toAgentReasoning(data); ok {
 				AgentReasoning.Emit(win, v)
-				if miniWin != nil && !miniWin.IsDestroyed() {
-					AgentReasoning.Emit(miniWin, v)
-				}
 			}
 		case "agent.loop":
 			if v, ok := toAgentLoop(data); ok {
@@ -2216,11 +2287,21 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		}
 	}
 
-	if miniWin != nil && !miniWin.IsDestroyed() {
+	if miniWin != nil && !miniWin.IsDestroyed() && mgr != nil {
 		switch event {
-		case "agent.created", "agent.deleted", "agent.status", "agent.tool", "agent.loop":
+		case "agent.created", "agent.deleted", "agent.status", "agent.tool", "agent.loop", "agent.message", "agent.error":
 			MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
+			tellMini("mini.status")
 		}
+	}
+}
+
+// tellMini 只给测试看岛实际收到了哪类事件。
+var miniEmitHook func(string)
+
+func tellMini(event string) {
+	if miniEmitHook != nil {
+		miniEmitHook(event)
 	}
 }
 
@@ -2228,12 +2309,16 @@ func main() {
 	cfg := llm.Config{}
 	var mgr *agent.Manager
 	var win *mygo.Window
-	var miniWin *mygo.Window
+	var api *API
 
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	var chMgr *channel.Manager
 	emit := func(event string, data any) {
-		emitToWindow(win, miniWin, mgr, chMgr, event, data)
+		var mini *mygo.Window
+		if api != nil {
+			mini = api.currentMini()
+		}
+		emitToWindow(win, mini, mgr, chMgr, event, data)
 	}
 
 	// 持久化到用户数据目录
@@ -2303,7 +2388,7 @@ func main() {
 	}
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
-	api := &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
+	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
 	api.bot = feishu.New(feishu.Hooks{
 		Run:   mgr.RunPrompt,
 		Reply: feishu.ReplyText,
@@ -2339,44 +2424,14 @@ func main() {
 			URL:             "/",
 		})
 		api.win = win
-
-		// 迷你悬浮窗：无边框、置顶、跳任务栏、透明背景、可拖动
-		// 悬浮岛：FitContent 让尺寸由内容决定，不再靠前端算魔数。
-		// Panel 让它跨 Space / 全屏应用常驻（监控器不能切桌面就消失）。
-		// StateKey 记住位置，重启后回到原处。
-		miniWin = mygo.NewWindow(mygo.WindowOptions{
-			Title: "Agent 舰队",
-			// 窗口锁死为胶囊外框。有建议时再拉高，不再撑成面板。
-			Width:     islandW,
-			Height:    islandH,
-			MinWidth:  islandW,
-			MaxWidth:  islandW,
-			MinHeight: islandH,
-			MaxHeight: islandH,
-			// 不要 FitContent：折叠/展开两态尺寸是设计值，自动撑会抖
-			FitContent:      false,
-			Panel:           true, // 跨 Space / 全屏应用常驻，不进任务栏和 Dock
-			Frameless:       true,
-			AlwaysOnTop:     true,
-			SkipTaskbar:     true,
-			Transparent:     true,
-			BackgroundColor: "#00000000",
-			DisableMove:     false, // 允许拖动
-			StateKey:        "mini",
-			// 必须带 .html。/mini 没有对应文件，开发服务器和打包后的
-			// FileServer 都会把它退回 index.html，主界面就被塞进 260×64 的胶囊窗。
-			URL: "/mini.html",
-		})
-		miniWindowRef = miniWin
-		api.applyMini()
+		api.islands = &islandSwitch{
+			main: win,
+			open: api.openMini,
+		}
 
 		// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
 		// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。
 		denyPagePermissions(win)
-		denyPagePermissions(miniWin)
-
-		// 初始隐藏悬浮窗，主窗口点击「缩小」才显示
-		miniWin.Hide()
 	})
 
 	if err := mygo.App.Run(); err != nil {

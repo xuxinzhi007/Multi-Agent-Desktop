@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -946,5 +947,85 @@ both:
 	after, _ := s.channels.Get(ch.ID)
 	if len(after.Messages) != len(before.Messages) {
 		t.Fatalf("转发后群消息数 = %d, want %d", len(after.Messages), len(before.Messages))
+	}
+}
+
+func TestListAgentsKeepsHistoryOffTheWire(t *testing.T) {
+	s := newTestAPI(t)
+	defer stopAll(t, s)
+	view := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "r"})
+	a, ok := s.mgr.Get(view.ID)
+	if !ok {
+		t.Fatal("created agent missing")
+	}
+	for i := 0; i < 5; i++ {
+		a.AppendSystemMessage(fmt.Sprintf("note-%d", i))
+	}
+	full := a.Snapshot().Messages
+	listed := s.ListAgents()
+	if len(listed) != 1 {
+		t.Fatalf("list = %d, want 1", len(listed))
+	}
+	if len(listed[0].Messages) != 0 {
+		t.Fatalf("list messages = %d, want 0", len(listed[0].Messages))
+	}
+	page := s.AgentMessages(view.ID, 2)
+	if len(page) != 2 || page[1].Content != full[len(full)-1].Content {
+		t.Fatalf("page = %+v, want last two of %d", page, len(full))
+	}
+	path := filepath.Join(t.TempDir(), "agents.json")
+	if err := s.mgr.SetStore(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.mgr.Save(); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(buf)
+	if !strings.Contains(text, "note-0") || !strings.Contains(text, "note-4") {
+		t.Fatal("agents.json dropped history")
+	}
+}
+
+func TestLastSentenceTruncates(t *testing.T) {
+	got := lastSentence([]llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "assistant", Content: strings.Repeat("字", 60) + "\nmore"},
+	})
+	if n := len([]rune(got)); n != 49 {
+		t.Fatalf("last = %q (%d runes), want 49", got, n)
+	}
+}
+
+func TestMiniSkipsTranscript(t *testing.T) {
+	var got []string
+	miniEmitHook = func(ev string) { got = append(got, ev) }
+	t.Cleanup(func() { miniEmitHook = nil })
+	mgr := agent.NewManager(llm.Config{}, func(string, any) {})
+	win := &mygo.Window{}
+	mini := &mygo.Window{}
+	emitToWindow(win, mini, mgr, nil, "agent.delta", map[string]any{"id": "a", "delta": "逐字"})
+	emitToWindow(win, mini, mgr, nil, "agent.reasoning", map[string]any{"id": "a", "reasoning": "想"})
+	emitToWindow(win, mini, mgr, nil, "agent.message", map[string]any{
+		"id":      "a",
+		"message": llm.Message{Role: "assistant", Content: strings.Repeat("文", 80)},
+	})
+	emitToWindow(win, mini, mgr, nil, "agent.status", map[string]any{"id": "a", "status": "running"})
+	for _, ev := range got {
+		if ev == "agent.delta" || ev == "agent.reasoning" || ev == "agent.message" {
+			t.Fatalf("island mirrored %s: %v", ev, got)
+		}
+	}
+	var status int
+	for _, ev := range got {
+		if ev == "mini.status" {
+			status++
+		}
+	}
+	if status < 2 {
+		t.Fatalf("mini.status count = %d, events %v, want message and status", status, got)
 	}
 }

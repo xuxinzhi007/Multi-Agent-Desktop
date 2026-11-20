@@ -19,6 +19,7 @@ import {
   workLabel,
 } from '../lib/messagePresent'
 import DirectoryPicker from './DirectoryPicker'
+import { VirtualList } from './VirtualList'
 
 type Props = {
   agent: Agent | null
@@ -108,6 +109,16 @@ function ThinkingSwitch({
       思考{on ? '开' : '关'}
     </button>
   )
+}
+
+type TranscriptRow = { kind: 'msg'; m: Message; idx: number } | { kind: 'err'; text: string }
+
+function transcriptRows(visible: Message[], errorAt: number, error?: string): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (let i = 0; i < errorAt && i < visible.length; i++) rows.push({ kind: 'msg', m: visible[i], idx: i })
+  if (error) rows.push({ kind: 'err', text: error })
+  for (let i = errorAt; i < visible.length; i++) rows.push({ kind: 'msg', m: visible[i], idx: i })
+  return rows
 }
 
 function presentTranscript(messages: Message[]): Message[] {
@@ -529,26 +540,31 @@ export default function AgentView(p: Props) {
           />
         )}
 
-        {visible.slice(0, errorAt).map((m, i) => renderMsg(m, i))}
-
-        {p.error && (
-          <div
-            style={{
-              marginTop: 'var(--space-3)',
-              background: 'var(--danger-dim)',
-              border: '1px solid var(--danger-border)',
-              borderRadius: 'var(--radius-md)',
-              padding: '9px 12px',
-              fontSize: 'var(--text-sm)',
-              color: 'var(--danger)',
-              lineHeight: 'var(--leading-normal)',
-            }}
-          >
-            {p.error.text}
-          </div>
-        )}
-
-        {visible.slice(errorAt).map((m, i) => renderMsg(m, errorAt + i))}
+        <VirtualList
+          items={transcriptRows(visible, errorAt, p.error?.text)}
+          scrollRef={scrollRef}
+          resetKey={agent.id}
+          render={(row) =>
+            row.kind === 'err' ? (
+              <div
+                style={{
+                  marginTop: 'var(--space-3)',
+                  background: 'var(--danger-dim)',
+                  border: '1px solid var(--danger-border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '9px 12px',
+                  fontSize: 'var(--text-sm)',
+                  color: 'var(--danger)',
+                  lineHeight: 'var(--leading-normal)',
+                }}
+              >
+                {row.text}
+              </div>
+            ) : (
+              renderMsg(row.m, row.idx)
+            )
+          }
+        />
 
         {p.streaming && !p.agent.busy && (
           <Bubble

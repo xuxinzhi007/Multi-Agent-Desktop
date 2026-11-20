@@ -59,10 +59,11 @@ func (s *API) emitScreen(v screen.View) {
 	open := v.Text != "" || v.Err != ""
 	miniHintOpen.Store(open)
 	s.applyMini()
-	if miniWindowRef == nil || miniWindowRef.IsDestroyed() {
+	w := s.currentMini()
+	if w == nil || w.IsDestroyed() {
 		return
 	}
-	ScreenHintEvent.Emit(miniWindowRef, ScreenHint{
+	ScreenHintEvent.Emit(w, ScreenHint{
 		On: v.On, Text: v.Text, Action: v.Action, App: v.App, Seen: v.Seen, Busy: v.Busy, Err: v.Err,
 	})
 }
@@ -80,7 +81,10 @@ func (s *API) LayoutMini(extra int) {
 }
 
 func (s *API) applyMini() {
-	w := miniWindowRef
+	s.applyMiniTo(s.currentMini())
+}
+
+func (s *API) applyMiniTo(w *mygo.Window) {
 	if w == nil || w.IsDestroyed() {
 		return
 	}
