@@ -276,6 +276,26 @@ func (m *Manager) List() []Channel {
 	return out
 }
 
+// Delete 删掉频道和它的消息。
+func (m *Manager) Delete(id string) bool {
+	m.mu.Lock()
+	if _, ok := m.channels[id]; !ok {
+		m.mu.Unlock()
+		return false
+	}
+	delete(m.channels, id)
+	order := make([]string, 0, len(m.order))
+	for _, x := range m.order {
+		if x != id {
+			order = append(order, x)
+		}
+	}
+	m.order = order
+	m.mu.Unlock()
+	m.goSave()
+	return true
+}
+
 // RemoveMember 把某个 agent 从所有频道移除（agent 被删除时调用），避免残留接收者。
 func (m *Manager) RemoveMember(agentId string) {
 	m.mu.Lock()

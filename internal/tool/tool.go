@@ -219,21 +219,20 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 
 	res := t.Execute(execCtx, c.Input)
 
-	// 超时必须显式区分：模型看到 timeout 会换路，看到 error 会重试
-	if errors.Is(execCtx.Err(), context.DeadlineExceeded) && res.Status != StatusDenied {
+	if res.Status != StatusTimeout && res.Status != StatusDenied &&
+		(errors.Is(execCtx.Err(), context.DeadlineExceeded) || errors.Is(execCtx.Err(), context.Canceled)) {
 		res = Result{
 			Status:  StatusTimeout,
-			Content: fmt.Sprintf("%s timed out after %s and was killed", c.Name, timeout),
+			Content: "超时",
 		}
 	}
 
 	res = r.truncate(res)
 
 	r.mu.Lock()
-	if res.Status == StatusOK {
+	if res.Status == StatusOK || res.Status == StatusTimeout {
 		r.seen[fp] = res
 	} else {
-		// 失败的调用不缓存：模型应该能重试
 		delete(r.seen, fp)
 		delete(r.repeats, fp)
 	}

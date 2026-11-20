@@ -101,6 +101,23 @@ func TestBashTimeoutKillsProcessGroup(t *testing.T) {
 	}
 }
 
+func TestBashTimeoutIsNotExitMinusOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("进程组语义不同")
+	}
+	b := &Bash{WorkDir: tmpDir(t), Timeout: 300 * time.Millisecond}
+	res := invoke(t, b, `{"command":"sleep 30"}`)
+	if res.Status != tool.StatusTimeout {
+		t.Fatalf("status = %q", res.Status)
+	}
+	if !strings.Contains(res.Content, "超时") || strings.Contains(res.Content, "exit code -1") {
+		t.Fatalf("content = %q", res.Content)
+	}
+	if res.Meta.ExitCode != 0 {
+		t.Fatalf("exit = %d", res.Meta.ExitCode)
+	}
+}
+
 func TestBashOutputLimited(t *testing.T) {
 	b := &Bash{WorkDir: tmpDir(t), MaxOutput: 100}
 	cmd := `yes x | head -c 100000`

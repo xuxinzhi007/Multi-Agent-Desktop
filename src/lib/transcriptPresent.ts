@@ -2,7 +2,7 @@ export type ShellRow = {
   id: string
   command: string
   at: number
-  result?: { stdout: string; stderr: string; exitCode: number }
+  result?: { stdout: string; stderr: string; exitCode: number; timedOut?: boolean }
 }
 
 export type ShellGroup =
@@ -14,6 +14,7 @@ export type ShellGroup =
       at: number
       pending: boolean
       exitCode?: number
+      timedOut?: boolean
       output: string
       masked: boolean
     }
@@ -56,6 +57,7 @@ export function groupShellLogs(logs: ShellRow[]): ShellGroup[] {
       at: log.at,
       pending: !log.result,
       exitCode: log.result?.exitCode,
+      timedOut: !!log.result?.timedOut,
       output,
       masked: redactCommand(log.command) !== log.command,
     })

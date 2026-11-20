@@ -29,13 +29,7 @@ export default function App() {
   // 默认视图是舰队，检查器会把它挤窄，所以初始收起。
   // 进对话视图时 onViewChange 会把它展开。
   const [inspectorOpen, setInspectorOpen] = useState(false)
-  const [tab, setTab] = useState<InspectorTab>('changes')
-  const [focusPath, setFocusPath] = useState<string | null>(null)
-  const openFile = useCallback((path: string) => {
-    setFocusPath(path)
-    setTab('changes')
-    setInspectorOpen(true)
-  }, [])
+  const [tab, setTab] = useState<InspectorTab>('tools')
   const openKnowledge = useCallback(() => {
     setTab('knowledge')
     setInspectorOpen(true)
@@ -169,6 +163,7 @@ export default function App() {
           onSetSpeaker={(agentId) =>
             s.send('channel.speaker', { channelId: activeChannel.id, agentId })
           }
+          onDelete={() => s.send('channel.delete', { id: activeChannel.id })}
         />
       ) : (
         <AgentView
@@ -179,9 +174,10 @@ export default function App() {
           tokenUsage={activeAgent ? s.tokenUsage[activeAgent.id] : undefined}
           agents={s.agents}
           disableRoute  // 单聊模式：禁用 @ 路由
-          onPrompt={(text, images) =>
-            activeAgent && s.send('agent.prompt', { agentId: activeAgent.id, text, images })
-          }
+          onPrompt={(text, images) => {
+            if (!activeAgent) return
+            return s.send('agent.prompt', { agentId: activeAgent.id, text, images })
+          }}
           onStop={() => activeAgent && s.send('agent.stop', { id: activeAgent.id })}
           onShell={(command) =>
             s.send('shell.run', { agentId: activeAgent?.id ?? '', command })
@@ -219,7 +215,6 @@ export default function App() {
             if (created) setActive({ kind: 'agent', id: created.id })
           }}
           onCreateRequest={() => setCreateOpen(true)}
-          onOpenFile={openFile}
           onOpenKnowledge={openKnowledge}
         />
       )}
@@ -228,11 +223,8 @@ export default function App() {
         <Inspector
           tab={tab}
           onTab={setTab}
-          changes={s.changes}
-          todos={s.todos}
           tools={s.tools}
           onClose={() => setInspectorOpen(false)}
-          focusPath={focusPath}
           knowledge={{
             count: s.notes.length,
             node: (

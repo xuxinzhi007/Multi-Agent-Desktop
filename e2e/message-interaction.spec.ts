@@ -320,13 +320,10 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
   await rail.getByRole('button', { name: /展开/ }).click()
   await expect(rail).toContainText('第一行先看循环退出条件')
 
-  const anchor = page.locator('.c-code-anchor', { hasText: 'loop.go:120-145' })
-  await expect(anchor).toBeVisible()
-  await anchor.click()
-  await expect(page.getByRole('button', { name: /改动/ })).toBeVisible()
+  await expect(page.getByText('loop.go:120-145')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'loop.go:120-145' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
 
   await page.locator('.c-artifact', { hasText: '知识库' }).click()
-  const knowledgeColor = await page.getByRole('button', { name: '知识', exact: true }).evaluate((el) => getComputedStyle(el).color)
-  const changesColor = await page.getByRole('button', { name: /改动/ }).evaluate((el) => getComputedStyle(el).color)
-  expect(knowledgeColor).not.toBe(changesColor)
+  await expect(page.getByRole('button', { name: '知识', exact: true })).toBeVisible()
 })

@@ -9,6 +9,8 @@
  *   island  —— 紧凑行高，显示年龄，无删除按钮
  */
 
+import { bodyOf } from '../lib/message'
+
 export type AgentRowData = {
   id: string
   name: string
@@ -56,10 +58,10 @@ function activityText(a: AgentRowData): string {
     return parts.length > 0 ? parts.join(' · ') : '正在处理…'
   }
   if (a.status === 'queued') return `排队中 (${a.queueLen ?? 0})`
-  if (a.last) return a.last
+  if (a.last) return bodyOf(a.last)
   const last = a.messages?.filter((m) => m.role !== 'system').at(-1)
   if (last) {
-    const t = last.content.replace(/\s+/g, ' ').trim()
+    const t = bodyOf(last.content).replace(/\s+/g, ' ').trim()
     return t.length > 40 ? t.slice(0, 40) + '…' : t
   }
   return a.role

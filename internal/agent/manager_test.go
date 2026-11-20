@@ -396,3 +396,21 @@ func TestStopInterruptsCurrentTurn(t *testing.T) {
 		t.Fatalf("停止后仍在产出：%d -> %d", chars, got)
 	}
 }
+
+func TestStopAlsoStopsForward(t *testing.T) {
+	m := newTestManager(t)
+	from := m.Create("from", "甲", "r")
+	to := m.Create("to", "乙", "r")
+	ctx, cancel := context.WithCancel(context.Background())
+	to.mu.Lock()
+	to.cancel = cancel
+	to.Status = StatusRunning
+	to.mu.Unlock()
+	m.noteRoute(from.ID, to.ID)
+	if !m.Stop(from.ID) {
+		t.Fatal("stop")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("forwarded session still running")
+	}
+}

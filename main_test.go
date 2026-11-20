@@ -1133,3 +1133,10 @@ func TestGroupBlindDoesNotPost(t *testing.T) {
 		t.Fatalf("发出了 %d 条", len(got.Messages))
 	}
 }
+
+func TestLastSentenceStripsInternalMarks(t *testing.T) {
+	got := lastSentence([]llm.Message{{Role: "user", Content: "[ch-1794486860541966000] 你: 在吗"}})
+	if got != "在吗" {
+		t.Fatalf("got %q", got)
+	}
+}

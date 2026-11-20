@@ -72,7 +72,7 @@ func (t *askAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 	// 其实是上一轮的旧回答。结果是把过期内容当成本次回复返回，
 	// 状态还是 OK —— 调用方拿着旧答案继续干活，看不出任何异常。
 	out := &promptOutcome{done: make(chan struct{})}
-	if err := t.m.Prompt(ctx, PromptRequest{AgentID: target.ID, Text: in.Task, Done: out.done, outcome: out}); err != nil {
+	if err := t.m.Prompt(ctx, PromptRequest{AgentID: target.ID, Text: in.Task, Done: out.done, outcome: out, Ctx: ctx}); err != nil {
 		return tool.Fail("无法把任务交给 %s：%v", in.Name, err)
 	}
 	select {

@@ -45,7 +45,7 @@ func (c *openAICompat) endpoint() string {
 // 实测这些错误下服务端计数不增长，即模型没有真的被调用，
 // 重试不会让同一句话生成两遍或扣两次费用。
 // 流已经建立之后的错误一律不重试 —— 那会重复输出。
-func (c *openAICompat) do(hc *http.Client, req *http.Request) (*http.Response, error) {
+func do(hc *http.Client, req *http.Request) (*http.Response, error) {
 	resp, err := hc.Do(req)
 	if err == nil || !isStaleConnErr(err) || req.Context().Err() != nil {
 		return resp, err
@@ -199,7 +199,7 @@ func (c *openAICompat) Stream(ctx context.Context, msgs []Message) (<-chan Chunk
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	resp, err := c.do(httpClient, req)
+	resp, err := do(httpClient, req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("llm: do: %w", err)

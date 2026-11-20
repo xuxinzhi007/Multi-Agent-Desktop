@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AgentView as Agent } from '../mygo'
+import { bodyOf } from '../lib/message'
+import { previewMode } from '../lib/preview-runtime'
 
 /**
  * FleetView —— 多 agent 并排监控台。
@@ -93,7 +95,7 @@ function FleetEmpty({
       <div className="c-empty" style={{ flex: 1 }}>
         <div style={{ fontSize: 28, marginBottom: 'var(--space-3)' }}>▦</div>
         <div style={{ fontSize: 'var(--text-md)', fontWeight: 600, marginBottom: 8 }}>
-          组建你的 agent 舰队
+          {previewMode() ? '这是预览' : '组建你的 agent 舰队'}
         </div>
         <div
           style={{
@@ -102,7 +104,9 @@ function FleetEmpty({
             marginBottom: 20,
           }}
         >
-          选一个角色立刻开始。之后这里会并排显示每个 agent 的进度。
+          {previewMode()
+            ? '浏览器里这三个人是假的，写入不会生效。'
+            : '选一个角色立刻开始。之后这里会并排显示每个 agent 的进度。'}
         </div>
         <div
           style={{
@@ -182,7 +186,7 @@ function FleetColumn({
   const msgs = agent.messages ?? []
   const task = [...msgs].reverse().find((m) => m.role === 'user')
   const lastReply = [...msgs].reverse().find((m) => m.role === 'assistant')
-  const preview = lastReply?.content || agent.last || ''
+  const preview = bodyOf(lastReply?.content || agent.last || '')
   const chars = agent.chars ?? 0
 
   return (
@@ -282,7 +286,7 @@ function FleetColumn({
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', minHeight: 0 }}>
         <div style={labelStyle}>当前任务</div>
         {task ? (
-          <div className="c-fleet-task">{stripPrefix(task.content)}</div>
+          <div className="c-fleet-task">{bodyOf(task.content)}</div>
         ) : (
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>还没有任务</div>
         )}
@@ -291,7 +295,7 @@ function FleetColumn({
           <div style={{ marginTop: 'var(--space-3)' }}>
             <div style={labelStyle}>实时输出</div>
             <div className="c-fleet-stream">
-              {live.slice(-600)}
+              {bodyOf(live).slice(-600)}
               <span className="c-caret" style={{ background: agent.color }} />
             </div>
           </div>
@@ -339,14 +343,6 @@ function Elapsed({ from }: { from: number }) {
 
 function formatChars(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-}
-
-/** stripPrefix 去掉派发消息里的内部标记，只留正文。 */
-function stripPrefix(text: string): string {
-  return text
-    .replace(/^\[(from|to)\s+[^\]]+\]\s*/, '')
-    .replace(/^\[ch-\d+\]\s*/, '')
-    .replace(/^\[(user|assistant|system)\]\s*/i, '')
 }
 
 function rank(status: string): number {

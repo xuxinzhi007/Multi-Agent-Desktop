@@ -37,6 +37,9 @@ export function Island({ view, onHome, onFlightDone, assistOn, onToggleAssist }:
       style={{ width: Math.min(view.width + (onToggleAssist ? 36 : 0), 308), ['--speed' as string]: String(view.speed) }}
     >
       <span key={mode} className="island__rim" />
+      {view.progress > 0 && (
+        <span className="island__meter" style={{ ['--p' as string]: String(view.progress) }} />
+      )}
       <button type="button" className="home" aria-label="回到主窗口" onClick={onHome}>
         <Core mode={mode} />
       </button>

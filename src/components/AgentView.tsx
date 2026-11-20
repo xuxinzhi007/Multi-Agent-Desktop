@@ -1,4 +1,4 @@
-import { Fragment, cloneElement, isValidElement, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
 import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
@@ -10,18 +10,18 @@ import remarkGfm from 'remark-gfm'
 import { type AgentView as Agent, type Config, type Message } from '../mygo'
 import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
-import { groupShellLogs, redactCommand, type ShellGroup } from '../lib/transcriptPresent'
+import { groupShellLogs, type ShellGroup } from '../lib/transcriptPresent'
 import {
   agentTone,
   elapsedBetween,
   extractArtifacts,
   prevUserStamp,
-  splitAnchors,
   workLabel,
 } from '../lib/messagePresent'
 import DirectoryPicker from './DirectoryPicker'
 import { VirtualList } from './VirtualList'
 import { contextMeter } from '../lib/contextMeter'
+import { previewMode } from '../lib/preview-runtime'
 
 type Props = {
   agent: Agent | null
@@ -51,7 +51,6 @@ type Props = {
   /** 空状态下打开「新建 Agent」弹窗 */
   onCreateRequest?: () => void
   /** 正文里的代码锚点：打开检查器并定位文件 */
-  onOpenFile?: (path: string, line: number) => void
   /** 知识库沉淀胶囊：打开检查器的知识库 */
   onOpenKnowledge?: () => void
   /** 上一句还在回答时发出的话，排在当前回答后面。 */
@@ -230,7 +229,6 @@ export default function AgentView(p: Props) {
   const [imageNote, setImageNote] = useState('')
   const [mode, setMode] = useState<'chat' | 'shell'>('chat')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null)
-  const [toolGrants, setToolGrants] = useState<{ always: string[]; done: string[] }>({ always: [], done: [] })
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottom = useRef(true)
@@ -319,10 +317,6 @@ export default function AgentView(p: Props) {
   useEffect(() => {
     taRef.current?.focus()
   }, [p.agent?.id, mode])
-
-  useEffect(() => {
-    setToolGrants({ always: [], done: [] })
-  }, [p.agent?.id])
 
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
@@ -503,17 +497,6 @@ export default function AgentView(p: Props) {
     workLabel: place,
     peers,
   }
-  const pendingTools = (p.steps ?? []).filter((s) => {
-    if (s.status !== 'waiting') return false
-    if (toolGrants.always.includes(s.tool)) return false
-    return !toolGrants.done.includes(`${s.tool}\0${s.target}`)
-  })
-  const settleTool = (tool: string, target: string, kind: 'allow' | 'deny' | 'always') => {
-    setToolGrants((g) => ({
-      always: kind === 'always' ? [...g.always, tool] : g.always,
-      done: [...g.done, `${tool}\0${target}`],
-    }))
-  }
   const renderMsg = (m: Message, idx: number) => (
     <Bubble
       key={idx}
@@ -526,7 +509,6 @@ export default function AgentView(p: Props) {
       onCopy={(text) => navigator.clipboard.writeText(text)}
       onRegenerate={(msg) => p.onPrompt(msg.content)}
       onRoute={p.onRoute}
-      onOpenFile={p.onOpenFile}
       onOpenKnowledge={p.onOpenKnowledge}
     />
   )
@@ -657,7 +639,6 @@ export default function AgentView(p: Props) {
             {...head}
             live
             onCopy={(text) => navigator.clipboard.writeText(text)}
-            onOpenFile={p.onOpenFile}
             onOpenKnowledge={p.onOpenKnowledge}
           />
         )}
@@ -676,15 +657,6 @@ export default function AgentView(p: Props) {
               </time>
             </div>
           </div>
-        ))}
-
-        {pendingTools.map((s, i) => (
-          <ApprovalCard
-            key={`${s.tool}-${i}`}
-            tool={s.tool}
-            target={s.target}
-            onDecide={(kind) => settleTool(s.tool, s.target, kind)}
-          />
         ))}
 
         {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}
@@ -1267,7 +1239,8 @@ function ShellGroupRow({ group }: { group: ShellGroup }) {
       </div>
     )
   }
-  const ok = group.exitCode === undefined || group.exitCode === 0
+  const timedOut = !!group.timedOut || (group.exitCode !== undefined && group.exitCode < 0)
+  const ok = !timedOut && (group.exitCode === undefined || group.exitCode === 0)
   return (
     <div className="shell-card__row" style={{ padding: '8px 12px' }}>
       <div
@@ -1288,7 +1261,10 @@ function ShellGroupRow({ group }: { group: ShellGroup }) {
             执行中…
           </span>
         )}
-        {group.exitCode !== undefined && (
+        {timedOut && (
+          <span style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--warning)' }}>超时</span>
+        )}
+        {!timedOut && group.exitCode !== undefined && (
           <span style={{ marginLeft: 'auto', flexShrink: 0, color: ok ? 'var(--success)' : 'var(--danger)' }}>
             exit {group.exitCode}
           </span>
@@ -1354,7 +1330,9 @@ function EmptyChat({ color, name, onPick }: { color: string; name: string; onPic
           marginBottom: 'var(--space-5)',
         }}
       >
-        这个会话是独立的，不影响其他 agent。点下面的例子直接开始：
+        {previewMode()
+          ? '这是预览。下面的会话是假的，不会真的跑起来。'
+          : '这个会话是独立的，不影响其他 agent。点下面的例子直接开始：'}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {hints.map((h) => (
@@ -1414,7 +1392,6 @@ type BubbleProps = {
   onCopy?: (text: string) => void
   onRegenerate?: (msg: Message) => void
   onRoute?: (targetId: string, text: string) => void
-  onOpenFile?: (path: string, line: number) => void
   onOpenKnowledge?: () => void
 }
 
@@ -1433,7 +1410,6 @@ function BubbleImpl({
   onCopy,
   onRegenerate,
   onRoute,
-  onOpenFile,
   onOpenKnowledge,
 }: BubbleProps) {
   const [routeOpen, setRouteOpen] = useState(false)
@@ -1444,7 +1420,6 @@ function BubbleImpl({
   const displayContent = parsed.body
   const artifacts = isUser ? [] : extractArtifacts(displayContent)
   const toneStyle = { '--tone': `var(--agent-${tone})` } as CSSProperties
-  const md = useMemo(() => markdownComponents(onOpenFile), [onOpenFile])
   const clock = m.timestamp
     ? new Date(m.timestamp * 1000).toLocaleTimeString('zh-CN', {
         hour: '2-digit',
@@ -1542,9 +1517,7 @@ function BubbleImpl({
       </div>
       <div className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
         {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
-          {displayContent}
-        </ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
       </div>
       {artifacts.length > 0 && (
         <div className="c-artifacts">
@@ -1554,57 +1527,14 @@ function BubbleImpl({
                 {a.label}
               </button>
             ) : (
-              <button key={a.path} type="button" className="c-artifact" onClick={() => onOpenFile?.(a.path, 1)}>
+              <span key={a.path} className="c-artifact">
                 {a.label}
-              </button>
+              </span>
             ),
           )}
         </div>
       )}
     </div>
-  )
-}
-
-function markdownComponents(onOpen?: (path: string, line: number) => void) {
-  const wrap = (Tag: 'p' | 'li' | 'td' | 'blockquote' | 'h1' | 'h2' | 'h3') =>
-    function Wrapped(props: { children?: ReactNode }) {
-      return <Tag>{walk(props.children, onOpen)}</Tag>
-    }
-  return {
-    p: wrap('p'),
-    li: wrap('li'),
-    td: wrap('td'),
-    blockquote: wrap('blockquote'),
-    h1: wrap('h1'),
-    h2: wrap('h2'),
-    h3: wrap('h3'),
-  }
-}
-
-function walk(node: ReactNode, onOpen?: (path: string, line: number) => void): ReactNode {
-  if (typeof node === 'string') return renderAnchors(node, onOpen)
-  if (typeof node === 'number') return node
-  if (Array.isArray(node)) {
-    return node.map((child, i) => <Fragment key={i}>{walk(child, onOpen)}</Fragment>)
-  }
-  if (isValidElement<{ children?: ReactNode }>(node)) {
-    if (node.type === 'pre') return node
-    return cloneElement(node, node.props, walk(node.props.children, onOpen))
-  }
-  return node
-}
-
-function renderAnchors(text: string, onOpen?: (path: string, line: number) => void) {
-  const parts = splitAnchors(text)
-  if (parts.length === 1 && parts[0].kind === 'text') return text
-  return parts.map((part, i) =>
-    part.kind === 'text' ? (
-      <Fragment key={i}>{part.text}</Fragment>
-    ) : (
-      <button key={i} type="button" className="c-code-anchor mono" onClick={() => onOpen?.(part.path, part.line)}>
-        {part.text}
-      </button>
-    ),
   )
 }
 
@@ -1662,38 +1592,6 @@ function SecretText({ text }: { text: string }) {
   )
 }
 
-function ApprovalCard({
-  tool,
-  target,
-  onDecide,
-}: {
-  tool: string
-  target: string
-  onDecide: (kind: 'allow' | 'deny' | 'always') => void
-}) {
-  const shown = redactCommand(target || tool)
-  return (
-    <div className="c-approval">
-      <div className="c-approval__title">待审批 · {tool}</div>
-      {shown && (
-        <div className="c-approval__cmd">
-          <SecretText text={shown} />
-        </div>
-      )}
-      <div className="c-approval__actions">
-        <button type="button" className="c-btn c-btn--sm" onClick={() => onDecide('allow')}>
-          允许执行
-        </button>
-        <button type="button" className="c-btn c-btn--ghost c-btn--sm" onClick={() => onDecide('deny')}>
-          拒绝
-        </button>
-        <button type="button" className="c-btn c-btn--ghost c-btn--sm" onClick={() => onDecide('always')}>
-          本会话始终允许
-        </button>
-      </div>
-    </div>
-  )
-}
 /** 右键菜单项：统一 hover / 焦点样式。 */
 function MenuItem({
   onSelect,

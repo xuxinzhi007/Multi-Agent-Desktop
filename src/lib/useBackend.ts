@@ -11,14 +11,15 @@ import {
   type ShellEvent,
   type ShellResultEvent,
 } from '../mygo'
-import type { FileChange, TodoItem, ToolCall } from '../components/Inspector'
+import { bodyOf } from './message'
+import type { ToolCall } from '../components/Inspector'
 
 export type LLMConfig = Config
 export type ShellLog = {
   id: string
   command: string
   at: number
-  result?: { stdout: string; stderr: string; exitCode: number }
+  result?: { stdout: string; stderr: string; exitCode: number; timedOut?: boolean }
 }
 
 /** 出错时该 agent 已有的消息条数。红条属于这一截之前的历史，不跟最新一句走。 */
@@ -43,8 +44,6 @@ type State = {
   shell: ShellLog[]
   /** 每个 agent 执行过的命令，按 agentId 归集，直接渲染在对话流里 */
   shellByAgent: Record<string, ShellLog[]>
-  changes: FileChange[]
-  todos: TodoItem[]
   tools: ToolCall[]
   /** 这一轮还没落成消息的思考文本，按 agent id */
   reasoning: Record<string, string>
@@ -75,8 +74,6 @@ const EMPTY: State = {
   errors: {},
   shell: [],
   shellByAgent: {},
-  changes: [],
-  todos: [],
   tools: [],
   reasoning: {},
   tokenUsage: {},
@@ -90,7 +87,7 @@ const EMPTY: State = {
 const PAGE = 40
 
 function clipSentence(text: string): string {
-  const s = text.replace(/\s+/g, ' ').trim()
+  const s = bodyOf(text).replace(/\s+/g, ' ').trim()
   const chars = Array.from(s)
   return chars.length > 48 ? chars.slice(0, 48).join('') + '…' : s
 }
@@ -506,6 +503,9 @@ export function useBackend() {
     )
 
     // 频道
+    sub(events.channelDeleted, (id) =>
+      setState((s) => ({ ...s, channels: s.channels.filter((c) => c.id !== id) })),
+    )
     sub(events.channelCreated, (ch) =>
       setState((s) =>
         s.channels.some((x) => x.id === ch.id)
@@ -606,20 +606,20 @@ export function useBackend() {
           }
         })
         return API.promptAgent({ agentId, text, images }).catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e)
           setState((s) => ({
             ...s,
             pending: omit(s.pending, agentId),
-            errors: rememberError(s, agentId, e instanceof Error ? e.message : String(e)),
+            streaming: omit(s.streaming, agentId),
+            errors: rememberError(s, agentId, msg || '发送失败'),
             outbox: {
               ...s.outbox,
               [agentId]: (s.outbox[agentId] ?? []).filter((line) => line !== text),
             },
             agents: s.agents.map((a) => {
               if (a.id !== agentId) return a
-              const list = a.messages ?? []
-              const last = list[list.length - 1]
-              if (last?.role === 'user' && last.content === text) return { ...a, messages: list.slice(0, -1) }
-              return a
+              const status = a.status === 'running' || a.status === 'queued' ? 'idle' : a.status
+              return { ...a, status }
             }),
           }))
           throw e
@@ -686,6 +686,14 @@ export function useBackend() {
           return null
         })
       }
+      case 'channel.delete':
+        return API.deleteChannel((data as { id: string }).id).then((ok) => {
+          if (ok) {
+            const id = (data as { id: string }).id
+            setState((s) => ({ ...s, channels: s.channels.filter((c) => c.id !== id) }))
+          }
+          return ok
+        })
       case 'channel.send': {
         const { channelId, fromId, fromName, text, images } = data as {
           channelId: string
@@ -719,17 +727,6 @@ export function useBackend() {
   }, [])
 
   const send = sendImpl as <T = unknown>(action: string, data?: unknown) => Promise<T>
-
-  // 批准/拒绝工具调用。
-  // 当前后端还没有审批流（工具直接执行），所以这里只更新本地展示状态，
-  // 不去调 unblockAgent —— 那会把真正在等人的 agent 错误解除。
-  const approveTool = useCallback((id: string) => {
-    setState((s) => ({ ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'ok' } : t)) }))
-  }, [])
-
-  const rejectTool = useCallback((id: string) => {
-    setState((s) => ({ ...s, tools: s.tools.map((t) => (t.id === id ? { ...t, status: 'error' } : t)) }))
-  }, [])
 
   const clearFocus = useCallback(
     () => setState((s) => (s.focusAgentId === null ? s : { ...s, focusAgentId: null })),
@@ -821,7 +818,7 @@ export function useBackend() {
     }
   }, [refreshNotes])
 
-  return { ...state, send, approveTool, rejectTool, clearFocus, refreshNotes, openAgent, parkAgents }
+  return { ...state, send, clearFocus, refreshNotes, openAgent, parkAgents }
 }
 
 function rememberError(s: State, id: string, text: string): Record<string, SessionError> {

@@ -95,6 +95,8 @@ type Manager struct {
 	knowledge KnowledgeProvider
 	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
 	waiting map[string]string
+	// routed 记录转发出去、还没结束的目标。
+	routed map[string][]string
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
@@ -590,6 +592,8 @@ type PromptRequest struct {
 	Done chan struct{} `json:"-"`
 	// outcome 非空时，结束原因写在这里再关闭 Done。只关闭 Done 时，等待方分不清正常回复和异常退出。
 	outcome *promptOutcome `json:"-"`
+	// Ctx 取消时这一轮也停。飞书回复和 ask 用它把停止传进模型请求。
+	Ctx context.Context `json:"-"`
 }
 
 // promptOutcome 是主 agent 等子 agent 时拿到的那一次信号。
@@ -643,7 +647,7 @@ func (m *Manager) RunPrompt(ctx context.Context, agentID, text string) (string, 
 // RunBlocks 入队一条带图的消息并等到结束。图已经在 Blocks 里。
 func (m *Manager) RunBlocks(ctx context.Context, agentID, text string, blocks []llm.Block) (string, error) {
 	out := &promptOutcome{done: make(chan struct{})}
-	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Blocks: blocks, Done: out.done, outcome: out}); err != nil {
+	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Blocks: blocks, Done: out.done, outcome: out, Ctx: ctx}); err != nil {
 		return "", err
 	}
 	select {
@@ -734,14 +738,71 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 }
 
 // Stop 取消一个 agent 的当前执行并清空队列。
+// 它正在问的会话、转发出去的会话一起停，不再继续请求模型。
 func (m *Manager) Stop(id string) bool {
-	a, ok := m.Get(id)
-	if !ok {
+	if _, ok := m.Get(id); !ok {
 		return false
 	}
-	a.StopAll()
-	m.emit("agent.status", a.statusPayload(StatusIdle))
-	return true
+	ids := append([]string{id}, m.linked(id)...)
+	seen := map[string]bool{}
+	stopped := false
+	for _, cur := range ids {
+		if seen[cur] {
+			continue
+		}
+		seen[cur] = true
+		b, ok := m.Get(cur)
+		if !ok {
+			continue
+		}
+		b.StopAll()
+		m.emit("agent.status", b.statusPayload(StatusIdle))
+		stopped = true
+	}
+	return stopped
+}
+
+func (m *Manager) linked(id string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	if to := m.waiting[id]; to != "" {
+		out = append(out, to)
+	}
+	out = append(out, m.routed[id]...)
+	return append([]string(nil), out...)
+}
+
+func (m *Manager) noteRoute(from, to string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.routed == nil {
+		m.routed = map[string][]string{}
+	}
+	for _, id := range m.routed[from] {
+		if id == to {
+			return
+		}
+	}
+	m.routed[from] = append(m.routed[from], to)
+}
+
+func (m *Manager) dropForward(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for from, tos := range m.routed {
+		kept := make([]string, 0, len(tos))
+		for _, to := range tos {
+			if to != id {
+				kept = append(kept, to)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.routed, from)
+		} else {
+			m.routed[from] = kept
+		}
+	}
 }
 
 // Route 把一段原文转给另一个会话。
@@ -768,10 +829,31 @@ func (m *Manager) Route(fromId, toId, text string) error {
 	m.emit("agent.message", map[string]any{"id": from.ID, "message": note})
 	m.goSave()
 
-	return m.Prompt(context.Background(), PromptRequest{
+	m.noteRoute(fromId, toId)
+	if err := m.Prompt(context.Background(), PromptRequest{
 		AgentID: toId,
 		Text:    line,
-	})
+	}); err != nil {
+		m.clearRoute(fromId, toId)
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) clearRoute(from, to string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := make([]string, 0, len(m.routed[from]))
+	for _, id := range m.routed[from] {
+		if id != to {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
+		delete(m.routed, from)
+	} else {
+		m.routed[from] = kept
+	}
 }
 
 // FindByName 按会话名字找 agent。重名时返回错误，避免问错人。
@@ -836,6 +918,7 @@ func (a *Agent) workerLoop(m *Manager) {
 		case req := <-a.queue:
 			a.runSafely(m, req)
 			a.settle(req)
+			m.dropForward(a.ID)
 		}
 	}
 }
@@ -896,7 +979,20 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	a.StartedAt = time.Now().Unix()
 	a.Chars = 0
 	a.LastTool = ""
-	runCtx, cancel := context.WithCancel(context.Background())
+	parent := req.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		a.turnKind = "stopped"
+		a.turnReason = "已停止"
+		a.Status = StatusIdle
+		a.BusyPlace = ""
+		a.mu.Unlock()
+		m.emit("agent.status", a.statusPayload(StatusIdle))
+		return
+	}
+	runCtx, cancel := context.WithCancel(parent)
 	a.cancel = cancel
 	a.mu.Unlock()
 

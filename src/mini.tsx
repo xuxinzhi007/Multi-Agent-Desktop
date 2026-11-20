@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './styles/island.css'
 import { API, events, type AgentView, type MiniAgentStatus, type MiniStatus, type ModelChoice, type ScreenHint } from './mygo'
 import { Island } from './island/Island'
+import { bodyOf } from './lib/message'
 import { initialModel, reduce, select, signalsFromChannel, type Scene } from './island/logic'
 
 /**
@@ -424,12 +425,11 @@ function fromList(agents: AgentView[]): MiniStatus {
       role: a.role,
       color: a.color,
       status: a.status,
-      progress: 0,
       chars: a.chars ?? 0,
       lastTool: a.lastTool ?? '',
       startedAt: a.startedAt ?? 0,
       blockedReason: a.blockedReason ?? '',
-      task: a.last || '',
+      task: bodyOf(a.last || ''),
     })),
   }
 }

@@ -167,9 +167,15 @@ function fallback(method: string): unknown {
   return undefined
 }
 
+export function previewMode(): boolean {
+  return typeof document !== 'undefined' && document.documentElement.dataset.preview === '1'
+}
+
 export function installPreviewRuntime() {
   const g = globalThis as { mygo?: unknown }
   if (g.mygo) return // 真实窗口里什么都不做
+  document.documentElement.dataset.preview = '1'
+  document.title = '预览 · Multi-Agent Desktop'
 
   g.mygo = {
     call: async (method: string, ...args: unknown[]) => {

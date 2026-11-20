@@ -3,6 +3,8 @@ import TextareaAutosize from 'react-textarea-autosize'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
+import { bodyOf } from '../lib/message'
+import { previewMode } from '../lib/preview-runtime'
 import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
 
 type Props = {
@@ -235,7 +237,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             }}
             title="删除频道"
           >
-            ×
+            删除
           </button>
         )}
       </header>
@@ -246,7 +248,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
       >
         {(channel.messages ?? []).length === 0 && (
           <div className="c-empty" style={{ paddingTop: 'var(--space-6)' }}>
-            频道已创建，发第一条消息吧
+            {previewMode() ? '这是预览' : '频道已创建，发第一条消息吧'}
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
               没 @ 人时，由默认接话人回答。@ 谁谁回答，@所有人每人一次。
             </div>
@@ -314,7 +316,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
                       whiteSpace: 'pre-wrap',
                     }}
                   >
-                    {text}
+                    {bodyOf(text)}
                   </div>
                 </div>
               </div>
@@ -512,9 +514,9 @@ function ChannelBubble({
           }}
         >
           {(msg.blocks?.length ?? 0) > 0 ? (
-            <MessageShots blocks={msg.blocks} content={msg.text} />
+            <MessageShots blocks={msg.blocks} content={bodyOf(msg.text)} />
           ) : (
-            <MentionText text={msg.text} agents={mentionTargets} selfColor={color} />
+            <MentionText text={bodyOf(msg.text)} agents={mentionTargets} selfColor={color} />
           )}
         </div>
         <DeliveryRow msg={msg} />

@@ -111,18 +111,11 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 		// 它同样满足 *exec.ExitError，所以顺序不能反 ——
 		// 反了就会把「超时」误报成「退出码 -1」，模型会以为是命令写错了
 		// 而不是执行超时，于是重试同一个命令。
-		if execCtx.Err() == context.DeadlineExceeded {
+		if execCtx.Err() == context.DeadlineExceeded || execCtx.Err() == context.Canceled {
 			return tool.Result{
 				Status:  tool.StatusTimeout,
-				Content: fmt.Sprintf("command timed out after %s and was killed:\n%s", timeout, out),
-				Meta:    tool.Meta{DurationMS: dur, ExitCode: -1},
-			}
-		}
-		if execCtx.Err() == context.Canceled {
-			return tool.Result{
-				Status:  tool.StatusTimeout,
-				Content: "command cancelled",
-				Meta:    tool.Meta{DurationMS: dur, ExitCode: -1},
+				Content: fmt.Sprintf("超时\n%s", out),
+				Meta:    tool.Meta{DurationMS: dur},
 			}
 		}
 		if ee, ok := runErr.(*exec.ExitError); ok {

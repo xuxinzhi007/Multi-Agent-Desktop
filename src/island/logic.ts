@@ -73,6 +73,7 @@ export type View = {
   paused: boolean
   hot: string
   hotKey: string
+  progress: number
 }
 
 export type Action =
@@ -161,7 +162,18 @@ export function select(m: Model): View {
     paused: m.paused,
     hot: m.hot,
     hotKey: m.hotKey,
+    progress: meterOf(m.agents),
   }
+}
+
+function meterOf(agents: MiniAgentStatus[]): number {
+  let n = 0
+  for (const a of agents) {
+    if (a.status !== 'running' && a.status !== 'queued') continue
+    const p = a.progress ?? 0
+    if (p > n) n = p
+  }
+  return n
 }
 
 export function signalsFromStatus(prev: MiniAgentStatus[], next: MiniAgentStatus[], now: number): Signal[] {
@@ -199,10 +211,19 @@ export function signalsFromChannel(msg: ChannelMessage): Signal[] {
   }))
 }
 
+function mergeProgress(prev: MiniAgentStatus[], next: MiniAgentStatus[]): MiniAgentStatus[] {
+  const old = new Map(prev.map((a) => [a.id, a.progress]))
+  return next.map((a) => {
+    if (typeof a.progress === 'number') return a
+    const kept = old.get(a.id)
+    return { ...a, progress: typeof kept === 'number' ? kept : 0 }
+  })
+}
+
 function applySnapshot(m: Model, status: MiniStatus, now: number, keepPaused: boolean): Model {
   const sigs = signalsFromStatus(m.agents, status.agents ?? [], now)
   const prevActive = countActive(m.agents)
-  const nextAgents = status.agents ?? []
+  const nextAgents = mergeProgress(m.agents, status.agents ?? [])
   const nextActive = countActive(nextAgents)
   const failed = nextAgents.some((a) => a.status === 'error')
   const done = nextAgents.some((a) => a.status === 'done')

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo"
 
@@ -45,6 +46,8 @@ type API struct {
 	screen     *screen.Loop
 	screenOnce sync.Once
 	imageDir   string
+	shellMu    sync.Mutex
+	shellBusy  map[string]bool
 }
 
 // Agent 是前端可见的会话视图。
@@ -95,6 +98,7 @@ var (
 	AgentConfig = mygo.NewEvent[AgentView]("agent.config")
 	// 频道事件（由 API 直接 Emit，不走 emitToWindow 的 map 协议）。
 	ChannelCreated = mygo.NewEvent[channel.Channel]("channel.created")
+	ChannelDeleted = mygo.NewEvent[string]("channel.deleted")
 	ChannelMessage = mygo.NewEvent[channel.Message]("channel.message")
 	// 知识库事件。
 	KnowledgeChanged = mygo.NewEvent[knowledge.Note]("knowledge.changed")
@@ -276,21 +280,19 @@ var miniPaused atomic.Bool
 // miniProgress 把状态与产出折算成 0-100，供进度环显示。
 // 没有真实的总量信息，所以只表达「大概走到哪了」，不承诺精确。
 func miniProgress(status string, chars, queueLen int) int {
-	switch status {
-	case string(agent.StatusDone):
+	_ = queueLen
+	if status == string(agent.StatusDone) {
 		return 100
-	case string(agent.StatusIdle):
-		return 0
-	case string(agent.StatusError), string(agent.StatusBlocked):
-		return 45
 	}
-	// 运行/排队：按已生成字数估算，800 字视为完成
+	if chars <= 0 {
+		return 0
+	}
 	p := chars * 100 / 800
 	if p > 95 {
 		p = 95
 	}
-	if p < 8 {
-		p = 8
+	if p < 1 {
+		p = 1
 	}
 	return p
 }
@@ -517,7 +519,7 @@ func lastSentence(msgs []llm.Message) string {
 		if n := strings.IndexByte(s, '\n'); n >= 0 {
 			s = s[:n]
 		}
-		s = strings.Join(strings.Fields(s), " ")
+		s = visibleLine(strings.Join(strings.Fields(s), " "))
 		r := []rune(s)
 		if len(r) > 48 {
 			return string(r[:48]) + "…"
@@ -525,6 +527,46 @@ func lastSentence(msgs []llm.Message) string {
 		return s
 	}
 	return ""
+}
+
+func visibleLine(s string) string {
+	s = strings.TrimSpace(s)
+	for i := 0; i < 6; i++ {
+		if !(strings.HasPrefix(s, "[from ") || strings.HasPrefix(s, "[to ") || strings.HasPrefix(s, "[ch-") ||
+			strings.HasPrefix(s, "[user]") || strings.HasPrefix(s, "[assistant]") || strings.HasPrefix(s, "[system]")) {
+			break
+		}
+		j := strings.IndexByte(s, ']')
+		if j < 0 {
+			break
+		}
+		if strings.HasPrefix(s, "[ch-") {
+			id := s[4:j]
+			if id == "" {
+				break
+			}
+			digits := true
+			for _, r := range id {
+				if r < '0' || r > '9' {
+					digits = false
+					break
+				}
+			}
+			if !digits {
+				break
+			}
+		}
+		s = strings.TrimSpace(s[j+1:])
+	}
+	if k := strings.IndexAny(s, ":："); k > 0 && k <= 24 && !strings.Contains(s[:k], "\n") {
+		rest := s[k:]
+		_, size := utf8.DecodeRuneInString(rest)
+		rest = strings.TrimSpace(rest[size:])
+		if rest != "" {
+			s = rest
+		}
+	}
+	return s
 }
 
 func catalogView(v AgentView) AgentView {
@@ -551,6 +593,9 @@ func (s *API) DeleteAgent(id string) bool {
 
 // StopAgent 停止一个 agent 的推理并清空队列。
 func (s *API) StopAgent(id string) bool {
+	if s.bot != nil {
+		s.bot.StopRun(id)
+	}
 	return s.mgr.Stop(id)
 }
 
@@ -562,6 +607,9 @@ func (s *API) PauseAll() int {
 	for _, a := range s.mgr.List() {
 		sn := a.Snapshot()
 		if sn.Status == agent.StatusRunning || sn.Status == agent.StatusQueued {
+			if s.bot != nil {
+				s.bot.StopRun(sn.ID)
+			}
 			s.mgr.Stop(sn.ID)
 			n++
 		}
@@ -638,6 +686,15 @@ func (s *API) SetChannelSpeaker(channelId, agentId string) (channel.Channel, err
 // ListChannels 返回所有频道快照。
 func (s *API) ListChannels() []channel.Channel {
 	return s.channels.List()
+}
+
+// DeleteChannel 删掉一个频道和它的消息。
+func (s *API) DeleteChannel(id string) bool {
+	if s.channels == nil || !s.channels.Delete(id) {
+		return false
+	}
+	ChannelDeleted.Emit(s.win, id)
+	return true
 }
 
 // SendToChannel 发消息到频道，并触发相关成员 agent。
@@ -877,7 +934,20 @@ func (s *API) PromptAgent(ctx context.Context, req PromptRequest) error {
 }
 
 // RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。
+// 同一条命令还在跑时不再开第二遍。
 func (s *API) RunShell(ctx context.Context, req ShellRequest) {
+	key := req.AgentID + "\n" + req.Command
+	s.shellMu.Lock()
+	if s.shellBusy == nil {
+		s.shellBusy = map[string]bool{}
+	}
+	if s.shellBusy[key] {
+		s.shellMu.Unlock()
+		return
+	}
+	s.shellBusy[key] = true
+	s.shellMu.Unlock()
+
 	dir := ""
 	if s.mgr != nil && req.AgentID != "" {
 		if a, ok := s.mgr.Get(req.AgentID); ok {
@@ -885,6 +955,11 @@ func (s *API) RunShell(ctx context.Context, req ShellRequest) {
 		}
 	}
 	go func() {
+		defer func() {
+			s.shellMu.Lock()
+			delete(s.shellBusy, key)
+			s.shellMu.Unlock()
+		}()
 		ShellStart.Emit(s.win, ShellEvent{AgentID: req.AgentID, Command: req.Command})
 		res := s.runner.RunIn(ctx, dir, req.Command)
 		ShellResult_.Emit(s.win, ShellResultEvent{

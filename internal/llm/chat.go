@@ -47,14 +47,15 @@ type ChatModel struct {
 
 // NewChatModel 造一个支持 function calling 的调用器。
 func NewChatModel(cfg Config) *ChatModel {
-	// 与 New 共用同一套默认值：llamacpp 之类不填 BaseURL 也要能跑通
 	cfg = ApplyDefaults(cfg)
-	return &ChatModel{
-		cfg: cfg,
-		// 有超时是硬要求：没有超时的 http.Client 会让循环永久挂住，
-		// 而「停止」按钮此时什么都做不了。
-		client: &http.Client{Timeout: 180 * time.Second},
+	return &ChatModel{cfg: cfg, client: httpClient}
+}
+
+func boundChat(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
 	}
+	return context.WithTimeout(ctx, 180*time.Second)
 }
 
 type wireTool struct {
@@ -90,6 +91,8 @@ type wireToolCall struct {
 // 这里把 OpenAI 的 tool_calls 归一化成结构化的 Call，
 // 模型层的格式差异到此为止 —— 循环和工具层不需要知道协议细节。
 func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec) (Turn, error) {
+	ctx, cancel := boundChat(ctx)
+	defer cancel()
 	if c.cfg.Provider == "qoder" {
 		return qoderTurn(ctx, c.client, c.cfg, msgs, tools)
 	}
@@ -149,6 +152,8 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 // 文本和推理增量通过 onDelta 立刻送出。tool_calls 按 index 拼完，
 // arguments 必须是完整 JSON，才放进返回的 Turn。拼不齐、上游报错或 ctx 取消都返回 error，不带半截参数。
 func (c *ChatModel) TurnStream(ctx context.Context, msgs []Message, tools []tool.Spec, onDelta func(Delta)) (Turn, error) {
+	ctx, cancel := boundChat(ctx)
+	defer cancel()
 	if onDelta == nil {
 		onDelta = func(Delta) {}
 	}
@@ -209,6 +214,9 @@ func (c *ChatModel) postChat(ctx context.Context, msgs []Message, tools []tool.S
 	if err != nil {
 		return nil, fmt.Errorf("llm: new request: %w", err)
 	}
+	httpReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 	httpReq.Header.Set("content-type", "application/json")
 	if stream {
 		httpReq.Header.Set("accept", "text/event-stream")
@@ -217,7 +225,7 @@ func (c *ChatModel) postChat(ctx context.Context, msgs []Message, tools []tool.S
 		httpReq.Header.Set("authorization", "Bearer "+c.cfg.APIKey)
 	}
 
-	resp, err := c.client.Do(httpReq)
+	resp, err := do(c.client, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("llm: do: %w", err)
 	}

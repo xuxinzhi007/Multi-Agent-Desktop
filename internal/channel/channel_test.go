@@ -513,3 +513,22 @@ func TestRenderMarksOwnSpeech(t *testing.T) {
 		t.Fatalf("other line missing: %q", got)
 	}
 }
+
+func TestDeleteDropsChannelAndMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channels.json")
+	m := newTestManager(t)
+	mustSetStore(t, m, path)
+	ch := m.Create("", "闲聊", nil, "")
+	if _, err := m.AddMessage(ch.ID, "u", "你", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.Delete(ch.ID) {
+		t.Fatal("delete")
+	}
+	m.waitSaves()
+	m2 := newTestManager(t)
+	mustSetStore(t, m2, path)
+	if got := m2.List(); len(got) != 0 {
+		t.Fatalf("left %d channels", len(got))
+	}
+}

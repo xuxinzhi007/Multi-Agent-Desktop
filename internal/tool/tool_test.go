@@ -261,3 +261,20 @@ func TestSpecsExposesSchema(t *testing.T) {
 		t.Fatal("schema must be exposed for the model to know the contract")
 	}
 }
+
+func TestTimeoutIsNotRunTwice(t *testing.T) {
+	stub := &stubTool{
+		name:   "slow",
+		schema: `{"type":"object"}`,
+		fn: func(context.Context, json.RawMessage) Result {
+			return Result{Status: StatusTimeout, Content: "超时"}
+		},
+	}
+	r := NewRegistry()
+	r.Register(stub)
+	r.Invoke(context.Background(), call("slow", `{}`))
+	r.Invoke(context.Background(), call("slow", `{}`))
+	if stub.calls.Load() != 1 {
+		t.Fatalf("calls = %d", stub.calls.Load())
+	}
+}

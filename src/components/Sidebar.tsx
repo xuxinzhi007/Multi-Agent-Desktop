@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { API, type AgentView as Agent, type Channel, type Room } from '../mygo'
+import { bodyOf } from '../lib/message'
+import { previewMode } from '../lib/preview-runtime'
 import CreateAgentModal from './CreateAgentModal'
 
 type Props = {
@@ -308,7 +310,7 @@ export default function Sidebar(p: Props) {
                   {room.name || '飞书会话'}
                 </div>
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                  {last ? last.text : '还没有消息'}
+                  {last ? bodyOf(last.text) : '还没有消息'}
                 </div>
               </div>
             </div>
@@ -360,9 +362,9 @@ export default function Sidebar(p: Props) {
 
         {p.agents.length === 0 && !p.createOpen && (
           <div className="c-empty" style={{ padding: 'var(--space-6) var(--space-3)' }}>
-            还没有 agent
+            {previewMode() ? '这是预览' : '还没有 agent'}
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
-              点下面新建，可同时建多个并行跑
+              {previewMode() ? '浏览器里的会话是假的。' : '点下面新建，可同时建多个并行跑'}
             </div>
           </div>
         )}

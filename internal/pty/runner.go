@@ -16,6 +16,7 @@ type Result struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exitCode"`
+	TimedOut bool   `json:"timedOut,omitempty"`
 }
 
 // Runner 在指定工作目录执行命令。
@@ -57,6 +58,9 @@ func (r *Runner) RunIn(ctx context.Context, dir, command string) Result {
 	if workdir.TooBroad(dir) {
 		return Result{Stderr: workdir.RejectReason + "\n", ExitCode: -1}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cmd := proc.CommandContext(ctx, command)
 	cmd.Dir = dir
 	proc.Setup(cmd)
@@ -66,6 +70,9 @@ func (r *Runner) RunIn(ctx context.Context, dir, command string) Result {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		return Result{Stdout: stdout.String(), Stderr: "超时\n" + stderr.String(), TimedOut: true}
+	}
 	code := 0
 	if err != nil {
 		var ee *exec.ExitError

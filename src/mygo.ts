@@ -97,6 +97,8 @@ export interface Block {
   text?: string;
   id?: string;
   mime?: string;
+  /** 还没落盘的图，base64。落盘后只留 id。 */
+  data?: string;
 }
 
 export interface Channel {
@@ -262,8 +264,8 @@ export interface MiniAgentStatus {
   lastTool?: string;
   /** 本轮已生成字符数 */
   chars?: number;
-  /** 0-100，由状态与产出推算 */
-  progress: number;
+  /** 0-100。没有进度时不传，岛上不画进度条。 */
+  progress?: number;
   /** 在等人的原因 */
   blockedReason?: string;
   /** 真实错误内容 */
@@ -373,6 +375,7 @@ export interface Result {
   stdout: string;
   stderr: string;
   exitCode: number;
+  timedOut?: boolean;
 }
 
 export interface Room {
@@ -507,6 +510,10 @@ export const API = {
   /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
     return call("API.DeleteAgent", id);
+  },
+  /** DeleteChannel 删掉一个频道和它的消息。 */
+  deleteChannel(id: string): Promise<boolean> {
+    return call("API.DeleteChannel", id);
   },
   /** DeleteNote 删除一条笔记。 */
   deleteNote(id: string): Promise<boolean> {
@@ -674,7 +681,10 @@ export const API = {
   routeAgent(fromId: string, toId: string, text: string): Promise<void> {
     return call("API.RouteAgent", fromId, toId, text);
   },
-  /** RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。 */
+  /**
+   * RunShell 执行 shell 命令。ctx 取消会杀掉整个进程组。
+   * 同一条命令还在跑时不再开第二遍。
+   */
   runShell(req: ShellRequest): Promise<void> {
     return call("API.RunShell", req);
   },
@@ -789,6 +799,7 @@ export const events = {
   agentConfig: event<AgentView>("agent.config"),
   /** 频道事件（由 API 直接 Emit，不走 emitToWindow 的 map 协议）。 */
   channelCreated: event<Channel>("channel.created"),
+  channelDeleted: event<string>("channel.deleted"),
   channelMessage: event<ChannelMessage>("channel.message"),
   /** 知识库事件。 */
   knowledgeChanged: event<Note>("knowledge.changed"),

@@ -204,5 +204,7 @@ test('切到对话视图时检查器自动展开', async ({ page }) => {
   await page.waitForSelector('.c-shell')
 
   await page.getByRole('button', { name: /对话/ }).first().click()
-  await expect(page.getByText('agent 还没有改动文件')).toBeVisible()
+  await expect(page.getByRole('button', { name: '工具', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /任务/ })).toHaveCount(0)
 })

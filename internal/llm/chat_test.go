@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"multi-agent-desktop/internal/tool"
@@ -94,5 +95,43 @@ func TestNonDeepSeekOmitsThinking(t *testing.T) {
 	}
 	if _, ok := got["thinking"]; ok {
 		t.Fatalf("非 deepseek 请求带了 thinking: %#v", got["thinking"])
+	}
+}
+
+func TestNewChatModelUsesSharedClient(t *testing.T) {
+	a := NewChatModel(Config{Provider: "openai"})
+	b := NewChatModel(Config{Provider: "deepseek"})
+	if a.client != httpClient || b.client != httpClient {
+		t.Fatal("NewChatModel 必须使用包级 httpClient")
+	}
+}
+
+func TestChatModelRetriesStaleConnection(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, err := hj.Hijack()
+				if err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	cm := NewChatModel(Config{Provider: "openai", BaseURL: srv.URL, APIKey: "k", Model: "m"})
+	turn, err := cm.Turn(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("连接层抖动不应该直接失败，应重试一次：%v", err)
+	}
+	if turn.Text != "ok" {
+		t.Fatalf("重试后应拿到完整内容，实际 %q", turn.Text)
+	}
+	if n := atomic.LoadInt32(&hits); n != 2 {
+		t.Fatalf("应当正好重试一次，实际请求数 %d", n)
 	}
 }

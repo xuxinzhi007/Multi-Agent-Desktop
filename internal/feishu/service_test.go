@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"multi-agent-desktop/internal/llm"
 )
@@ -183,4 +184,35 @@ func imageService(t *testing.T, sees bool, got *RunRequest, replies map[string]s
 		return pngPixel, "image/png", nil
 	}
 	return s
+}
+
+func TestStopRunCancelsModel(t *testing.T) {
+	started := make(chan struct{})
+	s := New(Hooks{
+		Run: func(ctx context.Context, _ RunRequest) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_reply", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	done := make(chan struct{})
+	go func() {
+		s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "hi", MessageID: "om"})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model call did not start")
+	}
+	s.StopRun("a1")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch kept requesting the model")
+	}
 }

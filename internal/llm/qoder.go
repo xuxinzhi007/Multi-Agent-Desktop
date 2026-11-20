@@ -302,6 +302,9 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	if err != nil {
 		return nil, err
 	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(encoded)), nil
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -312,7 +315,7 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	if client == nil {
 		client = httpClient
 	}
-	resp, err := client.Do(req)
+	resp, err := do(client, req)
 	if err != nil {
 		return nil, fmt.Errorf("qoder: %w", err)
 	}

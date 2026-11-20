@@ -1,26 +1,3 @@
-import { useEffect, useRef } from 'react'
-
-export type DiffLine = {
-  kind: 'add' | 'del' | 'ctx'
-  text: string
-  oldNo?: number
-  newNo?: number
-}
-
-export type FileChange = {
-  path: string
-  status: 'modified' | 'added' | 'deleted'
-  added: number
-  removed: number
-  lines?: DiffLine[]
-}
-
-export type TodoItem = {
-  id: string
-  text: string
-  status: 'pending' | 'active' | 'done'
-}
-
 export type ToolCall = {
   id: string
   tool: string
@@ -30,18 +7,6 @@ export type ToolCall = {
   at: number
 }
 
-const STATUS_META = {
-  modified: { icon: 'M', cls: 'c-badge--warning', label: '改' },
-  added: { icon: 'A', cls: 'c-badge--success', label: '增' },
-  deleted: { icon: 'D', cls: 'c-badge--danger', label: '删' },
-} as const
-
-const TODO_META = {
-  pending: { icon: '○', color: 'var(--text-disabled)' },
-  active: { icon: '◐', color: 'var(--warning)' },
-  done: { icon: '●', color: 'var(--success)' },
-} as const
-
 const TOOL_META = {
   running: { icon: '◐', color: 'var(--warning)', label: '执行中' },
   ok: { icon: '✓', color: 'var(--success)', label: '完成' },
@@ -49,32 +14,22 @@ const TOOL_META = {
   waiting: { icon: '!', color: 'var(--accent-primary)', label: '待批准' },
 } as const
 
-type Tab = 'changes' | 'todo' | 'tools' | 'knowledge'
+type Tab = 'tools' | 'knowledge'
 
 export default function Inspector({
   tab,
   onTab,
-  changes,
-  todos,
   tools,
   onClose,
   knowledge,
-  focusPath,
 }: {
   tab: Tab
   onTab: (t: Tab) => void
-  changes: FileChange[]
-  todos: TodoItem[]
   tools: ToolCall[]
   onClose: () => void
-  focusPath?: string | null
   /** 知识库面板内容；不传则不显示该 Tab */
   knowledge?: { count: number; node: React.ReactNode }
 }) {
-  const totalAdd = changes.reduce((n, c) => n + c.added, 0)
-  const totalDel = changes.reduce((n, c) => n + c.removed, 0)
-  const doneTodos = todos.filter((t) => t.status === 'done').length
-
   return (
     <aside
       className="c-col slide-in"
@@ -86,7 +41,6 @@ export default function Inspector({
         borderLeft: '1px solid var(--border-subtle)',
       }}
     >
-      {/* 标题栏 */}
       <div
         style={{
           height: 'var(--header-h)',
@@ -109,7 +63,6 @@ export default function Inspector({
         </button>
       </div>
 
-      {/* Tab 切换 */}
       <div
         style={{
           display: 'flex',
@@ -119,18 +72,6 @@ export default function Inspector({
           flexShrink: 0,
         }}
       >
-        <TabBtn
-          label="改动"
-          count={changes.length}
-          active={tab === 'changes'}
-          onClick={() => onTab('changes')}
-        />
-        <TabBtn
-          label="任务"
-          count={todos.length ? `${doneTodos}/${todos.length}` : 0}
-          active={tab === 'todo'}
-          onClick={() => onTab('todo')}
-        />
         <TabBtn
           label="工具"
           count={tools.length}
@@ -147,28 +88,7 @@ export default function Inspector({
         )}
       </div>
 
-      {/* 汇总 */}
-      {tab === 'changes' && changes.length > 0 && (
-        <div
-          className="mono"
-          style={{
-            padding: 'var(--space-2) var(--space-3)',
-            fontSize: 'var(--text-xs)',
-            color: 'var(--text-tertiary)',
-            borderBottom: '1px solid var(--border-subtle)',
-            flexShrink: 0,
-          }}
-        >
-          {changes.length} 个文件{' '}
-          <span style={{ color: 'var(--diff-add-text)' }}>+{totalAdd}</span>{' '}
-          <span style={{ color: 'var(--diff-del-text)' }}>−{totalDel}</span>
-        </div>
-      )}
-
-      {/* 内容 */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {tab === 'changes' && <ChangesList changes={changes} focusPath={focusPath} />}
-        {tab === 'todo' && <TodoList todos={todos} />}
         {tab === 'tools' && <ToolList tools={tools} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
       </div>
@@ -222,231 +142,6 @@ function TabBtn({
   )
 }
 
-function pathHit(path: string, focusPath?: string | null) {
-  if (!focusPath) return false
-  return path === focusPath || path.endsWith('/' + focusPath) || focusPath.endsWith(path)
-}
-
-function ChangesList({ changes, focusPath }: { changes: FileChange[]; focusPath?: string | null }) {
-  const root = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!focusPath) return
-    const el = root.current?.querySelector('[data-hit="1"]')
-    if (el instanceof HTMLElement) el.scrollIntoView({ block: 'nearest' })
-  }, [focusPath, changes])
-  if (changes.length === 0) {
-    return (
-      <div className="c-empty">
-        agent 还没有改动文件
-        <br />
-        <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
-          W3 接入文件读写工具后，这里会显示 diff
-        </span>
-      </div>
-    )
-  }
-
-  return (
-    <div ref={root} style={{ padding: 'var(--space-2)' }}>
-      {changes.map((c, ci) => {
-        const meta = STATUS_META[c.status]
-        const hit = pathHit(c.path, focusPath)
-        return (
-          <details
-            key={c.path}
-            data-hit={hit ? '1' : undefined}
-            open={hit || ci === 0}
-            style={{
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-              marginBottom: 'var(--space-2)',
-              overflow: 'hidden',
-            }}
-          >
-            <summary
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                padding: '8px 10px',
-                cursor: 'pointer',
-                listStyle: 'none',
-              }}
-            >
-              <span className={`c-badge ${meta.cls}`} style={{ padding: '0 5px', fontSize: 9 }}>
-                {meta.icon}
-              </span>
-              <span
-                className="mono"
-                style={{
-                  flex: 1,
-                  fontSize: 'var(--text-xs)',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  direction: 'rtl',
-                  textAlign: 'left',
-                }}
-                title={c.path}
-              >
-                {c.path}
-              </span>
-              <span
-                className="mono"
-                style={{ fontSize: 9.5, color: 'var(--diff-add-text)', flexShrink: 0 }}
-              >
-                +{c.added}
-              </span>
-              <span
-                className="mono"
-                style={{ fontSize: 9.5, color: 'var(--diff-del-text)', flexShrink: 0 }}
-              >
-                −{c.removed}
-              </span>
-            </summary>
-
-            {c.lines && c.lines.length > 0 && (
-              <div
-                className="mono"
-                style={{
-                  borderTop: '1px solid var(--border-subtle)',
-                  fontSize: 10.5,
-                  lineHeight: 1.7,
-                  overflowX: 'auto',
-                }}
-              >
-                {c.lines.map((l, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: 'flex',
-                      background:
-                        l.kind === 'add'
-                          ? 'var(--diff-add-bg)'
-                          : l.kind === 'del'
-                            ? 'var(--diff-del-bg)'
-                            : 'transparent',
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 34,
-                        flexShrink: 0,
-                        textAlign: 'right',
-                        paddingRight: 6,
-                        color: 'var(--text-disabled)',
-                        userSelect: 'none',
-                        fontSize: 9.5,
-                      }}
-                    >
-                      {l.oldNo ?? ''}
-                    </span>
-                    <span
-                      style={{
-                        width: 34,
-                        flexShrink: 0,
-                        textAlign: 'right',
-                        paddingRight: 8,
-                        color: 'var(--text-disabled)',
-                        userSelect: 'none',
-                        fontSize: 9.5,
-                      }}
-                    >
-                      {l.newNo ?? ''}
-                    </span>
-                    <span
-                      style={{
-                        flex: 1,
-                        paddingRight: 10,
-                        whiteSpace: 'pre',
-                        color:
-                          l.kind === 'add'
-                            ? 'var(--diff-add-text)'
-                            : l.kind === 'del'
-                              ? 'var(--diff-del-text)'
-                              : 'var(--text-secondary)',
-                      }}
-                    >
-                      {l.text}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </details>
-        )
-      })}
-    </div>
-  )
-}
-
-function TodoList({ todos }: { todos: TodoItem[] }) {
-  if (todos.length === 0) {
-    return (
-      <div className="c-empty">
-        还没有任务清单
-        <br />
-        <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
-          Supervisor 拆解任务后会出现在这里
-        </span>
-      </div>
-    )
-  }
-
-  const done = todos.filter((t) => t.status === 'done').length
-  const pct = Math.round((done / todos.length) * 100)
-
-  return (
-    <div style={{ padding: 'var(--space-3)' }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 6,
-        }}
-      >
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-          进度 {done}/{todos.length}
-        </span>
-        <span className="mono" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
-          {pct}%
-        </span>
-      </div>
-      <div className="c-progress" style={{ marginBottom: 'var(--space-4)' }}>
-        <div className="c-progress__fill" style={{ width: `${pct}%` }} />
-      </div>
-
-      {todos.map((t) => {
-        const meta = TODO_META[t.status]
-        const label = t.status === 'done' ? '完成' : t.status === 'active' ? '进行中' : '待做'
-        return (
-          <div key={t.id} className="c-compact-card" style={{ cursor: 'default' }}>
-            <div
-              className="c-compact-card__title"
-              title={t.text}
-              style={{
-                color: t.status === 'done' ? 'var(--text-disabled)' : 'var(--text-primary)',
-                textDecoration: t.status === 'done' ? 'line-through' : 'none',
-                paddingRight: 0,
-              }}
-            >
-              <span style={{ color: meta.color, marginRight: 6 }} className={t.status === 'active' ? 'blink' : ''}>
-                {meta.icon}
-              </span>
-              {t.text}
-            </div>
-            <span className="c-compact-card__cap" style={{ color: meta.color, borderColor: meta.color }}>
-              {label}
-            </span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 function ToolList({ tools }: { tools: ToolCall[] }) {
   if (tools.length === 0) {
     return (
@@ -469,7 +164,7 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
             key={t.id}
             style={{
               background: 'var(--bg-surface)',
-              border: `1px solid ${t.status === 'waiting' ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+              border: '1px solid var(--border-subtle)',
               borderRadius: 'var(--radius-md)',
               padding: '8px 10px',
               marginBottom: 'var(--space-2)',
@@ -515,8 +210,6 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
                 {t.detail}
               </div>
             )}
-            {/* 审批流尚未实现：工具调用直接执行，这里不放假按钮。
-                等后端有了真正的待批状态再加回来。 */}
           </div>
         )
       })}

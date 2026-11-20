@@ -55,8 +55,9 @@ type Service struct {
 	load    func(ctx context.Context, appID, secret, messageID string) ([]Item, error)
 	grab    func(ctx context.Context, cfg Config, messageID, key string) ([]byte, string, error)
 
-	once sync.Once
-	jobs chan Turn
+	once      sync.Once
+	jobs      chan Turn
+	runCancel context.CancelFunc
 }
 
 // Config 是当前生效的机器人配置。
@@ -199,6 +200,23 @@ func (s *Service) start() {
 	})
 }
 
+// StopRun 停掉这个会话正在为飞书写的那一轮，不再继续请求模型。
+func (s *Service) StopRun(agentID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.cfg.AgentID != agentID {
+		s.mu.Unlock()
+		return
+	}
+	cancel := s.runCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (s *Service) loop() {
 	for t := range s.jobs {
 		s.dispatch(t)
@@ -255,7 +273,21 @@ func (s *Service) dispatch(t Turn) {
 			text = framed
 		}
 	}
-	reply, err := s.hooks.Run(context.Background(), RunRequest{AgentID: cfg.AgentID, Text: text, Pieces: pieces})
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.runCancel = cancel
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		s.runCancel = nil
+		s.mu.Unlock()
+	}()
+	reply, err := s.hooks.Run(ctx, RunRequest{AgentID: cfg.AgentID, Text: text, Pieces: pieces})
+	if ctx.Err() != nil {
+		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, "已停止")
+		return
+	}
 	if err != nil {
 		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, err.Error())
 		return
