@@ -390,6 +390,14 @@ type AgentView struct {
 	Proposal string `json:"proposal,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的。
 	ParentID string `json:"parentId,omitempty"`
+	// LearnAt 是已经收进摘要的消息条数。
+	LearnAt int `json:"learnAt,omitempty"`
+	// LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。
+	LearnTotal int `json:"learnTotal,omitempty"`
+	// LearnBy 是写出摘要的子会话。空表示本会话自己整理。
+	LearnBy string `json:"learnBy,omitempty"`
+	// LearnBusy 为真时，摘要还在写。
+	LearnBusy bool `json:"learnBusy,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -416,6 +424,10 @@ func toAgentView(a *agent.Agent) AgentView {
 		ParentID:      s.ParentID,
 		SeesImages:    seesModel(s.LLMCfg),
 		Proposal:      s.Proposal,
+		LearnAt:       s.LearnAt,
+		LearnTotal:    agent.LearnEnd(len(s.Messages)),
+		LearnBy:       s.LearnBy,
+		LearnBusy:     s.LearnBusy,
 	}
 }
 
@@ -424,6 +436,19 @@ func seesModel(cfg *llm.Config) bool {
 		return false
 	}
 	return llm.SeesImages(cfg.Provider, cfg.Model)
+}
+
+func mapInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 // agentViewFromMap 把 emitter 的 map 负载转成前端 AgentView。
@@ -443,6 +468,10 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.BlockedReason, _ = m["blockedReason"].(string)
 	v.Proposal, _ = m["proposal"].(string)
 	v.ParentID, _ = m["parentId"].(string)
+	v.LearnBy, _ = m["learnBy"].(string)
+	v.LearnBusy, _ = m["learnBusy"].(bool)
+	v.LearnAt = mapInt(m["learnAt"])
+	v.LearnTotal = mapInt(m["learnTotal"])
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = llm.RedactedPtr(lc)
@@ -2203,6 +2232,38 @@ func (s *API) IslandResize(_ bool) bool {
 	return true
 }
 
+// channelFeed 把已经证实的结论发到同名领域频道，并让下一轮读到别人的结论。
+type channelFeed struct {
+	ch  *channel.Manager
+	api *API
+}
+
+func (f *channelFeed) Publish(fromID, fromName, domain, dir, title, body string) {
+	if f == nil || f.ch == nil || strings.TrimSpace(domain) == "" {
+		return
+	}
+	ch, created := f.ch.Ensure(domain)
+	if created && f.api != nil && f.api.win != nil && !f.api.win.IsDestroyed() {
+		ChannelCreated.Emit(f.api.win, ch)
+	}
+	text := title + "\n" + body
+	if dir != "" {
+		text += "\n目录：" + dir
+	}
+	msg, err := f.ch.Post(ch.ID, fromID, fromName, text)
+	if err != nil || f.api == nil {
+		return
+	}
+	emitChannelMessage(msg, f.api.win, f.api.currentMini())
+}
+
+func (f *channelFeed) Recent(domain, exceptID string, limit int) []string {
+	if f == nil || f.ch == nil {
+		return nil
+	}
+	return f.ch.RecentPosts(domain, exceptID, limit)
+}
+
 // emitChannelMessage 把频道消息同时送给主窗和悬浮岛。
 // 岛上的信封只认这个事件，不在前端编造通信。
 func emitChannelMessage(msg channel.Message, wins ...*mygo.Window) {
@@ -2524,6 +2585,9 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 			}
 		case "agent.deleted":
 			if v, ok := toAgentDeleted(data); ok {
+				if chMgr != nil {
+					chMgr.RemoveMember(v)
+				}
 				AgentDeleted.Emit(win, v)
 			}
 		case "agent.status":
@@ -2704,6 +2768,7 @@ func main() {
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
+	mgr.SetFeed(&channelFeed{ch: channels, api: api})
 	api.bot = feishu.New(feishu.Hooks{
 		Run:     api.runFeishu,
 		Show:    api.showFeishu,

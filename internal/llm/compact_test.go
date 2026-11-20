@@ -53,6 +53,32 @@ func TestCompactKeepsTailAndDropsBulk(t *testing.T) {
 	}
 }
 
+func TestCompactKeepsLatestUserWhole(t *testing.T) {
+	latest := "当前问题" + strings.Repeat("甲", 3000)
+	system := "系统约束保持完整" + strings.Repeat("规", 40)
+	var msgs []Message
+	msgs = append(msgs, Message{Role: "system", Content: system})
+	msgs = append(msgs, Message{Role: "user", Content: "最早的问题" + strings.Repeat("旧", 8000)})
+	msgs = append(msgs, Message{Role: "assistant", Content: strings.Repeat("答", 8000)})
+	msgs = append(msgs, Message{Role: "user", Content: latest})
+	out := Compact(msgs, 8000+400+estMessages(msgs[:1]))
+	var sawLatest, sawSystem bool
+	for _, m := range out {
+		if m.Content == latest {
+			sawLatest = true
+		}
+		if m.Content == system {
+			sawSystem = true
+		}
+		if strings.Contains(m.Content, strings.Repeat("旧", 500)) {
+			t.Fatal("kept the old bulk")
+		}
+	}
+	if !sawLatest || !sawSystem {
+		t.Fatalf("latest=%v system=%v out=%d", sawLatest, sawSystem, len(out))
+	}
+}
+
 func TestCompactLeavesShortHistory(t *testing.T) {
 	msgs := []Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "yo"}}
 	out := Compact(msgs, 2000)

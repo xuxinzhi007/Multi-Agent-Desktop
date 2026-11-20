@@ -48,6 +48,19 @@ func TestSaveNoteEmitsAndLists(t *testing.T) {
 	}
 }
 
+func TestSaveNotePinsToAgent(t *testing.T) {
+	m := NewManager(llm.Config{}, func(string, any) {})
+	a := m.Create("a", "甲", "r")
+	m.SetKnowledge(&memNotes{})
+	res := (&saveNoteTool{m: m, agentID: a.ID}).Execute(context.Background(), []byte(`{"title":"约定","body":"下次还用这个修法"}`))
+	if res.Status != tool.StatusOK {
+		t.Fatal(res.Content)
+	}
+	if got := a.Snapshot().Knowledge; len(got) != 1 || got[0] != "note-1" {
+		t.Fatalf("knowledge=%v", got)
+	}
+}
+
 func TestSaveNoteWithoutStoreFails(t *testing.T) {
 	m := NewManager(llm.Config{}, func(string, any) {})
 	res := (&saveNoteTool{m: m}).Execute(context.Background(), []byte(`{"title":"a","body":"b"}`))

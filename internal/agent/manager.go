@@ -47,6 +47,14 @@ type Agent struct {
 	BioPinned bool `json:"bioPinned,omitempty"`
 	// Proposal 是一轮结束后建议改成的简介。采用前不替换现在这一行。
 	Proposal string `json:"proposal,omitempty"`
+	// LearnAt 是已经写进摘要的消息条数。更早的对话由子会话整理后交给这里。
+	LearnAt int `json:"learnAt,omitempty"`
+	// LearnText 是交给下一轮的摘要。
+	LearnText string `json:"learnText,omitempty"`
+	// LearnBy 是写出这份摘要的子会话名字。空表示本会话自己整理的。
+	LearnBy string `json:"learnBy,omitempty"`
+	// LearnBusy 为真时，摘要还在写。不落盘。
+	LearnBusy bool `json:"-"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
@@ -97,6 +105,7 @@ type Manager struct {
 	imageDir  string // 图片字节目录，与 json 分开
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
+	feed      Feed
 	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
 	waiting map[string]string
 	// routed 记录转发出去、还没结束的目标。
@@ -208,6 +217,12 @@ func (m *Manager) Save() error {
 				Backend:   a.Backend,
 				WorkDir:   a.WorkDir,
 				LLMCfg:    a.LLMCfg,
+				ParentID:  a.ParentID,
+				BioPinned: a.BioPinned,
+				Proposal:  a.Proposal,
+				LearnAt:   a.LearnAt,
+				LearnText: a.LearnText,
+				LearnBy:   a.LearnBy,
 				Knowledge: append([]string(nil), a.Knowledge...),
 			})
 			a.mu.Unlock()
@@ -300,10 +315,14 @@ func (m *Manager) Load() error {
 			Backend:       canonicalBackend(saved.Backend),
 			WorkDir:       saved.WorkDir,
 			LLMCfg:        saved.LLMCfg,
+			ParentID:      saved.ParentID,
 			Knowledge:     append([]string(nil), saved.Knowledge...),
 			BlockedReason: saved.BlockedReason,
 			BioPinned:     saved.BioPinned,
 			Proposal:      saved.Proposal,
+			LearnAt:       saved.LearnAt,
+			LearnText:     saved.LearnText,
+			LearnBy:       saved.LearnBy,
 			queue:         make(chan PromptRequest, 32),
 			done:          make(chan struct{}),
 		}
@@ -588,6 +607,12 @@ func (m *Manager) List() []*Agent {
 }
 
 func (m *Manager) Delete(id string) bool {
+	return m.remove(id, true)
+}
+
+// remove 从名单里拿掉一个会话。cancel 为假时不打断正在跑的这一轮，
+// 这样会话可以在删掉自己之后把这句话说完。
+func (m *Manager) remove(id string, cancel bool) bool {
 	m.mu.Lock()
 	a, ok := m.agents[id]
 	if ok {
@@ -605,11 +630,12 @@ func (m *Manager) Delete(id string) bool {
 		return false
 	}
 
-	// 停止 worker
 	close(a.done)
-	a.stop()
+	if cancel {
+		a.stop()
+	}
 	go m.emit("agent.deleted", map[string]any{"id": id})
-	m.goSave() // 异步保存
+	m.goSave()
 	return true
 }
 
@@ -1366,6 +1392,10 @@ func (a *Agent) Snapshot() *Agent {
 		BlockedReason: a.BlockedReason,
 		BioPinned:     a.BioPinned,
 		Proposal:      a.Proposal,
+		LearnAt:       a.LearnAt,
+		LearnText:     a.LearnText,
+		LearnBy:       a.LearnBy,
+		LearnBusy:     a.LearnBusy,
 		StartedAt:     a.StartedAt,
 		QueuedAt:      a.QueuedAt,
 		LastTool:      a.LastTool,
@@ -1397,6 +1427,10 @@ func (a *Agent) viewMap() map[string]any {
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,
 		"proposal":      a.Proposal,
+		"learnAt":       a.LearnAt,
+		"learnTotal":    LearnEnd(len(a.Messages)),
+		"learnBy":       a.LearnBy,
+		"learnBusy":     a.LearnBusy,
 	}
 }
 

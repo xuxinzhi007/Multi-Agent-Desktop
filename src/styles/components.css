@@ -1798,6 +1798,33 @@
   box-shadow: var(--shadow-lg);
 }
 
+.c-learn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  max-width: 320px;
+}
+
+.c-learn__track {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.c-learn__fill {
+  height: 100%;
+  background: var(--accent-bright);
+}
+
+.c-learn__text {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
 .c-think {
   width: fit-content;
   max-width: 100%;

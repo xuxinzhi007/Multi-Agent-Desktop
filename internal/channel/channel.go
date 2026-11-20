@@ -316,6 +316,83 @@ func (m *Manager) RemoveMember(agentId string) {
 	m.goSave()
 }
 
+// Ensure 按名字找到领域频道，没有就建一间空成员的讨论房。
+// 空成员是故意的：发到这里的是结论，不叫房间里的人接话。
+func (m *Manager) Ensure(name string) (Channel, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Channel{}, false
+	}
+	m.mu.RLock()
+	for _, id := range m.order {
+		ch := m.channels[id]
+		if ch != nil && ch.Name == name {
+			snap := ch.clone()
+			m.mu.RUnlock()
+			return snap, false
+		}
+	}
+	m.mu.RUnlock()
+	return m.Create("domain-"+name, name, nil, PolicyDiscuss), true
+}
+
+// Post 把一条结论写入频道，不广播给成员。
+func (m *Manager) Post(channelID, fromID, fromName, text string) (Message, error) {
+	msg, err := m.addMessage(channelID, fromID, fromName, text, nil)
+	if err != nil {
+		return Message{}, err
+	}
+	m.mu.Lock()
+	ch := m.channels[channelID]
+	if ch != nil {
+		for i := range ch.Messages {
+			if ch.Messages[i].ID == msg.ID {
+				ch.Messages[i].Kind = "post"
+				msg.Kind = "post"
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+	m.goSave()
+	return msg, nil
+}
+
+// RecentPosts 返回这个领域频道里最近的结论，跳过 exceptID 自己发的。
+func (m *Manager) RecentPosts(name, exceptID string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var ch *Channel
+	for _, id := range m.order {
+		if c := m.channels[id]; c != nil && c.Name == name {
+			ch = c
+			break
+		}
+	}
+	if ch == nil {
+		return nil
+	}
+	var lines []string
+	for i := len(ch.Messages) - 1; i >= 0 && len(lines) < limit; i-- {
+		msg := ch.Messages[i]
+		if msg.Kind != "post" || msg.FromID == exceptID {
+			continue
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			continue
+		}
+		lines = append(lines, msg.FromName+"："+text)
+	}
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	return lines
+}
+
 // AddMessage 添加消息到频道，返回创建的消息副本。
 func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (Message, error) {
 	return m.addMessage(channelId, fromId, fromName, text, nil)

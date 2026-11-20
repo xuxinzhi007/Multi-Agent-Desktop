@@ -59,24 +59,24 @@ func IsContextOverflow(msg string) bool {
 
 // Compact 把历史收进 budget 个 token 里。
 // budget <= 0 或本来就放得下时原样返回。
-// 系统提示留下，最近的整轮对话留下，更早的收成一条摘录。
+// 开头的系统提示原样留下，只有它自己已经超过预算才裁。
+// 从最近一组往前整组保留，直到尾部预算用完。更早的收成一条摘录。
 // 带工具调用的 assistant 和它后面的 tool 结果整组保留或整组摘掉，避免协议对不上。
+// 只有最近这一组自己就放不下时才裁它。当前用户消息在预算内时不会被裁。
 func Compact(msgs []Message, budget int) []Message {
 	if budget <= 0 || estMessages(msgs) <= budget {
 		return msgs
 	}
 	systems, rest := splitLeadingSystem(msgs)
-	sysBudget := budget / 5
-	if sysBudget < 128 {
-		sysBudget = 128
+	sysCost := estMessages(systems)
+	reserve := 128
+	if sysCost > budget-reserve {
+		systems = fitMessages(systems, budget-reserve)
+		sysCost = estMessages(systems)
 	}
-	if sysBudget > budget/2 {
-		sysBudget = budget / 2
-	}
-	systems = fitMessages(systems, sysBudget)
-	remain := budget - estMessages(systems)
-	if remain < 128 {
-		remain = 128
+	remain := budget - sysCost
+	if remain < reserve {
+		remain = reserve
 	}
 	summaryBudget := remain / 5
 	if summaryBudget > 400 {
@@ -87,18 +87,18 @@ func Compact(msgs []Message, budget int) []Message {
 	start := len(groups)
 	used := 0
 	for i := len(groups) - 1; i >= 0; i-- {
-		g := fitMessages(groups[i], 800)
-		cost := estMessages(g)
-		if used+cost > tailBudget {
+		cost := estMessages(groups[i])
+		if used+cost > tailBudget && start != len(groups) {
 			break
 		}
-		groups[i] = g
+		if used+cost > tailBudget {
+			groups[i] = fitMessages(groups[i], tailBudget)
+			used += estMessages(groups[i])
+			start = i
+			break
+		}
 		used += cost
 		start = i
-	}
-	if start == len(groups) && len(groups) > 0 {
-		start = len(groups) - 1
-		groups[start] = fitMessages(groups[start], tailBudget)
 	}
 	out := append([]Message{}, systems...)
 	if start > 0 {

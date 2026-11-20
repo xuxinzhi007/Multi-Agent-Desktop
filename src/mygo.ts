@@ -93,6 +93,14 @@ export interface AgentView {
   proposal?: string;
   /** ParentID 是创建它的会话。空表示用户自己建的。 */
   parentId?: string;
+  /** LearnAt 是已经收进摘要的消息条数。 */
+  learnAt?: number;
+  /** LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。 */
+  learnTotal?: number;
+  /** LearnBy 是写出摘要的子会话。空表示本会话自己整理。 */
+  learnBy?: string;
+  /** LearnBusy 为真时，摘要还在写。 */
+  learnBusy?: boolean;
 }
 
 export interface Block {

@@ -21,12 +21,15 @@ func distillKnowledge(m *Manager, agentID string, cfg llm.Config, messages []llm
 	if kb == nil {
 		return
 	}
-	distillKnowledgeWith(kb, m.Emit, llm.NewChatModel(cfg), messages, answer, func(id string) {
+	title, body, tags, saved := distillKnowledgeWith(kb, m.Emit, llm.NewChatModel(cfg), messages, answer, func(id string) {
 		_ = m.AttachNote(agentID, id)
 	})
+	if saved {
+		publishFinding(m, agentID, title, body, tags)
+	}
 }
 
-func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, messages []llm.Message, answer string, pin func(id string)) {
+func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, messages []llm.Message, answer string, pin func(id string)) (title, body string, tags []string, savedNote bool) {
 	if kb == nil || model == nil {
 		return
 	}
@@ -65,6 +68,7 @@ func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, me
 			pin(id)
 		}
 	}
+	return title, body, tags, true
 }
 
 const distillSystem = "你是知识库编辑。只根据给定的这一轮对话，判断有没有值得长期记住的内容：bug 根因、约定、架构事实、可复用的修法，以及用户习惯（篇幅、格式、称呼、回复渠道）。寒暄、操作流水、没证实的猜测不要记。只输出一个 JSON 对象，不要加别的文字。"

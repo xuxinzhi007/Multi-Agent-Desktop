@@ -45,13 +45,14 @@ func (t *listNotesTool) Execute(context.Context, json.RawMessage) tool.Result {
 }
 
 type saveNoteTool struct {
-	m *Manager
+	m       *Manager
+	agentID string
 }
 
 func (*saveNoteTool) Name() string { return "save_note" }
 
 func (*saveNoteTool) Description() string {
-	return "把一条笔记写入应用正在使用的知识库，界面会立刻更新。参数 title、body，可选 tags（逗号分隔）。不要直接改 knowledge.jsonl，那个文件不在当前界面上。"
+	return "把一条笔记写入知识库，并挂到当前会话上。之后的轮次会带上它。参数 title、body，可选 tags（逗号分隔）。不要直接改 knowledge.jsonl。"
 }
 
 func (*saveNoteTool) Writes() bool { return true }
@@ -99,5 +100,11 @@ func (t *saveNoteTool) Execute(_ context.Context, raw json.RawMessage) tool.Resu
 		return tool.Fail("写入知识库失败：%v", err)
 	}
 	t.m.Emit("knowledge.changed", saved)
+	if t.agentID != "" {
+		if id, _ := saved["id"].(string); id != "" {
+			_ = t.m.AttachNote(t.agentID, id)
+		}
+		publishFinding(t.m, t.agentID, in.Title, in.Body, tags)
+	}
 	return tool.OK("已写入知识库：「" + in.Title + "」")
 }

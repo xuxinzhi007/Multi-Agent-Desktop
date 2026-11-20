@@ -145,7 +145,7 @@ type Event struct {
 	// 本轮的上下文占用，只在 iter.start 上填。
 	//
 	// CtxUsed   压缩前原始历史的估算 token
-	// CtxBudget 超过这个值就会触发 Compact（窗口七成再减 800）
+	// CtxBudget 超过这个值就会触发 Compact（系统提示原文 + 最近约 8000 token）
 	// CtxLimit  模型窗口上限，0 表示未配置
 	//
 	// 三个值全部由后端算好下发，前端不许自己估：前端的 messages 既不含
@@ -170,7 +170,7 @@ type Runner struct {
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
-	// ContextLimit 是模型窗口。大于 0 时，发出去的历史会先压缩到窗口的七成左右。
+	// ContextLimit 是模型窗口。发出去的历史先收到最近大约 8000 token，系统提示另算。
 	ContextLimit int
 	// SaveImage 把工具交回的画面存成文件，返回 id。空则画面不进历史。
 	SaveImage func([]byte) (string, error)
@@ -393,21 +393,33 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 	}
 }
 
-// context 组装这一轮送给模型的消息。
-//
-// 系统提示每次重新放，而不是只在第一条：模型在长对话里
-// 会逐渐「忘记」开头的约束，每轮重申是最省的缓解手段。
+// promptBudget 是这一轮请求的上限。
+// 最近对话大约 8000 token，摘录再留 400。系统提示按原文长度另加。
+// 没配窗口时不裁。算出来比窗口还大时，退回窗口的七成。
 func (r *Runner) promptBudget() int {
 	if r.ContextLimit <= 0 {
 		return 0
 	}
-	n := r.ContextLimit * 70 / 100
-	n -= 800
-	if n < 512 {
-		n = 512
+	const recent = 8000
+	const summary = 400
+	sys := 0
+	if r.System != "" {
+		sys = llm.EstMessages([]llm.Message{{Role: "system", Content: r.System}})
+	}
+	n := sys + recent + summary
+	if n > r.ContextLimit {
+		n = r.ContextLimit * 70 / 100
+		if n < 512 {
+			n = 512
+		}
 	}
 	return n
 }
+
+// context 组装这一轮送给模型的消息。
+//
+// 系统提示每次重新放，而不是只在第一条：模型在长对话里
+// 会逐渐「忘记」开头的约束，每轮重申是最省的缓解手段。
 
 func (r *Runner) context(st *State) []llm.Message {
 	out := make([]llm.Message, 0, len(st.Messages)+1)

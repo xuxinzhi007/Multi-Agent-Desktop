@@ -260,7 +260,18 @@ export function useBackend() {
       setState((s) => ({
         ...s,
         agents: s.agents.map((x) =>
-          x.id === a.id ? { ...x, name: a.name, role: a.role, proposal: a.proposal } : x,
+          x.id === a.id
+            ? {
+                ...x,
+                name: a.name,
+                role: a.role,
+                proposal: a.proposal,
+                learnAt: a.learnAt,
+                learnTotal: a.learnTotal,
+                learnBy: a.learnBy,
+                learnBusy: a.learnBusy,
+              }
+            : x,
         ),
       })),
     )

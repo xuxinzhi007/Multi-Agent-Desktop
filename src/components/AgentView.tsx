@@ -374,6 +374,27 @@ function Thinking({
   )
 }
 
+function LearnProgress({ agent }: { agent: Agent }) {
+  const total = agent.learnTotal ?? 0
+  if (total <= 0) return null
+  const at = Math.min(agent.learnAt ?? 0, total)
+  const pct = Math.round((at / total) * 100)
+  const who = agent.learnBy || '本会话'
+  const text = agent.learnBusy
+    ? `学习 ${at}/${total} · ${who}整理中`
+    : at >= total
+      ? `更早的 ${total} 条已整理${agent.learnBy ? ` · ${agent.learnBy}` : ''}`
+      : `学习 ${at}/${total}`
+  return (
+    <div className="c-learn">
+      <div className="c-learn__text">{text}</div>
+      <div className="c-learn__track">
+        <div className="c-learn__fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function ProfileHead({
   agent,
   onProfile,
@@ -433,6 +454,7 @@ function ProfileHead({
           width: 300,
         }}
       />
+      <LearnProgress agent={agent} />
       {agent.proposal && !agent.busy && (
         <button
           type="button"
@@ -769,11 +791,11 @@ export default function AgentView(p: Props) {
       {/* 头部 */}
       <header
         style={{
-          height: 'var(--header-h)',
+          minHeight: 'var(--header-h)',
           display: 'flex',
           alignItems: 'center',
           gap: 'var(--space-2)',
-          padding: '0 var(--space-4)',
+          padding: '8px var(--space-4)',
           borderBottom: '1px solid var(--border-subtle)',
           flexShrink: 0,
         }}
