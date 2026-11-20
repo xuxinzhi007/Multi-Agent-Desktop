@@ -129,7 +129,7 @@ func (s *API) AcceptScreenHint() error {
 	if err != nil {
 		return err
 	}
-	text := fmt.Sprintf("按这条建议直接做，做完用一句话说明结果。\n建议：%s\n做法：%s\n前台应用：%s\n如果前台是浏览器，用 web 工具操作这个应用里的当前页面，app 参数就填这个应用名。不要只给出手动步骤。", got.Text, got.Action, got.App)
+	text := fmt.Sprintf("按这条建议直接做，做完用一句话说明结果。\n建议：%s\n做法：%s\n前台应用：%s\n如果前台是浏览器，用 web 工具在应用内置浏览器里打开并操作当前页面。不要只给出手动步骤。", got.Text, got.Action, got.App)
 	return s.mgr.Prompt(context.Background(), agent.PromptRequest{AgentID: id, Text: text})
 }
 

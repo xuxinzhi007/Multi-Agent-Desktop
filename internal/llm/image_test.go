@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -43,5 +44,29 @@ func TestWireSendsImageParts(t *testing.T) {
 	}
 	if !strings.Contains(s, base64.StdEncoding.EncodeToString(png)) {
 		t.Fatal("pixels missing")
+	}
+}
+
+func TestImageRefusalStillAnswersText(t *testing.T) {
+	calls := 0
+	msgs := []Message{{Role: "user", Content: "看这个报错", Blocks: []Block{{ID: "i", Data: []byte{1}}}}}
+	turn, err := AnswerDespiteImages(msgs, func(in []Message) (Turn, error) {
+		calls++
+		if messagesHaveImage(in) {
+			return Turn{}, fmt.Errorf("llm: image_url is not supported")
+		}
+		if in[0].Content != "看这个报错" {
+			t.Fatalf("text = %q", in[0].Content)
+		}
+		return Turn{Text: "先看日志"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if !strings.Contains(turn.Text, "这张图没有被这个模型收下") || !strings.Contains(turn.Text, "先看日志") {
+		t.Fatalf("text = %q", turn.Text)
 	}
 }

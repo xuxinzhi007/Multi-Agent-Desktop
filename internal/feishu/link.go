@@ -452,11 +452,24 @@ var (
 )
 
 func ReplyText(ctx context.Context, appID, secret, messageID, text string) (string, error) {
-	token, err := tenantToken(ctx, appID, secret)
+	body, err := replyCard(text)
 	if err != nil {
 		return "", err
 	}
-	body, err := replyCard(text)
+	return postReply(ctx, appID, secret, messageID, body)
+}
+
+// ReplyWorking 回复一张带停止按钮的卡片，返回这张卡片的 message_id。
+func ReplyWorking(ctx context.Context, appID, secret, messageID, text, stopID string) (string, error) {
+	body, err := cardMessage(text, stopID)
+	if err != nil {
+		return "", err
+	}
+	return postReply(ctx, appID, secret, messageID, body)
+}
+
+func postReply(ctx context.Context, appID, secret, messageID string, body []byte) (string, error) {
+	token, err := tenantToken(ctx, appID, secret)
 	if err != nil {
 		return "", err
 	}
@@ -486,6 +499,47 @@ func ReplyText(ctx context.Context, appID, secret, messageID, text string) (stri
 		return "", fmt.Errorf("feishu reply %s: %s", messageID, out.Msg)
 	}
 	return out.Data.MessageID, nil
+}
+
+// PatchCard 更新已经发出的那张卡片。stopID 为空时去掉停止按钮。
+func PatchCard(ctx context.Context, appID, secret, messageID, text, stopID string) error {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return err
+	}
+	card, err := cardBody(text, stopID)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(struct {
+		Content string `json:"content"`
+	}{Content: string(card)})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, feishuHost+"/open-apis/im/v1/messages/"+url.PathEscape(messageID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("feishu card %s: %w", messageID, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("feishu card %s: %s", messageID, strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return fmt.Errorf("feishu card %s: %s", messageID, out.Msg)
+	}
+	return nil
 }
 
 // BotOpenID 读取这个机器人自己的 open_id，用来判断群里 @ 的是不是它。
@@ -604,36 +658,51 @@ func History(ctx context.Context, appID, secret, chatID string, since int64) ([]
 
 // replyCard 把回复装成飞书消息卡片。卡片里的 markdown 会排版，纯文本会把 ** 原样显示。
 func replyCard(text string) ([]byte, error) {
+	return cardMessage(text, "")
+}
+
+func cardMessage(text, stopID string) ([]byte, error) {
+	card, err := cardBody(text, stopID)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		MsgType string `json:"msg_type"`
+		Content string `json:"content"`
+	}{MsgType: "interactive", Content: string(card)})
+}
+
+func cardBody(text, stopID string) ([]byte, error) {
 	rs := []rune(strings.TrimSpace(text))
 	if len(rs) > 4000 {
 		text = string(rs[:4000]) + "…"
 	} else {
 		text = string(rs)
 	}
-	card, err := json.Marshal(struct {
-		Config struct {
-			WideScreenMode bool `json:"wide_screen_mode"`
-		} `json:"config"`
-		Elements []struct {
-			Tag     string `json:"tag"`
-			Content string `json:"content"`
-		} `json:"elements"`
-	}{
-		Config: struct {
-			WideScreenMode bool `json:"wide_screen_mode"`
-		}{WideScreenMode: true},
-		Elements: []struct {
-			Tag     string `json:"tag"`
-			Content string `json:"content"`
-		}{{Tag: "markdown", Content: text}},
+	elements := []any{
+		map[string]any{"tag": "markdown", "content": text},
+	}
+	if stopID != "" {
+		elements = append(elements, map[string]any{
+			"tag": "action",
+			"actions": []any{
+				map[string]any{
+					"tag":   "button",
+					"type":  "danger",
+					"text":  map[string]any{"tag": "plain_text", "content": "停止"},
+					"value": map[string]string{"act": "stop", "id": stopID},
+				},
+			},
+		})
+	}
+	card, err := json.Marshal(map[string]any{
+		"config":   map[string]any{"wide_screen_mode": true, "update_multi": true},
+		"elements": elements,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("feishu card: %w", err)
 	}
-	return json.Marshal(struct {
-		MsgType string `json:"msg_type"`
-		Content string `json:"content"`
-	}{MsgType: "interactive", Content: string(card)})
+	return card, nil
 }
 
 // FetchMessage 读取被回复的那条消息正文。机器人自己发过的、以及会话里它能看见的，都走这里。

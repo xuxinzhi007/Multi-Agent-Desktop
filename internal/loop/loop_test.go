@@ -586,6 +586,34 @@ func TestStreamCancelDoesNotInvoke(t *testing.T) {
 	}
 }
 
+func TestKeepLatestImageDropsOlderShots(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "tool", Blocks: []llm.Block{{ID: "old", MIME: "image/png", Data: []byte{1}}}},
+		{Role: "user", Content: "继续"},
+		{Role: "tool", Blocks: []llm.Block{{ID: "new", MIME: "image/png", Data: []byte{2}}}},
+	}
+	keepLatestImage(msgs)
+	if len(msgs[0].Blocks) != 0 || msgs[2].Blocks[0].ID != "new" {
+		t.Fatalf("messages = %+v", msgs)
+	}
+}
+
+func TestToolMessageKeepsPageImage(t *testing.T) {
+	msg := toolMessage(tool.Call{ID: "c1", Name: "web"}, tool.Result{
+		Status:  tool.StatusOK,
+		Content: `{"url":"https://example.com"}`,
+		Image:   []byte{1, 2, 3},
+	}, func(png []byte) (string, error) {
+		if len(png) != 3 {
+			t.Fatalf("png = %d", len(png))
+		}
+		return "abc", nil
+	})
+	if msg.ToolID != "c1" || len(msg.Blocks) != 1 || msg.Blocks[0].ID != "abc" || msg.Blocks[0].MIME != "image/png" {
+		t.Fatalf("message = %+v", msg)
+	}
+}
+
 type countingTool struct {
 	name string
 	n    *atomic.Int32

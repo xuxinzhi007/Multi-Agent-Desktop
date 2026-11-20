@@ -3,28 +3,57 @@ package browser
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
 )
 
 // Op 是对内置浏览器页面的一次操作。脚本由这里生成，不接受模型传来的任意 JS。
 type Op struct {
-	Op    string `json:"op"`
-	App   string `json:"app"`
-	URL   string `json:"url"`
-	Text  string `json:"text"`
-	Value string `json:"value"`
-	Key   string `json:"key"`
+	Op          string   `json:"op"`
+	URL         string   `json:"url,omitempty"`
+	Ref         string   `json:"ref,omitempty"`
+	X           *float64 `json:"x,omitempty"`
+	Y           *float64 `json:"y,omitempty"`
+	Text        string   `json:"text,omitempty"`
+	Value       string   `json:"value,omitempty"`
+	Key         string   `json:"key,omitempty"`
+	Mods        []string `json:"mods,omitempty"`
+	DX          *float64 `json:"dx,omitempty"`
+	DY          *float64 `json:"dy,omitempty"`
+	URLContains string   `json:"urlContains,omitempty"`
+	TimeoutMs   int      `json:"timeoutMs,omitempty"`
 }
 
 func Normalize(op Op) (Op, error) {
 	op.Op = strings.ToLower(strings.TrimSpace(op.Op))
-	op.App = strings.TrimSpace(op.App)
 	op.Text = clip(strings.TrimSpace(op.Text), 80)
-	op.Value = clip(op.Value, 500)
+	op.Value = clip(op.Value, 2000)
 	op.Key = strings.TrimSpace(op.Key)
+	op.URLContains = strings.TrimSpace(op.URLContains)
+	if op.Ref != "" {
+		op.Ref = strings.TrimSpace(op.Ref)
+		if !validRef(op.Ref) {
+			return Op{}, errors.New("ref 只能是 snapshot 给出的 e1 这种编号")
+		}
+	}
+	mods, err := normMods(op.Mods)
+	if err != nil {
+		return Op{}, err
+	}
+	op.Mods = mods
+	if op.TimeoutMs <= 0 {
+		op.TimeoutMs = 15000
+	}
+	if op.TimeoutMs > 20000 {
+		op.TimeoutMs = 20000
+	}
 	switch op.Op {
 	case "read":
+		op.Op = "snapshot"
+		return op, nil
+	case "snapshot", "back", "forward", "reload":
 		return op, nil
 	case "open":
 		u, err := CheckURL(op.URL)
@@ -33,9 +62,16 @@ func Normalize(op Op) (Op, error) {
 		}
 		op.URL = u
 		return op, nil
-	case "click":
-		if op.Text == "" {
-			return Op{}, errors.New("click 需要 text，写成页面上看得见的文字")
+	case "move", "click", "double_click", "right_click", "down":
+		if op.Ref == "" && !hasPoint(op) {
+			return Op{}, errors.New(op.Op + " 需要 ref 或坐标")
+		}
+		return op, nil
+	case "up":
+		return op, nil
+	case "scroll":
+		if op.Ref == "" && op.DX == nil && op.DY == nil {
+			return Op{}, errors.New("scroll 需要 ref 或 dx、dy")
 		}
 		return op, nil
 	case "type":
@@ -43,16 +79,80 @@ func Normalize(op Op) (Op, error) {
 			return Op{}, errors.New("type 需要 value")
 		}
 		return op, nil
-	case "press":
-		switch op.Key {
-		case "Enter", "Escape", "Tab":
-			return op, nil
-		default:
-			return Op{}, errors.New("press 只接受 Enter、Escape、Tab")
+	case "key", "press":
+		op.Op = "key"
+		if !validKey(op.Key) {
+			return Op{}, errors.New("key 只能是 Enter、Escape、Tab、方向键、退格或单个可见字符")
 		}
+		return op, nil
+	case "wait":
+		if op.Text == "" && op.URLContains == "" {
+			op.Text = ""
+		}
+		return op, nil
 	default:
-		return Op{}, errors.New("op 只能是 read、open、click、type、press")
+		return Op{}, errors.New("op 不在页面协议里")
 	}
+}
+
+func releaseBefore(op string) bool {
+	switch op {
+	case "snapshot", "read", "move", "up", "wait":
+		return false
+	default:
+		return true
+	}
+}
+
+func hasPoint(op Op) bool {
+	return op.X != nil && op.Y != nil
+}
+
+func validRef(s string) bool {
+	if len(s) < 2 || s[0] != 'e' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validKey(k string) bool {
+	switch k {
+	case "Enter", "Escape", "Tab", "Backspace", "Delete",
+		"ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+		"Home", "End", "PageUp", "PageDown":
+		return true
+	}
+	r := []rune(k)
+	return len(r) == 1 && unicode.IsPrint(r[0]) && r[0] != '\u007f'
+}
+
+func normMods(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range in {
+		m = strings.ToLower(strings.TrimSpace(m))
+		switch m {
+		case "cmd", "meta":
+			m = "meta"
+		case "ctrl", "shift", "alt":
+		default:
+			return nil, fmt.Errorf("不认识的修饰键 %s", m)
+		}
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 func CheckURL(raw string) (string, error) {
@@ -63,17 +163,14 @@ func CheckURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// PageJS 是在页面里执行的固定脚本。
 func PageJS(op Op) (string, error) {
 	return pageScript(op, "act")
 }
 
-// ShowJS 只在页面上标出接管和目标，不点击。给浏览器一次重绘的时间。
 func ShowJS(op Op) (string, error) {
 	return pageScript(op, "show")
 }
 
-// MoveJS 把页面上的圆点移到目标中心。调用方要等这次重绘结束再点。
 func MoveJS(op Op) (string, error) {
 	return pageScript(op, "move")
 }
@@ -83,8 +180,11 @@ func pageScript(op Op, phase string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if op.Op == "open" {
+	switch op.Op {
+	case "open", "back", "forward", "reload", "wait":
 		return "", nil
+	case "snapshot":
+		return snapshotJS(), nil
 	}
 	caption, find := mark(op)
 	action := ""
@@ -137,79 +237,191 @@ func pageScript(op Op, phase string) (string, error) {
 }
 
 func mark(op Op) (string, string) {
+	label := op.Ref
+	if label == "" && hasPoint(op) {
+		label = fmt.Sprintf("%.0f,%.0f", *op.X, *op.Y)
+	}
 	switch op.Op {
-	case "click":
-		return "Agent 正在点击「" + op.Text + "」", findClick(op.Text)
+	case "click", "double_click", "right_click", "down", "move", "up":
+		return "Agent 正在操作 " + label, findTarget(op)
 	case "type":
-		return "Agent 正在输入", findType(op.Text)
-	case "press":
-		return "Agent 正在按 " + op.Key, `const target = document.activeElement || document.body;`
+		return "Agent 正在输入", findTarget(op)
+	case "key":
+		return "Agent 正在按 " + op.Key, findTarget(op)
+	case "scroll":
+		return "Agent 正在滚动", findTarget(op)
 	default:
 		return "Agent 正在看这个页面", `const target = null;`
 	}
 }
 
-func findClick(text string) string {
-	return `const want = ` + jsString(text) + `;
-  const sel = 'a,button,input,textarea,select,summary,[role="button"],[role="link"],[role="tab"]';
-  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  const nodes = Array.from(document.querySelectorAll(sel));
-  const target = nodes.find((n) => norm(n.innerText || n.value || n.getAttribute("aria-label") || n.getAttribute("placeholder")).includes(want));`
+func findTarget(op Op) string {
+	if op.Ref != "" {
+		return `const target = document.querySelector("[data-mad-ref=" + ` + jsString(op.Ref) + ` + "]");`
+	}
+	if hasPoint(op) {
+		return fmt.Sprintf("const target = document.elementFromPoint(%g, %g);", *op.X, *op.Y)
+	}
+	if op.Op == "up" {
+		return `const p = window.__madPointer || {x:0,y:0};
+  const target = document.elementFromPoint(p.x, p.y) || document.body;`
+	}
+	return `const target = document.activeElement || document.body;`
 }
 
-func findType(text string) string {
-	return `const want = ` + jsString(text) + `;
-  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  const nodes = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'));
-  const target = want ? nodes.find((n) => norm(n.getAttribute("aria-label") || n.getAttribute("placeholder") || n.name || n.id || "").includes(want)) : document.activeElement;`
+func pointJS(op Op) string {
+	if hasPoint(op) {
+		return fmt.Sprintf("const x = %g; const y = %g;", *op.X, *op.Y)
+	}
+	return `const box = target.getBoundingClientRect();
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;`
 }
 
 func actBody(op Op) string {
 	switch op.Op {
-	case "read":
-		return `const flutterNode = document.querySelector("flt-glass-pane, flt-semantics-placeholder, flt-semantics-host, flt-scene-host, script[src*='flutter.js'], script[src*='main.dart.js']");
-  const placeholder = document.querySelector("flt-semantics-placeholder");
-  if (placeholder) placeholder.click();
-  const host = document.querySelector("flt-semantics-host");
-  const raw = ((host && host.innerText) || (document.body && document.body.innerText) || "");
-  const text = raw.replace(/Enable accessibility/gi, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
-  return JSON.stringify({url: location.href, title: document.title, text, flutter: !!flutterNode});`
-	case "click":
-		return `if (!target) return "not-found";
-  const box = target.getBoundingClientRect();
-  const x = box.left + box.width / 2;
-  const y = box.top + box.height / 2;
-  const opts = {bubbles:true, cancelable:true, clientX:x, clientY:y, button:0, view:window};
-  for (const type of ["mousemove", "mousedown", "mouseup"]) {
-    target.dispatchEvent(new MouseEvent(type, opts));
-  }
-  target.click();
-  if (bar) bar.textContent = "Agent 已点击";
-  return "clicked";`
+	case "click", "double_click", "right_click", "down", "up", "move":
+		return pointerBody(op)
+	case "scroll":
+		dx, dy := 0.0, 360.0
+		if op.DX != nil {
+			dx = *op.DX
+		}
+		if op.DY != nil {
+			dy = *op.DY
+		}
+		if op.Ref != "" {
+			return `if (!target) return "not-found";
+  target.scrollIntoView({block:"center", inline:"nearest"});
+  return "scrolled";`
+		}
+		return `window.scrollBy(` + fmt.Sprintf("%g", dx) + `, ` + fmt.Sprintf("%g", dy) + `);
+  return "scrolled";`
 	case "type":
 		return `if (!target) return "not-found";
   const value = ` + jsString(op.Value) + `;
   target.focus();
   if ("value" in target) {
-    target.value = value;
+    const proto = target instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(target, value);
+    else target.value = value;
     target.dispatchEvent(new Event("input", {bubbles:true}));
     target.dispatchEvent(new Event("change", {bubbles:true}));
   } else {
     target.textContent = value;
+    target.dispatchEvent(new InputEvent("input", {bubbles:true, data: value}));
   }
   return "typed";`
-	case "press":
-		return `const key = ` + jsString(op.Key) + `;
-  const el = target || document.activeElement || document.body;
-  el.dispatchEvent(new KeyboardEvent("keydown", {key, bubbles:true}));
-  if (key === "Enter" && el.form) {
-    if (el.form.requestSubmit) el.form.requestSubmit();
-    else el.form.submit();
-  }
-  return "pressed";`
+	case "key":
+		return keyBody(op)
 	default:
 		return `return "ok";`
 	}
+}
+
+func pointerBody(op Op) string {
+	button := "0"
+	kind := op.Op
+	if op.Op == "right_click" {
+		button = "2"
+	}
+	return `if (!target) return "not-found";
+  ` + pointJS(op) + `
+  const opts = {bubbles:true, cancelable:true, clientX:x, clientY:y, button:` + button + `, view:window};
+  const fire = (type, extra) => target.dispatchEvent(new MouseEvent(type, Object.assign({}, opts, extra || {})));
+  const kind = ` + jsString(kind) + `;
+  if (kind === "move") {
+    fire("mousemove");
+    window.__madPointer = {x, y, down: !!(window.__madPointer && window.__madPointer.down)};
+    return "moved";
+  }
+  if (kind === "down") {
+    fire("mousedown");
+    window.__madPointer = {x, y, down: true};
+    return "down";
+  }
+  if (kind === "up") {
+    fire("mouseup");
+    window.__madPointer = {x, y, down: false};
+    return "up";
+  }
+  if (kind === "right_click") {
+    fire("mousedown");
+    fire("mouseup");
+    fire("contextmenu");
+    return "clicked";
+  }
+  fire("mousemove");
+  fire("mousedown");
+  fire("mouseup");
+  target.click();
+  if (kind === "double_click") {
+    fire("mousedown");
+    fire("mouseup");
+    target.dispatchEvent(new MouseEvent("dblclick", opts));
+  }
+  window.__madPointer = {x, y, down: false};
+  if (bar) bar.textContent = "Agent 已点击";
+  return "clicked";`
+}
+
+func keyBody(op Op) string {
+	ctrl, shift, alt, meta := "false", "false", "false", "false"
+	for _, m := range op.Mods {
+		switch m {
+		case "ctrl":
+			ctrl = "true"
+		case "shift":
+			shift = "true"
+		case "alt":
+			alt = "true"
+		case "meta":
+			meta = "true"
+		}
+	}
+	submit := ""
+	if op.Key == "Enter" && len(op.Mods) == 0 {
+		submit = `
+  if (el.form) {
+    if (el.form.requestSubmit) el.form.requestSubmit();
+    else el.form.submit();
+  }`
+	}
+	return `const key = ` + jsString(op.Key) + `;
+  const el = target || document.activeElement || document.body;
+  const opts = {key, bubbles:true, cancelable:true, ctrlKey:` + ctrl + `, shiftKey:` + shift + `, altKey:` + alt + `, metaKey:` + meta + `};
+  el.dispatchEvent(new KeyboardEvent("keydown", opts));
+  el.dispatchEvent(new KeyboardEvent("keyup", opts));` + submit + `
+  return "pressed";`
+}
+
+func snapshotJS() string {
+	return `(() => {
+  const flutterNode = document.querySelector("flt-glass-pane, flt-semantics-placeholder, flt-semantics-host, flt-scene-host, script[src*='flutter.js'], script[src*='main.dart.js']");
+  const placeholder = document.querySelector("flt-semantics-placeholder");
+  if (placeholder) placeholder.click();
+  const host = document.querySelector("flt-semantics-host");
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  document.querySelectorAll("[data-mad-ref]").forEach((n) => n.removeAttribute("data-mad-ref"));
+  const sel = 'a,button,input,textarea,select,option,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="radio"],[contenteditable="true"]';
+  const nodes = Array.from(document.querySelectorAll(sel)).filter((n) => {
+    const r = n.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const style = getComputedStyle(n);
+    return style.visibility !== "hidden" && style.display !== "none";
+  });
+  const elements = [];
+  nodes.slice(0, 80).forEach((n, i) => {
+    const ref = "e" + (i + 1);
+    n.setAttribute("data-mad-ref", ref);
+    const name = norm(n.innerText || n.value || n.getAttribute("aria-label") || n.getAttribute("placeholder") || n.getAttribute("name") || "");
+    elements.push({ref, role: n.getAttribute("role") || n.tagName.toLowerCase(), name: name.slice(0, 80)});
+  });
+  const raw = ((host && host.innerText) || (document.body && document.body.innerText) || "");
+  const text = raw.replace(/Enable accessibility/gi, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+  return JSON.stringify({url: location.href, title: document.title, text, flutter: !!flutterNode, elements});
+})()`
 }
 
 func jsString(s string) string {

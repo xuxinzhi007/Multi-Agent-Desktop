@@ -22,9 +22,12 @@ type Line struct {
 
 // Room 是一个飞书会话的记录，给界面看。
 type Room struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Messages []Line `json:"messages"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind,omitempty"`
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	Messages  []Line `json:"messages"`
 }
 
 // Log 按飞书会话记下消息。同一条 message_id 只留一次。
@@ -36,9 +39,11 @@ type Log struct {
 }
 
 type room struct {
-	Name  string
-	Lines []Line
-	Seen  map[string]struct{}
+	Name    string
+	Kind    string
+	AgentID string
+	Lines   []Line
+	Seen    map[string]struct{}
 }
 
 func NewLog() *Log {
@@ -77,6 +82,12 @@ func (l *Log) load() {
 		if r.Name != "" {
 			dst.Name = r.Name
 		}
+		if r.Kind != "" {
+			dst.Kind = r.Kind
+		}
+		if r.AgentID != "" {
+			dst.AgentID = r.AgentID
+		}
 		for _, line := range r.Messages {
 			l.addLocked(line)
 		}
@@ -113,6 +124,47 @@ func (l *Log) Name(id, name string) {
 	l.room(id).Name = strings.TrimSpace(name)
 	l.mu.Unlock()
 	l.save()
+}
+
+// Kind 记下这是群还是私聊。
+func (l *Log) Kind(id, kind string) {
+	if l == nil || id == "" || strings.TrimSpace(kind) == "" {
+		return
+	}
+	l.mu.Lock()
+	r := l.room(id)
+	if r.Kind == kind {
+		l.mu.Unlock()
+		return
+	}
+	r.Kind = kind
+	l.mu.Unlock()
+	l.save()
+}
+
+// Bind 指定这个飞书会话由哪个本机会话回答。
+func (l *Log) Bind(id, agentID string) {
+	if l == nil || id == "" || strings.TrimSpace(agentID) == "" {
+		return
+	}
+	l.mu.Lock()
+	l.room(id).AgentID = strings.TrimSpace(agentID)
+	l.mu.Unlock()
+	l.save()
+}
+
+// Agent 返回单独指定的本机会话。空表示沿用默认。
+func (l *Log) Agent(id string) string {
+	if l == nil || id == "" {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.rooms[id]
+	if r == nil {
+		return ""
+	}
+	return r.AgentID
 }
 
 // Add 写入一条。已经有同一 ID 时返回 false。
@@ -196,12 +248,8 @@ func (l *Log) Rooms() []Room {
 	out := make([]Room, 0, len(l.order))
 	for _, id := range l.order {
 		r := l.rooms[id]
-		name := r.Name
-		if name == "" {
-			name = "飞书会话"
-		}
 		lines := append([]Line(nil), r.Lines...)
-		out = append(out, Room{ID: id, Name: name, Messages: lines})
+		out = append(out, Room{ID: id, Name: roomTitle(r), Kind: r.Kind, AgentID: r.AgentID, Messages: lines})
 	}
 	return out
 }
@@ -244,13 +292,34 @@ func (l *Log) Prompt(chatID, name string) string {
 	return strings.TrimSpace(b.String())
 }
 
+func roomTitle(r *room) string {
+	if strings.TrimSpace(r.Name) != "" {
+		return strings.TrimSpace(r.Name)
+	}
+	if n := len(r.Lines); n > 0 {
+		s := strings.TrimSpace(r.Lines[n-1].Text)
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[:i]
+		}
+		s = strings.Join(strings.Fields(s), " ")
+		rs := []rune(s)
+		if len(rs) > 32 {
+			s = string(rs[:32]) + "…"
+		}
+		if s != "" {
+			return s
+		}
+	}
+	return "飞书会话"
+}
+
 func (l *Log) save() {
 	l.mu.Lock()
 	path := l.path
 	rooms := make([]Room, 0, len(l.order))
 	for _, id := range l.order {
 		r := l.rooms[id]
-		rooms = append(rooms, Room{ID: id, Name: r.Name, Messages: append([]Line(nil), r.Lines...)})
+		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, Messages: append([]Line(nil), r.Lines...)})
 	}
 	l.mu.Unlock()
 	if path == "" {

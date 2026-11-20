@@ -1125,12 +1125,12 @@ func TestGroupBlindDoesNotPost(t *testing.T) {
 		MIME: "image/png",
 		Data: base64.StdEncoding.EncodeToString(png),
 	}})
-	if err == nil || !strings.Contains(err.Error(), "这个会话还不能看图") {
-		t.Fatalf("err = %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	got, _ := s.channels.Get(ch.ID)
-	if len(got.Messages) != 0 {
-		t.Fatalf("发出了 %d 条", len(got.Messages))
+	if len(got.Messages) == 0 {
+		t.Fatal("图和文字没有发出去")
 	}
 }
 

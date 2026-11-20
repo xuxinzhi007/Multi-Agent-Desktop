@@ -172,6 +172,8 @@ type Runner struct {
 	MaxRoundsWithoutProgress int
 	// ContextLimit 是模型窗口。大于 0 时，发出去的历史会先压缩到窗口的七成左右。
 	ContextLimit int
+	// SaveImage 把工具交回的画面存成文件，返回 id。空则画面不进历史。
+	SaveImage func([]byte) (string, error)
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -365,12 +367,8 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				anySuccess = true
 			}
 
-			st.Messages = append(st.Messages, llm.Message{
-				Role:      "tool",
-				Content:   formatObservation(c.Name, res),
-				ToolID:    c.ID,
-				Timestamp: time.Now().Unix(),
-			})
+			st.Messages = append(st.Messages, toolMessage(c, res, r.SaveImage))
+			keepLatestImage(st.Messages)
 			r.emit(Event{
 				Kind: "tool.end", Phase: st.Phase, Iter: st.Iteration,
 				Tool: c.Name, Status: res.Status, Content: res.Content, Result: &res,
@@ -477,6 +475,45 @@ func (r *Runner) checkpoint(_ context.Context, st *State) {
 //
 // 围栏不是装饰：模型需要明确的边界才能区分「指令」和「数据」。
 // 没有围栏时，工具输出里的一句「忽略之前的指令」就是一次注入。
+func toolMessage(c tool.Call, res tool.Result, save func([]byte) (string, error)) llm.Message {
+	msg := llm.Message{
+		Role:      "tool",
+		Content:   formatObservation(c.Name, res),
+		ToolID:    c.ID,
+		Timestamp: time.Now().Unix(),
+	}
+	if len(res.Image) == 0 || save == nil {
+		return msg
+	}
+	id, err := save(res.Image)
+	if err != nil || id == "" {
+		return msg
+	}
+	msg.Blocks = []llm.Block{{
+		ID:   id,
+		MIME: "image/png",
+		Data: append([]byte(nil), res.Image...),
+	}}
+	return msg
+}
+
+func keepLatestImage(msgs []llm.Message) {
+	last := -1
+	for i := range msgs {
+		if msgs[i].Role == "tool" && len(msgs[i].Blocks) > 0 {
+			last = i
+		}
+	}
+	if last < 0 {
+		return
+	}
+	for i := range msgs {
+		if msgs[i].Role == "tool" && i != last {
+			msgs[i].Blocks = nil
+		}
+	}
+}
+
 func formatObservation(name string, res tool.Result) string {
 	return fmt.Sprintf(
 		"<tool_output name=%q status=%q trust=\"untrusted\">\n%s\n</tool_output>",
@@ -498,20 +535,25 @@ func callHint(c tool.Call) string {
 	}
 	if c.Name == "web" {
 		op, _ := m["op"].(string)
-		text, _ := m["text"].(string)
+		ref, _ := m["ref"].(string)
 		switch op {
-		case "click":
-			if text != "" {
-				return "点击「" + clipHint(text) + "」"
+		case "click", "double_click", "right_click":
+			if ref != "" {
+				return "点击 " + ref
 			}
+			return "点击"
 		case "type":
 			return "输入"
-		case "press":
+		case "key", "press":
 			return "按键"
 		case "open":
 			return "打开页面"
-		case "read":
-			return "读取页面"
+		case "snapshot", "read":
+			return "查看页面"
+		case "scroll":
+			return "滚动"
+		case "wait":
+			return "等待"
 		}
 		return "操作网页"
 	}

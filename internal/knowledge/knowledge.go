@@ -451,6 +451,42 @@ func trimByBudget(notes []Note, recentText string, budget int) []Note {
 	return out
 }
 
+func sharesText(role, hay string) bool {
+	br := []rune(strings.ToLower(strings.TrimSpace(role)))
+	if len(br) < 2 || hay == "" {
+		return false
+	}
+	for n := min(8, len(br)); n >= 2; n-- {
+		for i := 0; i+n <= len(br); i++ {
+			if strings.Contains(hay, string(br[i:i+n])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func bioTokens(role string) []string {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(role, func(r rune) bool {
+		return r == ' ' || r == '，' || r == '。' || r == '、' || r == '/' || r == '：' || r == ':'
+	})
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if len([]rune(p)) < 2 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
 // MatchNotesForAgent 根据 agent 角色匹配相关知识。
 func MatchNotesForAgent(role string, notes []Note) []Note {
 	var matched []Note
@@ -474,6 +510,9 @@ func MatchNotesForAgent(role string, notes []Note) []Note {
 	}
 
 	keywords := roleKeywords[role]
+	if bio := bioTokens(role); len(bio) > 0 {
+		keywords = append(keywords, bio...)
+	}
 	if len(keywords) == 0 {
 		return matched
 	}
@@ -482,18 +521,19 @@ func MatchNotesForAgent(role string, notes []Note) []Note {
 		if seen[n.ID] {
 			continue
 		}
-		for _, tag := range n.Tags {
-			tagLower := strings.ToLower(tag)
+		hay := strings.ToLower(n.Title + " " + strings.Join(n.Tags, " "))
+		hit := sharesText(role, hay)
+		if !hit {
 			for _, kw := range keywords {
-				if strings.Contains(tagLower, strings.ToLower(kw)) {
-					matched = append(matched, n)
-					seen[n.ID] = true
+				if strings.Contains(hay, strings.ToLower(kw)) {
+					hit = true
 					break
 				}
 			}
-			if seen[n.ID] {
-				break
-			}
+		}
+		if hit {
+			matched = append(matched, n)
+			seen[n.ID] = true
 		}
 	}
 

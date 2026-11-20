@@ -25,12 +25,19 @@ type RunRequest struct {
 
 // Hooks 是飞书包向外要的事。
 type Hooks struct {
-	Run   func(ctx context.Context, req RunRequest) (string, error)
-	Show  func(ctx context.Context, req RunRequest, reply string) error
-	Sees  func(agentID string) bool
-	Reply func(ctx context.Context, appID, secret, messageID, text string) (string, error)
-	Dial  func(ctx context.Context, appID, secret string, on func(Turn), mark func(state, detail string)) error
+	Run     func(ctx context.Context, req RunRequest) (string, error)
+	Show    func(ctx context.Context, req RunRequest, reply string) error
+	Sees    func(agentID string) bool
+	Reply   func(ctx context.Context, appID, secret, messageID, text string) (string, error)
+	Working func(ctx context.Context, appID, secret, messageID, text, stopID string) (string, error)
+	Patch   func(ctx context.Context, appID, secret, messageID, text, stopID string) error
+	Dial    func(ctx context.Context, appID, secret string, on func(Turn), mark func(state, detail string)) error
 }
+
+const (
+	taskLead    = "这是从飞书来的一件任务。可以用这台电脑上的工具完成。\n"
+	workingLine = "已在这台电脑上处理"
+)
 
 const (
 	blindReply   = "这个会话还不能看图"
@@ -58,6 +65,10 @@ type Service struct {
 	once      sync.Once
 	jobs      chan Turn
 	runCancel context.CancelFunc
+	runAgent  string
+	runKey    string
+	cardID    string
+	closed    bool
 }
 
 // Config 是当前生效的机器人配置。
@@ -159,6 +170,10 @@ func (s *Service) Apply(cfg Config) {
 
 func (s *Service) run(ctx context.Context, gen int, appID, secret string) {
 	err := s.hooks.Dial(ctx, appID, secret, func(t Turn) {
+		if t.Action == "stop" {
+			s.halt(t.ActionID)
+			return
+		}
 		select {
 		case s.jobs <- t:
 		default:
@@ -206,7 +221,7 @@ func (s *Service) StopRun(agentID string) {
 		return
 	}
 	s.mu.Lock()
-	if s.cfg.AgentID != agentID {
+	if s.runAgent != agentID && s.cfg.AgentID != agentID {
 		s.mu.Unlock()
 		return
 	}
@@ -259,48 +274,105 @@ func (s *Service) dispatch(t Turn) {
 		s.note(cfg, t, textPieces(t), miss)
 		return
 	}
-	if hasPixel(pieces) && !s.canSee(cfg.AgentID) {
-		s.note(cfg, t, pieces, blindReply)
-		return
-	}
 	if s.hooks.Run == nil {
 		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, "本机会话没有接上")
 		return
 	}
-	text := joinPieces(pieces)
-	if s.log != nil && t.ChatID != "" {
-		if framed := s.log.Prompt(t.ChatID, t.ChatName); framed != "" {
-			text = framed
-		}
-	}
+	text := taskLead + joinPieces(pieces)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cardID := s.sendWorking(cfg.AppID, cfg.AppSecret, t.MessageID, workingLine, t.MessageID)
+	agentID := s.AgentFor(t.ChatID)
 	s.mu.Lock()
+	s.closed = false
+	s.cardID = cardID
+	s.runKey = t.MessageID
 	s.runCancel = cancel
+	s.runAgent = agentID
 	s.mu.Unlock()
-	defer func() {
-		cancel()
-		s.mu.Lock()
-		s.runCancel = nil
-		s.mu.Unlock()
-	}()
-	reply, err := s.hooks.Run(ctx, RunRequest{AgentID: cfg.AgentID, Text: text, Pieces: pieces})
+	reply, err := s.hooks.Run(ctx, RunRequest{AgentID: agentID, Text: text, Pieces: pieces})
+	final := reply
 	if ctx.Err() != nil {
-		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, "已停止")
-		return
+		final = "已停止"
+	} else if err != nil {
+		final = err.Error()
+	} else if final == "" {
+		final = "没有给出文字回复"
 	}
-	if err != nil {
-		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, err.Error())
-		return
-	}
-	if reply == "" {
-		reply = "没有给出文字回复"
-	}
-	sent := s.send(cfg.AppID, cfg.AppSecret, t.MessageID, reply)
-	if sent == "" {
-		sent = "self:" + t.MessageID
+	s.mu.Lock()
+	s.closed = true
+	s.cardID = ""
+	s.runKey = ""
+	s.runAgent = ""
+	s.runCancel = nil
+	s.mu.Unlock()
+	if cardID == "" {
+		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, final)
+	} else {
+		s.paint(cfg, cardID, final, "")
 	}
 	if s.log != nil && t.ChatID != "" {
-		s.log.Add(Line{ID: sent, ChatID: t.ChatID, From: "你", Text: reply, At: time.Now().Unix(), Self: true})
+		id := cardID
+		if id == "" {
+			id = "self:" + t.MessageID
+		}
+		s.log.Add(Line{ID: id, ChatID: t.ChatID, From: "你", Text: final, At: time.Now().Unix(), Self: true})
+	}
+}
+
+func (s *Service) halt(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	cancel := s.runCancel
+	ok := id == s.runKey && cancel != nil
+	s.mu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+// Progress 把当前工具收成一句，写进正在处理的那张卡片。
+func (s *Service) Progress(agentID, tool string) {
+	if s == nil || agentID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || s.runAgent != agentID || s.cardID == "" {
+		s.mu.Unlock()
+		return
+	}
+	cfg := s.cfg
+	card := s.cardID
+	key := s.runKey
+	s.mu.Unlock()
+	s.paint(cfg, card, toolLine(tool), key)
+}
+
+// NoteTool 接收会话的工具事件。只在开始时更新卡片。
+func (s *Service) NoteTool(data any) {
+	m, ok := data.(map[string]any)
+	if !ok || m["phase"] != "start" {
+		return
+	}
+	id, _ := m["id"].(string)
+	tool, _ := m["tool"].(string)
+	s.Progress(id, tool)
+}
+
+func toolLine(name string) string {
+	switch name {
+	case "bash":
+		return "正在跑命令"
+	case "read_file":
+		return "正在读文件"
+	case "write_file", "edit_file":
+		return "正在改文件"
+	case "web":
+		return "正在看页面"
+	default:
+		return "正在处理"
 	}
 }
 
@@ -496,6 +568,34 @@ func (s *Service) download(cfg Config, messageID, key string) ([]byte, string, e
 	return FetchImageToken(ctx, cfg.UserAccess, messageID, key)
 }
 
+func (s *Service) sendWorking(appID, secret, messageID, text, stopID string) string {
+	if messageID == "" || text == "" {
+		return ""
+	}
+	if s.hooks.Working == nil {
+		return s.send(appID, secret, messageID, text)
+	}
+	id, err := s.hooks.Working(context.Background(), appID, secret, messageID, text, stopID)
+	if err != nil {
+		log.Printf("feishu card: %v", err)
+		return ""
+	}
+	return id
+}
+
+func (s *Service) paint(cfg Config, cardID, text, stopID string) {
+	if cardID == "" || text == "" {
+		return
+	}
+	if s.hooks.Patch == nil {
+		s.send(cfg.AppID, cfg.AppSecret, cardID, text)
+		return
+	}
+	if err := s.hooks.Patch(context.Background(), cfg.AppID, cfg.AppSecret, cardID, text, stopID); err != nil {
+		log.Printf("feishu card: %v", err)
+	}
+}
+
 func (s *Service) send(appID, secret, messageID, text string) string {
 	if s.hooks.Reply == nil || messageID == "" || text == "" {
 		return ""
@@ -525,9 +625,36 @@ func (s *Service) noteLine(t Turn) {
 		text = "［图片］"
 	}
 	s.log.Add(Line{ID: t.MessageID, ChatID: t.ChatID, From: from, FromID: t.SenderID, Text: text, At: at})
-	if t.ChatName != "" {
+	s.log.Kind(t.ChatID, t.ChatType)
+	if t.ChatType == "p2p" && from != "" && from != "有人" && t.ChatName == "" {
+		s.log.Name(t.ChatID, from)
+	} else if t.ChatName != "" {
 		s.log.Name(t.ChatID, t.ChatName)
 	}
+}
+
+// AgentFor 这个飞书会话下一条消息交给谁。没有单独指定时用默认会话。
+func (s *Service) AgentFor(chatID string) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	def := s.cfg.AgentID
+	s.mu.Unlock()
+	if s.log != nil {
+		if id := s.log.Agent(chatID); id != "" {
+			return id
+		}
+	}
+	return def
+}
+
+// BindRoom 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。
+func (s *Service) BindRoom(chatID, agentID string) {
+	if s == nil || s.log == nil {
+		return
+	}
+	s.log.Bind(chatID, agentID)
 }
 
 func (s *Service) spokenTo(t Turn) bool {

@@ -63,6 +63,7 @@ func (t *askAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 		return tool.Fail("%v", err)
 	}
 	defer t.m.endAsk(t.fromID)
+	t.adoptCallerDir(target)
 
 	// 本轮边界：必须在入队前记下目标的历史长度。
 	//
@@ -91,6 +92,23 @@ func (t *askAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 		return tool.Fail("%s 异常结束：%s", in.Name, out.err)
 	}
 	return tool.OK(in.Name + "：\n" + out.text)
+}
+
+// adoptCallerDir 让协助方改用发起方的仓库。
+// 不改的话，对方会按自己以前绑的目录找文件，任务里的路径对不上。
+func (t *askAgentTool) adoptCallerDir(target *Agent) {
+	from, ok := t.m.Get(t.fromID)
+	if !ok {
+		return
+	}
+	dir := from.EffectiveWorkDir(t.m)
+	if dir == "" || dir == target.EffectiveWorkDir(t.m) {
+		return
+	}
+	if err := t.m.SetAgentWorkDir(target.ID, dir); err != nil {
+		return
+	}
+	t.m.Emit("agent.config", target.viewMap())
 }
 
 // lastAssistantTextSince 只在本轮新增的消息里找最后一条 assistant 文本。

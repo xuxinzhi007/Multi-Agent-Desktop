@@ -128,6 +128,7 @@ export default function App() {
         onOpenBrowser={() => {
           API.openWorkbench('').catch(() => {})
         }}
+        onBindFeishu={(chatId, agentId) => s.send('feishu.bind', { chatId, agentId })}
         createOpen={createOpen}
         onCreateOpenChange={setCreateOpen}
       />
@@ -185,6 +186,7 @@ export default function App() {
           shellLogs={activeAgent ? (s.shellByAgent[activeAgent.id] ?? []) : []}
           steps={activeAgent ? s.tools.filter((t) => t.id === activeAgent.id).slice(-8) : []}
           reasoning={activeAgent ? s.reasoning[activeAgent.id] : ''}
+          pace={activeAgent ? s.pace?.[activeAgent.id] : undefined}
           queued={activeAgent ? s.outbox[activeAgent.id] : undefined}
           onRoute={(targetName, text) => {
             if (!activeAgent) return
@@ -216,6 +218,10 @@ export default function App() {
           }}
           onCreateRequest={() => setCreateOpen(true)}
           onOpenKnowledge={openKnowledge}
+          onProfile={(name, role) => {
+            if (!activeAgent) return
+            s.send('agent.profile', { id: activeAgent.id, name, role })
+          }}
         />
       )}
 

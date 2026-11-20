@@ -51,8 +51,8 @@ type Config struct {
 	BaseURL  string `json:"baseUrl"`
 	APIKey   string `json:"apiKey"`
 	Model    string `json:"model"`
-	// Thinking 是会话上的思考模式。on 打开，off 关掉。
-	// 空值对 deepseek 按打开处理，其它厂商不带这个字段。
+	// Thinking 是这一轮的推理强度。low / medium / high / xhigh。
+	// off 关掉。空值和 on 按 medium。
 	Thinking string `json:"thinking,omitempty"`
 	// ContextWindow 是这次请求能用的上下文长度。0 表示按 provider 的默认窗口。
 	ContextWindow int `json:"contextWindow,omitempty"`

@@ -187,21 +187,34 @@ func AuthorizeQoder(ctx context.Context, open func(string)) (Config, error) {
 
 func qoderIdentity(apiKey string) (qoderCreds, error) {
 	c, ok := readQoderCreds()
-	if ok && c.Access != "" && (apiKey == "" || apiKey == c.Access) {
-		if !c.valid() {
-			if next, err := refreshQoder(context.Background(), c); err == nil {
-				c = next
-				_ = writeQoderCreds(c)
-			}
-		}
-		if c.UserID == "" {
-			return qoderCreds{}, fmt.Errorf("qoder: 登录信息不完整，请重新授权")
-		}
-		if c.MachineID == "" {
-			c.MachineID = qoderMachineID()
-		}
-		return c, nil
+	if !ok || c.Access == "" {
+		return qoderIdentityMiss(apiKey)
 	}
+	same := apiKey == "" || apiKey == c.Access
+	// 会话里可能还留着上一把访问令牌。登录文件已经换成新 Key 时，用新登录，不再报「没有对应的登录信息」。
+	stale := apiKey != "" && apiKey != c.Access && !strings.HasPrefix(apiKey, "pt-") && c.UserID != ""
+	if !same && !stale {
+		return qoderIdentityMiss(apiKey)
+	}
+	if !c.valid() {
+		if next, err := refreshQoder(context.Background(), c); err == nil {
+			c = next
+			_ = writeQoderCreds(c)
+		}
+	}
+	if c.UserID == "" {
+		return qoderCreds{}, fmt.Errorf("qoder: 登录信息不完整，请重新授权")
+	}
+	if stale && apiKey != c.Access && !c.valid() {
+		return qoderCreds{}, fmt.Errorf("qoder: 当前 Key 没有对应的登录信息，请重新授权或保存 Key")
+	}
+	if c.MachineID == "" {
+		c.MachineID = qoderMachineID()
+	}
+	return c, nil
+}
+
+func qoderIdentityMiss(apiKey string) (qoderCreds, error) {
 	if apiKey == "" {
 		return qoderCreds{}, fmt.Errorf("qoder: 尚未登录")
 	}
@@ -209,6 +222,59 @@ func qoderIdentity(apiKey string) (qoderCreds, error) {
 		return qoderCreds{}, fmt.Errorf("qoder: Personal Access Token 需要先在设置里保存")
 	}
 	return qoderCreds{}, fmt.Errorf("qoder: 当前 Key 没有对应的登录信息，请重新授权或保存 Key")
+}
+
+// QoderAccountStatus 确认这把 Key 就是当前登录，并尽量读出剩余额度。
+// 额度接口失败时 quota 为空，登录本身仍然算成功。
+func QoderAccountStatus(ctx context.Context, apiKey string) (string, error) {
+	c, err := qoderIdentity(apiKey)
+	if err != nil {
+		return "", err
+	}
+	if apiKey != "" && apiKey != c.Access {
+		return "", fmt.Errorf("qoder: 当前 Key 没有对应的登录信息，请重新授权或保存 Key")
+	}
+	return qoderQuotaText(ctx, c), nil
+}
+
+func qoderQuotaText(ctx context.Context, c qoderCreds) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, qoderOpenAPI+"/api/v2/quota/usage", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("authorization", "Bearer "+c.Access)
+	req.Header.Set("accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var data struct {
+		UserQuota struct {
+			Total     float64 `json:"total"`
+			Remaining float64 `json:"remaining"`
+			Unit      string  `json:"unit"`
+		} `json:"userQuota"`
+		IsQuotaExceeded bool `json:"isQuotaExceeded"`
+	}
+	if json.Unmarshal(payload, &data) != nil {
+		return ""
+	}
+	if data.UserQuota.Total == 0 && data.UserQuota.Remaining == 0 && !data.IsQuotaExceeded {
+		return ""
+	}
+	unit := data.UserQuota.Unit
+	if unit == "" {
+		unit = "Credits"
+	}
+	if data.IsQuotaExceeded {
+		return fmt.Sprintf("额度已用完（%g / %g %s）", data.UserQuota.Remaining, data.UserQuota.Total, unit)
+	}
+	return fmt.Sprintf("剩余 %g / %g %s", data.UserQuota.Remaining, data.UserQuota.Total, unit)
 }
 
 // AdoptQoderAPIKey 把用户填写的 Key 换成可发请求的登录。

@@ -77,6 +77,7 @@ type CreateAgentRequest struct {
 // Events 推给前端。
 var (
 	AgentCreated = mygo.NewEvent[Agent]("agent.created")
+	AgentProfile = mygo.NewEvent[Agent]("agent.profile")
 	AgentDeleted = mygo.NewEvent[string]("agent.deleted")
 	AgentStatus  = mygo.NewEvent[StatusEvent]("agent.status")
 	AgentDelta   = mygo.NewEvent[DeltaEvent]("agent.delta")
@@ -383,8 +384,10 @@ type AgentView struct {
 	Busy string `json:"busy,omitempty"`
 	// Last 是最后一句非 system 内容，截断后给列表用。
 	Last string `json:"last,omitempty"`
-	// SeesImages 表示这个会话当前的模型能看图。
+	// SeesImages 表示这个会话当前的模型能看图。界面不再用它提前结束发图。
 	SeesImages bool `json:"seesImages,omitempty"`
+	// Proposal 是一轮结束后建议改成的简介。
+	Proposal string `json:"proposal,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的。
 	ParentID string `json:"parentId,omitempty"`
 }
@@ -412,6 +415,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		Busy:          s.BusyPlace,
 		ParentID:      s.ParentID,
 		SeesImages:    seesModel(s.LLMCfg),
+		Proposal:      s.Proposal,
 	}
 }
 
@@ -437,6 +441,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 		v.Knowledge = ids
 	}
 	v.BlockedReason, _ = m["blockedReason"].(string)
+	v.Proposal, _ = m["proposal"].(string)
 	v.ParentID, _ = m["parentId"].(string)
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
@@ -697,42 +702,6 @@ func (s *API) DeleteChannel(id string) bool {
 	return true
 }
 
-// SendToChannel 发消息到频道，并触发相关成员 agent。
-// 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
-func (s *API) repliersBlind(ch channel.Channel, text, fromID string) bool {
-	policy := ch.Policy
-	if policy == "" {
-		policy = channel.PolicyDiscuss
-	}
-	var members []channel.Member
-	for _, id := range ch.Members {
-		if id == fromID {
-			continue
-		}
-		a, ok := s.mgr.Get(id)
-		if !ok {
-			continue
-		}
-		sn := a.Snapshot()
-		members = append(members, channel.Member{ID: sn.ID, Name: sn.Name, Role: sn.Role})
-	}
-	msg := channel.Message{Text: text, FromID: fromID}
-	for _, d := range channel.DecideReplies(policy, msg, members, ch.Speaker) {
-		if !d.Reply {
-			continue
-		}
-		a, ok := s.mgr.Get(d.Member.ID)
-		if !ok {
-			continue
-		}
-		cfg := a.EffectiveLLM(s.mgr)
-		if !llm.SeesImages(cfg.Provider, cfg.Model) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, text string) error {
 	return s.postChannel(ctx, channelId, fromId, fromName, text, nil)
 }
@@ -803,12 +772,8 @@ func (s *API) blocksFrom(req feishu.RunRequest) ([]llm.Block, string, error) {
 func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text string, images []llm.ImageIn) error {
 	var blocks []llm.Block
 	if len(images) > 0 {
-		ch, ok := s.channels.Get(channelId)
-		if !ok {
+		if _, ok := s.channels.Get(channelId); !ok {
 			return fmt.Errorf("channel %s not found", channelId)
-		}
-		if s.repliersBlind(ch, text, fromId) {
-			return fmt.Errorf("%s", llm.BlindModel)
 		}
 		var err error
 		blocks, err = llm.Accept(s.imageDir, images)
@@ -1107,6 +1072,8 @@ func providerLabel(p string) string {
 	switch p {
 	case "llamacpp":
 		return "本地 llama.cpp"
+	case "ollama":
+		return "本地 Ollama"
 	case "deepseek":
 		return "DeepSeek"
 	case "openai":
@@ -1119,7 +1086,7 @@ func providerLabel(p string) string {
 	return p
 }
 
-var knownProviderIDs = []string{"llamacpp", "deepseek", "openai", "claude", "qoder"}
+var knownProviderIDs = []string{"llamacpp", "ollama", "deepseek", "openai", "claude", "qoder"}
 
 func knownProvider(id string) bool {
 	for _, p := range knownProviderIDs {
@@ -1138,6 +1105,7 @@ type ProviderEndpoint struct {
 	Saved    bool     `json:"saved"`
 	OK       bool     `json:"ok"`
 	Reason   string   `json:"reason,omitempty"`
+	Quota    string   `json:"quota,omitempty"`
 	Models   []string `json:"models,omitempty"`
 }
 
@@ -1206,6 +1174,7 @@ func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint
 		}
 		LLMConfigEvt.Emit(s.win, llm.Redacted(cfg))
 	}
+	s.mgr.ApplyProviderCreds(cfg.Provider, cfg.APIKey, cfg.BaseURL)
 	ep := s.endpointFor(ctx, cfg.Provider, cfg, true)
 	return ep, nil
 }
@@ -1235,6 +1204,7 @@ func (s *API) LoginQoder(ctx context.Context) (ProviderEndpoint, error) {
 		}
 		LLMConfigEvt.Emit(s.win, llm.Redacted(next))
 	}
+	s.mgr.ApplyProviderCreds("qoder", cfg.APIKey, cfg.BaseURL)
 	return s.endpointFor(ctx, "qoder", cfg, true), nil
 }
 
@@ -1253,6 +1223,14 @@ func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved 
 	if err != nil {
 		ep.Reason = err.Error()
 		return ep
+	}
+	if id == "qoder" && cfg.APIKey != "" {
+		quota, qerr := llm.QoderAccountStatus(cctx, cfg.APIKey)
+		if qerr != nil {
+			ep.Reason = qerr.Error()
+			return ep
+		}
+		ep.Quota = quota
 	}
 	ep.OK = true
 	ep.Models = models
@@ -1435,7 +1413,54 @@ func (s *API) ListFeishuRooms() []feishu.Room {
 	if s.bot == nil {
 		return nil
 	}
-	return s.bot.Rooms()
+	rooms := s.bot.Rooms()
+	defID := ""
+	defName := ""
+	if s.settings != nil {
+		defID = s.settings.Get().Feishu.AgentID
+	}
+	if defID != "" {
+		if a, ok := s.mgr.Get(defID); ok {
+			defName = a.Snapshot().Name
+		}
+	}
+	for i := range rooms {
+		id := rooms[i].AgentID
+		name := ""
+		if id == "" {
+			id = defID
+			name = defName
+		} else if a, ok := s.mgr.Get(id); ok {
+			name = a.Snapshot().Name
+		}
+		rooms[i].AgentID = id
+		rooms[i].AgentName = name
+	}
+	return rooms
+}
+
+// SetFeishuRoomAgent 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。
+func (s *API) SetFeishuRoomAgent(chatID, agentID string) error {
+	if s.bot == nil {
+		return fmt.Errorf("飞书还没接上")
+	}
+	if _, ok := s.mgr.Get(agentID); !ok {
+		return fmt.Errorf("会话不存在")
+	}
+	s.bot.BindRoom(chatID, agentID)
+	return nil
+}
+
+// SetAgentProfile 改给人看的名字和简介，立刻保存并显示。
+func (s *API) SetAgentProfile(id, name, role string) (AgentView, error) {
+	if err := s.mgr.SetProfile(id, name, role); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(id)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", id)
+	}
+	return toAgentView(a), nil
 }
 
 // GetFeishu 返回飞书机器人配置和长连接状态。
@@ -1668,6 +1693,12 @@ func (s *API) ProvidersStatus() []ProviderStatus {
 			Ready:   true,
 			BaseURL: cmp.Or(base.BaseURL, llm.DefaultLlamaCppBaseURL),
 			Reason:  "本地 llama.cpp，不需要 Key",
+		},
+		{
+			ID:      "ollama",
+			Ready:   true,
+			BaseURL: cmp.Or(base.BaseURL, llm.DefaultOllamaBaseURL),
+			Reason:  "本地 Ollama，不需要 Key",
 		},
 	}
 	cloud := []string{"openai", "deepseek", "claude", "qoder"}
@@ -2483,6 +2514,14 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 			if v, ok := toAgentCreated(data); ok {
 				AgentCreated.Emit(win, v)
 			}
+		case "agent.profile":
+			if v, ok := toAgentCreated(data); ok {
+				AgentProfile.Emit(win, v)
+			}
+		case "agent.config":
+			if v, ok := toAgentCreated(data); ok {
+				AgentConfig.Emit(win, v)
+			}
 		case "agent.deleted":
 			if v, ok := toAgentDeleted(data); ok {
 				AgentDeleted.Emit(win, v)
@@ -2586,6 +2625,9 @@ func main() {
 		var mini *mygo.Window
 		if api != nil {
 			mini = api.currentMini()
+			if event == "agent.tool" && api.bot != nil {
+				api.bot.NoteTool(data)
+			}
 		}
 		emitToWindow(win, mini, mgr, chMgr, event, data)
 	}
@@ -2663,11 +2705,13 @@ func main() {
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
 	api.bot = feishu.New(feishu.Hooks{
-		Run:   api.runFeishu,
-		Show:  api.showFeishu,
-		Sees:  api.agentSees,
-		Reply: feishu.ReplyText,
-		Dial:  feishu.Dial,
+		Run:     api.runFeishu,
+		Show:    api.showFeishu,
+		Sees:    api.agentSees,
+		Reply:   feishu.ReplyText,
+		Working: feishu.ReplyWorking,
+		Patch:   feishu.PatchCard,
+		Dial:    feishu.Dial,
 	})
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.bot.Apply(feishuConfig(effective.Feishu))

@@ -65,6 +65,53 @@ func TestAskAgentReportsPeerGone(t *testing.T) {
 	}
 }
 
+func TestAskAgentAdoptsCallerWorkDir(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	a := m.Create("a", "甲", "r")
+	b := m.Create("b", "乙", "r")
+	b.mu.Lock()
+	b.Backend = "mock"
+	b.mu.Unlock()
+	if err := m.SetAgentWorkDir(a.ID, "/proj/caller"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetAgentWorkDir(b.ID, "/proj/old"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res := (&askAgentTool{m: m, fromID: a.ID}).Execute(ctx, []byte(`{"name":"乙","task":"看一下这段"}`))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("status=%s content=%s", res.Status, res.Content)
+	}
+	if got := b.EffectiveWorkDir(m); got != "/proj/caller" {
+		t.Fatalf("workdir=%q, want caller repo", got)
+	}
+}
+
+func TestAskAgentKeepsDirWhenCallerHasNone(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	m.Create("a", "甲", "r")
+	b := m.Create("b", "乙", "r")
+	b.mu.Lock()
+	b.Backend = "mock"
+	b.mu.Unlock()
+	if err := m.SetAgentWorkDir(b.ID, "/proj/old"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res := (&askAgentTool{m: m, fromID: "a"}).Execute(ctx, []byte(`{"name":"乙","task":"看一下这段"}`))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("status=%s content=%s", res.Status, res.Content)
+	}
+	if got := b.EffectiveWorkDir(m); got != "/proj/old" {
+		t.Fatalf("workdir=%q, want old repo kept", got)
+	}
+}
+
 func TestAskAgentRejectsCycle(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
 	a := m.Create("a", "甲", "r")

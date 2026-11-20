@@ -51,11 +51,76 @@ func NewChatModel(cfg Config) *ChatModel {
 	return &ChatModel{cfg: cfg, client: httpClient}
 }
 
-func boundChat(ctx context.Context) (context.Context, context.CancelFunc) {
+func boundChat(ctx context.Context, cfg Config) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, 180*time.Second)
+	return context.WithTimeout(ctx, chatBudget(cfg))
+}
+
+// chatBudget 是这一轮等上游的上限。
+// 高和更高才放宽到 5 分钟。中等及以下保持 180 秒，避免普通问题空等。
+func chatBudget(cfg Config) time.Duration {
+	if !ThinkingEnabled(cfg) {
+		return 180 * time.Second
+	}
+	switch Effort(cfg) {
+	case "high", "xhigh":
+		return 5 * time.Minute
+	default:
+		return 180 * time.Second
+	}
+}
+
+// Effort 是这一轮的推理强度。空值和 on 都是 medium。
+func Effort(cfg Config) string {
+	switch cfg.Thinking {
+	case "off", "low", "medium", "high", "xhigh":
+		return cfg.Thinking
+	default:
+		return "medium"
+	}
+}
+
+// ThinkingEnabled 表示这次请求会把思考发给上游。
+// 显式 off 关掉。qoder 只有模型本身支持推理时才开。
+func ThinkingEnabled(cfg Config) bool {
+	if Effort(cfg) == "off" {
+		return false
+	}
+	switch cfg.Provider {
+	case "deepseek":
+		return true
+	case "qoder":
+		return qoderModelByID(cfg.Model).reasoning
+	default:
+		return false
+	}
+}
+
+func wireEffort(cfg Config) string {
+	switch Effort(cfg) {
+	case "low", "high", "xhigh":
+		return Effort(cfg)
+	default:
+		return "medium"
+	}
+}
+
+func thinkingLabel(cfg Config) string {
+	if !ThinkingEnabled(cfg) {
+		return "思考关"
+	}
+	switch Effort(cfg) {
+	case "low":
+		return "快"
+	case "high":
+		return "高"
+	case "xhigh":
+		return "更高"
+	default:
+		return "中"
+	}
 }
 
 type wireTool struct {
@@ -91,8 +156,14 @@ type wireToolCall struct {
 // 这里把 OpenAI 的 tool_calls 归一化成结构化的 Call，
 // 模型层的格式差异到此为止 —— 循环和工具层不需要知道协议细节。
 func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec) (Turn, error) {
-	ctx, cancel := boundChat(ctx)
+	ctx, cancel := boundChat(ctx, c.cfg)
 	defer cancel()
+	return AnswerDespiteImages(msgs, func(msgs []Message) (Turn, error) {
+		return c.turnNow(ctx, msgs, tools)
+	})
+}
+
+func (c *ChatModel) turnNow(ctx context.Context, msgs []Message, tools []tool.Spec) (Turn, error) {
 	if c.cfg.Provider == "qoder" {
 		return qoderTurn(ctx, c.client, c.cfg, msgs, tools)
 	}
@@ -152,11 +223,17 @@ func (c *ChatModel) Turn(ctx context.Context, msgs []Message, tools []tool.Spec)
 // 文本和推理增量通过 onDelta 立刻送出。tool_calls 按 index 拼完，
 // arguments 必须是完整 JSON，才放进返回的 Turn。拼不齐、上游报错或 ctx 取消都返回 error，不带半截参数。
 func (c *ChatModel) TurnStream(ctx context.Context, msgs []Message, tools []tool.Spec, onDelta func(Delta)) (Turn, error) {
-	ctx, cancel := boundChat(ctx)
+	ctx, cancel := boundChat(ctx, c.cfg)
 	defer cancel()
 	if onDelta == nil {
 		onDelta = func(Delta) {}
 	}
+	return AnswerDespiteImages(msgs, func(msgs []Message) (Turn, error) {
+		return c.turnStreamNow(ctx, msgs, tools, onDelta)
+	})
+}
+
+func (c *ChatModel) turnStreamNow(ctx context.Context, msgs []Message, tools []tool.Spec, onDelta func(Delta)) (Turn, error) {
 	if c.cfg.Provider == "qoder" {
 		return qoderTurnStream(ctx, c.client, c.cfg, msgs, tools, onDelta)
 	}
@@ -359,19 +436,19 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 }
 
 func thinkingOn(cfg Config) bool {
-	return cfg.Provider == "deepseek" && cfg.Thinking != "off"
+	return ThinkingEnabled(cfg)
 }
 
 func applyThinking(req map[string]any, cfg Config) {
 	if cfg.Provider != "deepseek" {
 		return
 	}
-	if cfg.Thinking == "off" {
+	if !ThinkingEnabled(cfg) {
 		req["thinking"] = map[string]string{"type": "disabled"}
 		return
 	}
 	req["thinking"] = map[string]string{"type": "enabled"}
-	req["reasoning_effort"] = "high"
+	req["reasoning_effort"] = wireEffort(cfg)
 }
 
 func toWire(msgs []Message, echoReasoning bool) []wireMessage {

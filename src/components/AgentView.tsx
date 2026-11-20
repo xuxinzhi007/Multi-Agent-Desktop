@@ -1,13 +1,14 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
-import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
+import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
 import ModelPicker from './ModelPicker'
 import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
-import { type AgentView as Agent, type Config, type Message } from '../mygo'
+import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
+import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
 import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
 import { groupShellLogs, type ShellGroup } from '../lib/transcriptPresent'
@@ -38,6 +39,8 @@ type Props = {
   steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' }[]
   /** 模型这一轮的思考文本，还没写进消息时先显示在这里。 */
   reasoning?: string
+  /** 这一轮请求的等待计时。first 是到首个推理或正文的毫秒。 */
+  pace?: { since: number; first?: number; heard?: 'reason' | 'text' }
   onToggleInspector: () => void
   inspectorOpen: boolean
   /** 单聊模式：禁用 @ 路由功能 */
@@ -53,6 +56,8 @@ type Props = {
   /** 正文里的代码锚点：打开检查器并定位文件 */
   /** 知识库沉淀胶囊：打开检查器的知识库 */
   onOpenKnowledge?: () => void
+  /** 改给人看的名字和简介 */
+  onProfile?: (name: string, role: string) => void
   /** 上一句还在回答时发出的话，排在当前回答后面。 */
   queued?: string[]
   /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
@@ -82,105 +87,225 @@ function stepText(tool: string, target: string) {
   return line.length > 80 ? `${label} ${line.slice(0, 80)}…` : `${label} ${line}`
 }
 
-function ThinkingSwitch({
+const QODER_REASONING = new Set([
+  'Auto',
+  'Ultimate',
+  'Performance',
+  'Cantus',
+  'Qwen3.8-Max',
+  'DeepSeek-V4-Pro',
+  'DeepSeek-V4-Flash',
+  'GLM-5.2',
+])
+
+const EFFORTS = [
+  { id: 'low', label: '快' },
+  { id: 'medium', label: '中' },
+  { id: 'high', label: '高' },
+  { id: 'xhigh', label: '更高' },
+] as const
+
+function effortOf(thinking?: string): string {
+  if (thinking === 'low' || thinking === 'high' || thinking === 'xhigh' || thinking === 'off') return thinking
+  return 'medium'
+}
+
+function EffortControl({
   provider,
+  model,
   thinking,
-  onToggle,
+  onPick,
 }: {
   provider: string
+  model?: string
   thinking?: string
-  onToggle: (next: 'on' | 'off') => void
+  onPick: (next: string) => void
 }) {
-  if (provider !== 'deepseek') return null
-  const on = thinking !== 'off'
+  const supported = provider === 'deepseek' || (provider === 'qoder' && (!model || QODER_REASONING.has(model)))
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const back = useRef('medium')
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [open])
+  if (!supported) return null
+  const current = effortOf(thinking)
+  const fast = current === 'low'
+  const label = EFFORTS.find((e) => e.id === current)?.label ?? '关'
   return (
-    <button
-      type="button"
-      onClick={() => onToggle(on ? 'off' : 'on')}
-      title={on ? '思考模式开着' : '思考模式关着'}
-      style={{
-        border: '1px solid var(--border)',
-        background: on ? 'var(--accent-dim)' : 'transparent',
-        color: on ? 'var(--accent-bright)' : 'var(--text-tertiary)',
-        borderRadius: 'var(--radius-sm)',
-        fontSize: 'var(--text-xs)',
-        padding: '2px 8px',
-        cursor: 'pointer',
-        flexShrink: 0,
-      }}
-    >
-      思考{on ? '开' : '关'}
-    </button>
+    <div ref={rootRef} style={{ display: 'flex', alignItems: 'center', gap: 4, position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => {
+          if (fast) {
+            onPick(back.current === 'low' ? 'medium' : back.current)
+            return
+          }
+          back.current = current
+          onPick('low')
+        }}
+        title={fast ? '快问开着' : '打开快问'}
+        style={{
+          border: '1px solid var(--border)',
+          background: fast ? 'var(--accent-dim)' : 'transparent',
+          color: fast ? 'var(--accent-bright)' : 'var(--text-tertiary)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 'var(--text-xs)',
+          padding: '2px 8px',
+          cursor: 'pointer',
+          flexShrink: 0,
+        }}
+      >
+        快问
+      </button>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="推理强度"
+        style={{
+          border: '1px solid var(--border)',
+          background: 'transparent',
+          color: 'var(--text-secondary)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 'var(--text-xs)',
+          padding: '2px 8px',
+          cursor: 'pointer',
+          flexShrink: 0,
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 6px)',
+            right: 0,
+            zIndex: 20,
+            minWidth: 88,
+            padding: 4,
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            boxShadow: 'var(--shadow-lg)',
+          }}
+        >
+          {EFFORTS.map((e) => (
+            <button
+              key={e.id}
+              type="button"
+              onClick={() => {
+                back.current = e.id
+                onPick(e.id)
+                setOpen(false)
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                border: 0,
+                background: e.id === current ? 'var(--bg-surface-active)' : 'transparent',
+                color: 'var(--text-primary)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: 'var(--text-xs)',
+                padding: '6px 8px',
+                cursor: 'pointer',
+              }}
+            >
+              {e.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
-type TranscriptRow = { kind: 'msg'; m: Message; idx: number } | { kind: 'err'; text: string }
+type Shown = { m: Message; calls: PeerCall[] }
 
-function transcriptRows(visible: Message[], errorAt: number, error?: string): TranscriptRow[] {
+type TranscriptRow = { kind: 'msg'; m: Message; calls: PeerCall[]; idx: number } | { kind: 'err'; text: string }
+
+function transcriptRows(visible: Shown[], errorAt: number, error?: string): TranscriptRow[] {
   const rows: TranscriptRow[] = []
-  for (let i = 0; i < errorAt && i < visible.length; i++) rows.push({ kind: 'msg', m: visible[i], idx: i })
+  for (let i = 0; i < errorAt && i < visible.length; i++) {
+    rows.push({ kind: 'msg', m: visible[i].m, calls: visible[i].calls, idx: i })
+  }
   if (error) rows.push({ kind: 'err', text: error })
-  for (let i = errorAt; i < visible.length; i++) rows.push({ kind: 'msg', m: visible[i], idx: i })
+  for (let i = errorAt; i < visible.length; i++) {
+    rows.push({ kind: 'msg', m: visible[i].m, calls: visible[i].calls, idx: i })
+  }
   return rows
 }
 
-function presentTranscript(messages: Message[]): Message[] {
-  const out: Message[] = []
+function presentTranscript(messages: Message[]): Shown[] {
+  const byId = toolTextById(messages)
+  const out: Shown[] = []
   let chain: string[] = []
   for (const m of messages) {
     if (m.role === 'system' || m.role === 'tool') continue
+    const calls = m.role === 'assistant' ? peerCallsOf(m, byId) : []
     if (m.role === 'assistant' && !(m.content || '').trim()) {
       if (m.reasoning) chain.push(m.reasoning)
-      continue
+      if (calls.length === 0) continue
     }
     if (m.role === 'assistant') {
       const parts = [...chain]
       if (m.reasoning) parts.push(m.reasoning)
       chain = []
-      out.push(parts.length ? { ...m, reasoning: parts.join('\n\n') } : m)
+      out.push({ m: parts.length ? { ...m, reasoning: parts.join('\n\n') } : m, calls })
       continue
     }
     chain = []
-    out.push(m)
+    out.push({ m, calls })
   }
   return out
+}
+
+function formatWait(secs: number): string {
+  if (secs < 60) return `${secs}s`
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${m}分${String(s).padStart(2, '0')}秒`
 }
 
 function ThinkRail({
   live,
   title,
+  meta,
+  tone,
   children,
 }: {
   live?: boolean
   title: string
+  meta?: string
+  tone?: 'wait' | 'think' | 'tool'
   children?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const [secs, setSecs] = useState(0)
   const bodyRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!live) return
-    const t0 = Date.now()
-    const id = window.setInterval(() => setSecs((Date.now() - t0) / 1000), 200)
-    return () => window.clearInterval(id)
-  }, [live])
   useEffect(() => {
     const el = bodyRef.current
     if (!el || !open) return
     el.scrollTop = el.scrollHeight
   }, [children, open])
   const hasBody = children != null && children !== false && children !== ''
-  const label = live ? `思考了 ${secs.toFixed(1)}s` : title
+  const pulse = live ? `c-think__pulse c-think__pulse--${tone ?? 'wait'}` : 'c-think__pulse c-think__pulse--done'
   return (
-    <div className="c-think">
+    <div className={live ? 'c-think c-think--live' : 'c-think'}>
       <button
         type="button"
         className="c-think__bar"
         onClick={() => hasBody && setOpen((v) => !v)}
         aria-expanded={hasBody ? open : undefined}
       >
-        <span className={live ? 'c-think__pulse c-think__pulse--live' : 'c-think__pulse c-think__pulse--done'} />
-        <span className="c-think__title">{label}</span>
+        <span className={pulse} />
+        <span className="c-think__title">{title}</span>
+        {meta && <span className="c-think__meta">{meta}</span>}
         {hasBody && <span className="c-think__toggle">{open ? '收起' : '展开'}</span>}
       </button>
       {open && hasBody && (
@@ -202,12 +327,38 @@ function ReasoningCard({ text, live }: { text: string; live?: boolean }) {
   )
 }
 
-function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; reasoning?: string }) {
+function Thinking({
+  steps,
+  reasoning,
+  pace,
+}: {
+  steps: NonNullable<Props['steps']>
+  reasoning?: string
+  pace?: Props['pace']
+}) {
   const current = [...steps].reverse().find((s) => s.status === 'running')
-  const detail = current ? stepText(current.tool, current.target) : ''
+  const thinking = !current && pace?.heard === 'reason'
+  const waiting = !current && !thinking
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!pace) return
+    const id = window.setInterval(() => setNow(Date.now()), 500)
+    return () => window.clearInterval(id)
+  }, [pace?.since])
+  const waited = pace ? Math.max(0, Math.round((now - pace.since) / 1000)) : 0
+  const label = current
+    ? stepText(current.tool, current.target)
+    : thinking
+      ? '思考中'
+      : waited >= 20
+        ? '模型还没有返回'
+        : '在等模型'
+  const parts = [label]
+  if (pace) parts.push(`已等 ${formatWait(waited)}`)
+  if (pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
   const has = !!reasoning || steps.length > 0
   return (
-    <ThinkRail live title={detail || (has ? '思考' : '正在思考…')}>
+    <ThinkRail live title={parts.join(' · ')} tone={current ? 'tool' : thinking ? 'think' : 'wait'}>
       {has ? (
         <>
           {reasoning}
@@ -220,6 +371,85 @@ function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; re
         </>
       ) : undefined}
     </ThinkRail>
+  )
+}
+
+function ProfileHead({
+  agent,
+  onProfile,
+}: {
+  agent: Agent
+  onProfile?: (name: string, role: string) => void
+}) {
+  const [name, setName] = useState(agent.name)
+  const [role, setRole] = useState(agent.role)
+  useEffect(() => {
+    setName(agent.name)
+    setRole(agent.role)
+  }, [agent.id, agent.name, agent.role])
+  const save = (nextName: string, nextRole: string) => {
+    const n = nextName.trim()
+    const r = nextRole.trim()
+    if (!n || !r || (n === agent.name && r === agent.role)) return
+    onProfile?.(n, r)
+  }
+  return (
+    <div style={{ minWidth: 0 }}>
+      <input
+        aria-label="会话名字"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => save(name, role)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        }}
+        style={{
+          fontSize: 'var(--text-md)',
+          fontWeight: 600,
+          lineHeight: 1.3,
+          border: 'none',
+          background: 'transparent',
+          color: 'inherit',
+          padding: 0,
+          width: 220,
+        }}
+      />
+      <input
+        aria-label="会话简介"
+        value={agent.busy ? `正在${agent.busy}里回答` : role}
+        readOnly={!!agent.busy}
+        onChange={(e) => setRole(e.target.value)}
+        onBlur={() => save(name, role)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        }}
+        style={{
+          display: 'block',
+          fontSize: 'var(--text-xs)',
+          color: 'var(--text-tertiary)',
+          border: 'none',
+          background: 'transparent',
+          padding: 0,
+          width: 300,
+        }}
+      />
+      {agent.proposal && !agent.busy && (
+        <button
+          type="button"
+          onClick={() => onProfile?.(agent.name, agent.proposal || '')}
+          style={{
+            border: 'none',
+            background: 'transparent',
+            color: 'var(--accent-bright)',
+            fontSize: 'var(--text-xs)',
+            padding: 0,
+            cursor: 'pointer',
+          }}
+        >
+          改成「{agent.proposal}」
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -339,6 +569,25 @@ export default function AgentView(p: Props) {
     () => agentsForPicker.filter((a) => a.id !== p.agent?.id),
     [agentsForPicker, p.agent?.id],
   )
+  const [incoming, setIncoming] = useState<Record<string, Caller>>({})
+  useEffect(() => {
+    const self = p.agent?.id
+    if (!self) return
+    let dead = false
+    const others = (p.agents ?? []).filter((a) => a.id !== self)
+    Promise.all(
+      others.map((a) =>
+        API.agentMessages(a.id, 80)
+          .then((messages) => ({ id: a.id, name: a.name, color: a.color, messages: messages ?? [] }))
+          .catch(() => ({ id: a.id, name: a.name, color: a.color, messages: [] })),
+      ),
+    ).then((rows) => {
+      if (!dead) setIncoming(indexIncoming(rows))
+    })
+    return () => {
+      dead = true
+    }
+  }, [p.agent?.id, mentionKey])
 
 
   if (!p.agent) {
@@ -412,7 +661,6 @@ export default function AgentView(p: Props) {
     setImages((prev) => [...prev, ...got.images].slice(0, 8))
   }
 
-  const blind = mode === 'chat' && images.length > 0 && !p.agent?.seesImages
   const submit = () => {
     const text = input.trim()
     if (mode === 'shell') {
@@ -420,7 +668,6 @@ export default function AgentView(p: Props) {
       p.onShell(text)
     } else {
       if (!text && images.length === 0) return
-      if (blind) return
       const { targets, message } = parseMentions(text)
       // 单聊模式：禁用 @ 路由，直接作为普通消息发送
       if (!p.disableRoute && targets.length > 0 && p.onRoute && p.agents) {
@@ -441,7 +688,7 @@ export default function AgentView(p: Props) {
           })
           .catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err)
-            setImageNote(msg || blindSentence)
+            setImageNote(msg || '发送失败')
           })
         return
       }
@@ -482,6 +729,7 @@ export default function AgentView(p: Props) {
   const hasDraft = !!input.trim() || (mode === 'chat' && images.length > 0)
   const rawMessages = p.agent.messages ?? []
   const visible = presentTranscript(rawMessages)
+  const visibleMsgs = visible.map((row) => row.m)
   // 错误记的是出错时的原始条数。按同一套折叠规则数出可见气泡，红条跟在那一截后面。
   // 之后又多出来的气泡（新一轮）排在红条之下，红条不会贴到最新一句后面。
   const errorAt = p.error
@@ -496,13 +744,16 @@ export default function AgentView(p: Props) {
     model: modelName,
     workLabel: place,
     peers,
+    speakerColor: agent.color,
   }
-  const renderMsg = (m: Message, idx: number) => (
+  const renderMsg = (m: Message, idx: number, calls: PeerCall[]) => (
     <Bubble
       key={idx}
       m={m}
+      calls={calls}
+      fromAgent={m.role === 'user' ? incoming[(m.content || '').trim()] : undefined}
       {...head}
-      elapsed={m.role === 'assistant' ? elapsedBetween(prevUserStamp(visible, idx), m.timestamp) : ''}
+      elapsed={m.role === 'assistant' ? elapsedBetween(prevUserStamp(visibleMsgs, idx), m.timestamp) : ''}
       agents={agentsForPicker}
       tokens={idx === visible.length - 1 && m.role === 'assistant' ? p.tokenUsage : undefined}
       onContextMenu={handleContextMenu}
@@ -543,23 +794,7 @@ export default function AgentView(p: Props) {
         >
           {p.agent.name.slice(0, 1).toUpperCase()}
         </span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 'var(--text-md)', fontWeight: 600, lineHeight: 1.3 }}>
-            {p.agent.name}
-          </div>
-          <div
-            style={{
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-tertiary)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              maxWidth: 300,
-            }}
-          >
-            {p.agent.busy ? `正在${p.agent.busy}里回答` : p.agent.role}
-          </div>
-        </div>
+          <ProfileHead agent={p.agent} onProfile={p.onProfile} />
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
           {running && (
@@ -628,7 +863,7 @@ export default function AgentView(p: Props) {
                 {row.text}
               </div>
             ) : (
-              renderMsg(row.m, row.idx)
+              renderMsg(row.m, row.idx, row.calls)
             )
           }
         />
@@ -643,8 +878,12 @@ export default function AgentView(p: Props) {
           />
         )}
 
-        {running && !p.agent.busy && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
-        {!!p.streaming && !p.agent.busy && (p.steps?.length ?? 0) > 0 && <Thinking steps={p.steps ?? []} />}
+        {running && !p.agent.busy && !p.streaming && (
+          <Thinking steps={p.steps ?? []} reasoning={p.reasoning} pace={p.pace} />
+        )}
+        {!!p.streaming && !p.agent.busy && (p.steps?.length ?? 0) > 0 && (
+          <Thinking steps={p.steps ?? []} pace={p.pace} />
+        )}
 
         {(p.queued ?? []).map((text, i) => (
           <div key={`q-${i}`} className="c-msg c-msg--user" style={{ marginBottom: 'var(--space-4)', opacity: 0.72 }}>
@@ -793,6 +1032,13 @@ export default function AgentView(p: Props) {
                 agentId={p.agent.id}
                 model={p.agent.llm?.model || ''}
                 provider={p.agent.llm?.provider}
+                mark={
+                  (p.agent.llm?.provider || p.connection?.provider) === 'deepseek' ||
+                  ((p.agent.llm?.provider || p.connection?.provider) === 'qoder' &&
+                    (!p.agent.llm?.model || QODER_REASONING.has(p.agent.llm.model)))
+                    ? EFFORTS.find((e) => e.id === effortOf(p.agent?.llm?.thinking))?.label
+                    : undefined
+                }
                 onPick={(m) => {
                   const conn = p.connection
                   const same = !!conn && conn.provider === m.provider
@@ -808,10 +1054,11 @@ export default function AgentView(p: Props) {
                   })
                 }}
               />
-              <ThinkingSwitch
+              <EffortControl
                 provider={p.agent.llm?.provider || p.connection?.provider || ''}
+                model={p.agent.llm?.model}
                 thinking={p.agent.llm?.thinking}
-                onToggle={(next) => {
+                onPick={(next) => {
                   const llm = p.agent?.llm
                   const conn = p.connection
                   p.onConfig({
@@ -838,7 +1085,7 @@ export default function AgentView(p: Props) {
             <button
               className="c-btn c-btn--primary c-btn--sm"
               onClick={submit}
-              disabled={!hasDraft || blind}
+              disabled={!hasDraft}
             >
               {mode === 'shell' ? '执行' : turnLive ? '排队' : '发送'}
             </button>
@@ -857,9 +1104,7 @@ export default function AgentView(p: Props) {
           }}
         >
           <span>
-            {blind
-              ? blindSentence
-              : imageNote
+            {imageNote
                 ? imageNote
                 : turnLive
                   ? '这一轮还在进行。停止会打断它，并清掉还没开始的排队；写好再点排队，会等这一轮结束。'
@@ -1350,6 +1595,41 @@ function EmptyChat({ color, name, onPick }: { color: string; name: string; onPic
   )
 }
 
+function AgentFace({ name, color, note }: { name: string; color: string; note?: string }) {
+  return (
+    <div className="c-agent-head" style={{ '--tone': color } as CSSProperties}>
+      <span className="c-agent-avatar" aria-hidden>
+        {name.slice(0, 1).toUpperCase()}
+      </span>
+      <span className="c-agent-name">
+        <i className="c-agent-dot" />
+        {name}
+      </span>
+      {note && <span className="c-pill">{note}</span>}
+    </div>
+  )
+}
+
+function PeerCallList({ calls, agents }: { calls?: PeerCall[]; agents?: MentionTarget[] }) {
+  if (!calls?.length) return null
+  return (
+    <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+      {calls.map((call, i) => {
+        const hit = agents?.find((a) => a.name === call.name)
+        const color = hit?.color || 'var(--text-tertiary)'
+        const reply = call.reply.replace(/\s+/g, ' ').trim()
+        const short = reply.length > 180 ? `${reply.slice(0, 180)}…` : reply
+        return (
+          <div key={`${call.name}-${i}`} className="c-peer-call">
+            <AgentFace name={call.name} color={color} note={call.ok ? '回复' : '未完成'} />
+            {short && <div className="c-peer-call__text">{short}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 /**
  * Bubble 是单条消息的展示。
  *
@@ -1374,7 +1654,11 @@ const Bubble = memo(
     a.tokens?.in === b.tokens?.in &&
     a.tokens?.out === b.tokens?.out &&
     a.agents === b.agents &&
-    a.peers === b.peers,
+    a.peers === b.peers &&
+    a.speakerColor === b.speakerColor &&
+    a.fromAgent?.id === b.fromAgent?.id &&
+    (a.calls ?? []).map((c) => `${c.name}:${c.ok}:${c.reply}`).join('\n') ===
+      (b.calls ?? []).map((c) => `${c.name}:${c.ok}:${c.reply}`).join('\n'),
 )
 
 type BubbleProps = {
@@ -1388,6 +1672,9 @@ type BubbleProps = {
   tokens?: { in: number; out: number }
   agents?: MentionTarget[]
   peers?: { id: string; name: string }[]
+  calls?: PeerCall[]
+  fromAgent?: Caller
+  speakerColor?: string
   onContextMenu?: (e: React.MouseEvent, msg: Message) => void
   onCopy?: (text: string) => void
   onRegenerate?: (msg: Message) => void
@@ -1406,6 +1693,9 @@ function BubbleImpl({
   tokens,
   agents,
   peers,
+  calls,
+  fromAgent,
+  speakerColor,
   onContextMenu,
   onCopy,
   onRegenerate,
@@ -1419,7 +1709,7 @@ function BubbleImpl({
   const routeInfo = parsed.from ? `来自 ${parsed.from}` : parsed.to ? `发给 ${parsed.to}` : ''
   const displayContent = parsed.body
   const artifacts = isUser ? [] : extractArtifacts(displayContent)
-  const toneStyle = { '--tone': `var(--agent-${tone})` } as CSSProperties
+  const toneStyle = { '--tone': speakerColor || `var(--agent-${tone})` } as CSSProperties
   const clock = m.timestamp
     ? new Date(m.timestamp * 1000).toLocaleTimeString('zh-CN', {
         hour: '2-digit',
@@ -1428,6 +1718,21 @@ function BubbleImpl({
         hour12: false,
       })
     : ''
+
+  if (isUser && fromAgent) {
+    return (
+      <div
+        className="c-msg c-msg--agent fade-up"
+        style={{ marginBottom: 'var(--space-4)' }}
+        onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
+      >
+        <AgentFace name={fromAgent.name} color={fromAgent.color} note="发来的任务" />
+        <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+          {displayContent}
+        </div>
+      </div>
+    )
+  }
 
   if (isUser) {
     return (
@@ -1518,6 +1823,7 @@ function BubbleImpl({
       <div className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
         {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+        <PeerCallList calls={calls} agents={agents} />
       </div>
       {artifacts.length > 0 && (
         <div className="c-artifacts">

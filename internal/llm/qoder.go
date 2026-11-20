@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,7 +95,7 @@ func (c *qoderClient) Stream(ctx context.Context, msgs []Message) (<-chan Chunk,
 	}
 	var cancel context.CancelFunc
 	if _, ok := ctx.Deadline(); !ok {
-		ctx, cancel = context.WithTimeout(ctx, StreamTimeout)
+		ctx, cancel = context.WithTimeout(ctx, chatBudget(c.cfg))
 	} else {
 		cancel = func() {}
 	}
@@ -283,8 +284,8 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 		return nil, err
 	}
 	model := qoderModelByID(cfg.Model)
-	thinking := model.reasoning && cfg.Thinking != "off"
-	body, err := qoderRequestBody(model, thinking, msgs, tools)
+	thinking := ThinkingEnabled(cfg)
+	body, err := qoderRequestBody(model, thinking, wireEffort(cfg), msgs, tools)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +318,10 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	}
 	resp, err := do(client, req)
 	if err != nil {
-		return nil, fmt.Errorf("qoder: %w", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("模型这次没有在时限内回答")
+		}
+		return nil, fmt.Errorf("qoder: %s: %w", thinkingLabel(cfg), err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
@@ -327,7 +331,7 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	return resp, nil
 }
 
-func qoderRequestBody(model qoderModel, thinking bool, msgs []Message, tools []tool.Spec) ([]byte, error) {
+func qoderRequestBody(model qoderModel, thinking bool, effort string, msgs []Message, tools []tool.Spec) ([]byte, error) {
 	wire := make([]map[string]any, 0, len(msgs))
 	lastUser := ""
 	var imageURLs []string
@@ -383,7 +387,10 @@ func qoderRequestBody(model qoderModel, thinking bool, msgs []Message, tools []t
 	}
 	params := map[string]any{"max_tokens": 8192, "enable_thinking": thinking}
 	if thinking {
-		params["reasoning_effort"] = "high"
+		if effort == "" {
+			effort = "medium"
+		}
+		params["reasoning_effort"] = effort
 	}
 	cfg := map[string]any{"key": model.key, "is_reasoning": thinking, "source": "system"}
 	req := map[string]any{

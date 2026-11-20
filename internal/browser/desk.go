@@ -14,9 +14,17 @@ import (
 
 // Desk 是应用自己的浏览器窗口。登录留在名为 workbench 的会话里，不进用户的 Chrome。
 type Desk struct {
-	mu   sync.Mutex
-	sess *mygo.Session
-	win  *mygo.Window
+	mu    sync.Mutex
+	actMu sync.Mutex
+	sess  *mygo.Session
+	win   *mygo.Window
+	held  bool
+}
+
+// Shot 是一次动作之后交回的页面。Body 是观察 JSON，PNG 是当前视口。
+type Shot struct {
+	Body string
+	PNG  []byte
 }
 
 func NewDesk() *Desk {
@@ -41,6 +49,8 @@ func CurrentDesk() *Desk {
 }
 
 func (d *Desk) Open(url string) (string, error) {
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
 	if url != "" {
 		u, err := CheckURL(url)
 		if err != nil {
@@ -60,94 +70,217 @@ func (d *Desk) Open(url string) (string, error) {
 	return w.Page().URL(), nil
 }
 
-func (d *Desk) Act(ctx context.Context, op Op) (string, error) {
+func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
 	op, err := Normalize(op)
 	if err != nil {
-		return "", err
+		return Shot{}, err
 	}
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
 	if op.Op == "open" {
 		w, err := d.ensure(op.URL)
 		if err != nil {
-			return "", err
+			return Shot{}, err
 		}
 		page := w.Page()
 		if err := waitForNavigation(ctx, page, op.URL); err != nil {
-			return "", err
+			shot, _ := d.finish(ctx, w, "")
+			return shot, err
 		}
-		return page.URL(), nil
+		return d.finish(ctx, w, "")
 	}
 	w, err := d.ensure("")
 	if err != nil {
-		return "", err
+		return Shot{}, err
 	}
 	page := w.Page()
+	note := ""
+	if d.held && releaseBefore(op.Op) {
+		if err := d.pointerUp(ctx, page); err != nil {
+			return Shot{}, err
+		}
+		note = "已松开"
+	}
 	switch op.Op {
-	case "read":
-		if err := waitReady(ctx, page); err != nil {
-			return "", err
+	case "snapshot":
+		return d.finish(ctx, w, note)
+	case "back":
+		page.GoBack()
+	case "forward":
+		page.GoForward()
+	case "reload":
+		page.Reload()
+	case "wait":
+		return d.wait(ctx, w, op, note)
+	default:
+		if err := d.play(ctx, page, op); err != nil {
+			shot, snapErr := d.finish(ctx, w, note)
+			if snapErr != nil {
+				return shot, err
+			}
+			return shot, err
 		}
-		js, err := PageJS(op)
+		if op.Op == "down" {
+			d.held = true
+		}
+		if op.Op == "up" {
+			d.held = false
+		}
+	}
+	if op.Op == "back" || op.Op == "forward" || op.Op == "reload" {
+		if err := waitReady(ctx, page); err != nil {
+			shot, _ := d.finish(ctx, w, note)
+			return shot, err
+		}
+	}
+	return d.finish(ctx, w, note)
+}
+
+func (d *Desk) play(ctx context.Context, page *mygo.Page, op Op) error {
+	if err := waitReady(ctx, page); err != nil {
+		return err
+	}
+	if op.Op != "key" && op.Op != "up" && op.Op != "scroll" {
+		show, err := ShowJS(op)
 		if err != nil {
-			return "", err
+			return err
 		}
-		var last string
-		for i := 0; i < 20; i++ {
-			last, err = evalString(ctx, page, js)
-			if err != nil {
-				return "", err
-			}
-			if readPayloadReady(last) {
-				return last, nil
-			}
-			if err := hold(ctx, 400*time.Millisecond); err != nil {
-				return "", err
-			}
-		}
-		if isBlankDocument(payloadURL(last)) {
-			return "", errors.New("页面没有离开空白页")
-		}
-		return last, nil
-	case "click", "type", "press":
-		if err := waitReady(ctx, page); err != nil {
-			return "", err
-		}
-		if op.Op != "press" {
-			show, err := ShowJS(op)
-			if err != nil {
-				return "", err
-			}
+		if show != "" {
 			if _, err := page.EvalContext(ctx, show); err != nil {
-				return "", err
+				return err
 			}
 			if err := hold(ctx, 160*time.Millisecond); err != nil {
-				return "", err
+				return err
 			}
 			move, err := MoveJS(op)
 			if err != nil {
-				return "", err
+				return err
 			}
 			if _, err := page.EvalContext(ctx, move); err != nil {
-				return "", err
+				return err
 			}
 			if err := hold(ctx, 400*time.Millisecond); err != nil {
-				return "", err
+				return err
 			}
 		}
-		js, err := PageJS(op)
-		if err != nil {
-			return "", err
-		}
-		out, err := evalString(ctx, page, js)
-		if err != nil {
-			return "", err
-		}
-		if out == "not-found" {
-			return "", missingText(op)
-		}
-		return out, nil
-	default:
-		return "", fmt.Errorf("不支持的操作 %s", op.Op)
 	}
+	js, err := PageJS(op)
+	if err != nil {
+		return err
+	}
+	if js == "" {
+		return nil
+	}
+	out, err := evalString(ctx, page, js)
+	if err != nil {
+		return err
+	}
+	if out == "not-found" {
+		return missingTarget(op)
+	}
+	return nil
+}
+
+func (d *Desk) pointerUp(ctx context.Context, page *mygo.Page) error {
+	const js = `(() => {
+  const p = window.__madPointer || {x:0,y:0};
+  const el = document.elementFromPoint(p.x, p.y) || document.body;
+  el.dispatchEvent(new MouseEvent("mouseup", {bubbles:true, cancelable:true, clientX:p.x, clientY:p.y, button:0, view:window}));
+  window.__madPointer = {x:p.x, y:p.y, down:false};
+  return "up";
+})()`
+	d.held = false
+	_, err := evalString(ctx, page, js)
+	return err
+}
+
+func (d *Desk) wait(ctx context.Context, w *mygo.Window, op Op, note string) (Shot, error) {
+	timer := time.NewTimer(time.Duration(op.TimeoutMs) * time.Millisecond)
+	defer timer.Stop()
+	var last Shot
+	for {
+		shot, err := d.finish(ctx, w, note)
+		last = shot
+		if err != nil {
+			return shot, err
+		}
+		if waitMet(shot.Body, op) {
+			return shot, nil
+		}
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		case <-timer.C:
+			return last, errors.New("等待超时")
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+func waitMet(body string, op Op) bool {
+	if op.Text == "" && op.URLContains == "" {
+		var doc struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(body), &doc) != nil {
+			return false
+		}
+		return !isBlankDocument(doc.URL)
+	}
+	var doc struct {
+		URL  string `json:"url"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal([]byte(body), &doc) != nil {
+		return false
+	}
+	if op.URLContains != "" && strings.Contains(doc.URL, op.URLContains) {
+		return true
+	}
+	if op.Text != "" && strings.Contains(doc.Text, op.Text) {
+		return true
+	}
+	return false
+}
+
+func (d *Desk) finish(ctx context.Context, w *mygo.Window, note string) (Shot, error) {
+	page := w.Page()
+	js := snapshotJS()
+	var last string
+	var err error
+	for i := 0; i < 20; i++ {
+		last, err = evalString(ctx, page, js)
+		if err != nil {
+			return Shot{}, err
+		}
+		if readPayloadReady(last) {
+			break
+		}
+		if err := hold(ctx, 400*time.Millisecond); err != nil {
+			return Shot{}, err
+		}
+	}
+	if isBlankDocument(payloadURL(last)) {
+		return Shot{Body: withNote(last, note)}, errors.New("页面没有离开空白页")
+	}
+	png, _ := w.CapturePage()
+	return Shot{Body: withNote(last, note), PNG: png}, nil
+}
+
+func withNote(body, note string) string {
+	if note == "" {
+		return body
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(body), &m) != nil {
+		return note + "\n" + body
+	}
+	m["note"] = note
+	b, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return string(b)
 }
 
 func (d *Desk) ensure(url string) (*mygo.Window, error) {
@@ -302,9 +435,9 @@ func evalString(ctx context.Context, page *mygo.Page, js string) (string, error)
 	}
 }
 
-func missingText(op Op) error {
-	if op.Text != "" {
-		return fmt.Errorf("页面上找不到「%s」", op.Text)
+func missingTarget(op Op) error {
+	if op.Ref != "" {
+		return fmt.Errorf("页面上找不到 %s", op.Ref)
 	}
 	return errors.New("页面上找不到可操作的位置")
 }

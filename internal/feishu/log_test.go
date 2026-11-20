@@ -21,3 +21,12 @@ func TestLogDedupAndPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestRoomTitleUsesLatestWhenNameMissing(t *testing.T) {
+	l := NewLog()
+	l.Add(Line{ID: "1", ChatID: "oc", From: "甲", Text: "登录超时了", At: 1})
+	rooms := l.Rooms()
+	if len(rooms) != 1 || rooms[0].Name != "登录超时了" {
+		t.Fatalf("rooms = %+v", rooms)
+	}
+}

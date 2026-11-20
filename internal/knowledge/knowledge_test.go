@@ -344,3 +344,11 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+func TestBioMatchesNotes(t *testing.T) {
+	notes := []Note{{ID: "n1", Title: "登录超时排查", Scope: "team"}}
+	got := MatchNotesForAgent("在修登录超时", notes)
+	if len(got) != 1 || got[0].ID != "n1" {
+		t.Fatalf("got %+v", got)
+	}
+}

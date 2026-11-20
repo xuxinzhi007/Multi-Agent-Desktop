@@ -45,8 +45,8 @@ func TestDeepSeekThinkingRequestAndReasoning(t *testing.T) {
 	if thinking["type"] != "enabled" {
 		t.Fatalf("thinking = %#v, want type enabled", got["thinking"])
 	}
-	if got["reasoning_effort"] != "high" {
-		t.Fatalf("reasoning_effort = %#v, want high", got["reasoning_effort"])
+	if got["reasoning_effort"] != "medium" {
+		t.Fatalf("reasoning_effort = %#v, want medium", got["reasoning_effort"])
 	}
 	msgs, _ := got["messages"].([]any)
 	first, _ := msgs[0].(map[string]any)

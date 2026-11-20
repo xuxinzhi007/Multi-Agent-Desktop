@@ -16,10 +16,11 @@ type Props = {
 
 const VENDORS: { id: string; label: string; local: boolean; baseUrl: string; login?: boolean }[] = [
   { id: 'llamacpp', label: '本地 llama.cpp', local: true, baseUrl: 'http://127.0.0.1:8080' },
+  { id: 'ollama', label: '本地 Ollama', local: true, baseUrl: 'http://127.0.0.1:11434' },
   { id: 'qoder', label: 'Qoder', local: false, baseUrl: 'https://api3.qoder.sh', login: true },
   { id: 'deepseek', label: 'DeepSeek', local: false, baseUrl: 'https://api.deepseek.com' },
   { id: 'openai', label: 'OpenAI', local: false, baseUrl: 'https://api.openai.com' },
-  { id: 'claude', label: 'Claude', local: false, baseUrl: 'https://api.anthropic.com' },
+  { id: 'claude', label: 'Claude', local: false, baseUrl: '' },
 ]
 
 function errText(e: unknown): string {
@@ -36,6 +37,14 @@ function vendorLabel(id: string): string {
   return VENDORS.find((v) => v.id === id)?.label || id
 }
 
+function savedText(ep: ProviderEndpoint, verb: '保存' | '登录'): { err: string; note: string } {
+  const name = vendorLabel(ep.provider)
+  if (!ep.ok) return { err: ep.reason || `${name}没有生效`, note: '' }
+  const quota = ep.quota ? `${ep.quota}。` : ''
+  const how = verb === '登录' ? '这次授权' : '这把 Key'
+  return { err: '', note: `已${verb}。${name} 现在用${how}。${quota}之后的对话会用它。` }
+}
+
 function ProviderBoard() {
   const [rows, setRows] = useState<ProviderEndpoint[]>([])
   const [loading, setLoading] = useState(true)
@@ -45,6 +54,7 @@ function ProviderBoard() {
   const [showKey, setShowKey] = useState(false)
   const [busy, setBusy] = useState(false)
   const [formErr, setFormErr] = useState('')
+  const [formNote, setFormNote] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -68,20 +78,28 @@ function ProviderBoard() {
     setBaseUrl(row?.baseUrl || preset?.baseUrl || '')
     setApiKey('')
     setFormErr('')
+    setFormNote('')
+  }
+
+  const applyEndpoint = (ep: ProviderEndpoint, verb: '保存' | '登录') => {
+    setRows((cur) => {
+      const next = cur.some((r) => r.provider === ep.provider)
+        ? cur.map((r) => (r.provider === ep.provider ? ep : r))
+        : [...cur, ep]
+      return next
+    })
+    const msg = savedText(ep, verb)
+    setFormErr(msg.err)
+    setFormNote(msg.note)
+    if (!msg.err) setApiKey('')
   }
 
   const loginQoder = async () => {
     setBusy(true)
     setFormErr('')
+    setFormNote('')
     try {
-      const ep = await API.loginQoder()
-      setRows((cur) => {
-        const next = cur.some((r) => r.provider === ep.provider)
-          ? cur.map((r) => (r.provider === ep.provider ? ep : r))
-          : [...cur, ep]
-        return next
-      })
-      setEditing('')
+      applyEndpoint(await API.loginQoder(), '登录')
     } catch (e) {
       setFormErr(errText(e))
     } finally {
@@ -93,19 +111,17 @@ function ProviderBoard() {
     if (!editing) return
     setBusy(true)
     setFormErr('')
+    setFormNote('')
     try {
-      const ep = await API.saveProvider({
-        provider: editing,
-        baseUrl,
-        apiKey,
-        model: '',
-      })
-      setRows((cur) => {
-        const next = cur.some((r) => r.provider === ep.provider)
-          ? cur.map((r) => (r.provider === ep.provider ? ep : r))
-          : [...cur, ep]
-        return next
-      })
+      applyEndpoint(
+        await API.saveProvider({
+          provider: editing,
+          baseUrl,
+          apiKey,
+          model: '',
+        }),
+        '保存',
+      )
     } catch (e) {
       setFormErr(errText(e))
     } finally {
@@ -123,7 +139,7 @@ function ProviderBoard() {
         <div className="c-settings__card-head">
           <div>
             <div className="c-settings__card-title">已保存</div>
-            <div className="c-settings__card-sub">检查通过的标成生效，并列出这个厂商加载到的模型</div>
+            <div className="c-settings__card-sub">生效表示现在的对话会用这把 Key。Qoder 还会写出剩余额度</div>
           </div>
         </div>
         <div className="c-settings__card-body">
@@ -139,6 +155,7 @@ function ProviderBoard() {
                     {row.ok ? '生效' : '未生效'}
                   </span>
                 </div>
+                {row.quota && <p className="c-settings__note is-ok">{row.quota}</p>}
                 {row.ok && row.models && row.models.length > 0 && (
                   <ul className="c-providers__models" aria-label={`${vendorLabel(row.provider)} 的模型`}>
                     {row.models.map((m) => (
@@ -146,7 +163,7 @@ function ProviderBoard() {
                     ))}
                   </ul>
                 )}
-                {!row.ok && row.reason && <p className="c-settings__hint">{row.reason}</p>}
+                {!row.ok && row.reason && <p className="c-settings__note is-bad">{row.reason}</p>}
               </div>
             ))}
           </div>
@@ -172,6 +189,7 @@ function ProviderBoard() {
                     <span className="c-providers__url">
                       {row?.saved ? '已保存' : '未保存'}
                       {row?.ok ? ' · 生效' : ''}
+                      {row?.quota ? ` · ${row.quota}` : ''}
                     </span>
                   </button>
                 </div>
@@ -188,7 +206,10 @@ function ProviderBoard() {
                   aria-label="服务地址"
                   value={baseUrl}
                   placeholder={current?.baseUrl || 'https://'}
-                  onChange={(e) => setBaseUrl(e.target.value)}
+                  onChange={(e) => {
+                    setBaseUrl(e.target.value)
+                    setFormNote('')
+                  }}
                 />
               </label>
               <label className="c-settings__field">
@@ -212,7 +233,10 @@ function ProviderBoard() {
                             ? '已保存，留空则不修改'
                             : 'sk-…'
                     }
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => {
+                      setApiKey(e.target.value)
+                      setFormNote('')
+                    }}
                   />
                   <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowKey((v) => !v)}>
                     {showKey ? '隐藏' : '显示'}
@@ -233,10 +257,15 @@ function ProviderBoard() {
                 <button type="button" className="c-btn c-btn--primary" disabled={busy} onClick={() => void save()}>
                   {busy ? '正在检查…' : '保存并检查'}
                 </button>
+                {formNote && (
+                  <p className="c-settings__note is-ok" role="status">
+                    {formNote}
+                  </p>
+                )}
                 {formErr && (
-                  <span className="c-settings__hint" role="status">
+                  <p className="c-settings__note is-bad" role="alert">
                     {formErr}
-                  </span>
+                  </p>
                 )}
               </div>
             </>
@@ -453,10 +482,10 @@ function FeishuBoard() {
           </span>
         </label>
         <label className="c-settings__field">
-          <span className="c-settings__field-label">绑定会话</span>
+          <span className="c-settings__field-label">默认会话</span>
           <select
             className="c-settings__input"
-            aria-label="绑定会话"
+            aria-label="默认会话"
             value={agentId}
             onChange={(e) => setAgentId(e.target.value)}
           >

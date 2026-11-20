@@ -5,7 +5,7 @@ import MentionText, { type MentionTarget } from './MentionText'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
-import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
+import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
 
 type Props = {
   channel: Channel | null
@@ -72,14 +72,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
   ]
   const memberById = (id: string) => agents.find((a) => a.id === id)
 
-  const repliers = (() => {
-    if (mentioned.includes('所有人')) return members
-    if (mentioned.length > 0) return members.filter((m) => mentioned.includes(m.name))
-    if (channel.speaker) return members.filter((m) => m.id === channel.speaker)
-    return []
-  })()
-  const blind = images.length > 0 && repliers.some((m) => !m.seesImages)
-
   const addImages = async (files: File[]) => {
     const got = await readImageFiles(files)
     if (got.error) setImageNote(got.error)
@@ -89,7 +81,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
 
   const submit = () => {
     const text = input.trim()
-    if ((!text && mentioned.length === 0 && images.length === 0) || blind) return
+    if (!text && mentioned.length === 0 && images.length === 0) return
     // 把被 @ 的成员名附在文本末尾，后端 ParseMentions 能读到；
     // 同时传结构化 mentions，避免名字里含空格时解析失败。
     const textWithMentions =
@@ -107,7 +99,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err)
-        setImageNote(msg || blindSentence)
+        setImageNote(msg || '发送失败')
       })
   }
 
@@ -429,7 +421,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               className="c-btn c-btn--primary c-btn--sm"
               style={{ marginLeft: 'auto' }}
               onClick={submit}
-              disabled={blind || (!input.trim() && mentioned.length === 0 && images.length === 0)}
+              disabled={!input.trim() && mentioned.length === 0 && images.length === 0}
             >
               发送
             </button>
@@ -442,7 +434,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             color: 'var(--text-disabled)',
           }}
         >
-          {blind ? blindSentence : imageNote || 'Enter 发送 · Shift+Enter 换行'}
+          {imageNote || 'Enter 发送 · Shift+Enter 换行'}
         </div>
       </div>
     </div>

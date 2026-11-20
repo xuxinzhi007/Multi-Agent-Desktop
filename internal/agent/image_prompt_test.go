@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -73,23 +72,29 @@ func TestPromptStoresImage(t *testing.T) {
 	}
 }
 
-func TestPromptRejectsBlindModel(t *testing.T) {
+func TestPromptSendsImageWithoutNameGate(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
 	m.SetImageDir(t.TempDir())
 	a := m.Create("", "甲", "后端")
 	a.Backend = "mock"
 	a.LLMCfg = &llm.Config{Provider: "qoder", Model: "Qwen3.8-Max"}
-	before := len(a.Snapshot().Messages)
 	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1}
 	err := m.Prompt(context.Background(), PromptRequest{
 		AgentID: a.ID,
 		Text:    "看这个报错",
 		Images:  []llm.ImageIn{{MIME: "image/png", Data: base64.StdEncoding.EncodeToString(png)}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "这个会话还不能看图") {
-		t.Fatalf("err = %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(a.Snapshot().Messages) != before {
-		t.Fatalf("messages %d -> %d", before, len(a.Snapshot().Messages))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, msg := range a.Snapshot().Messages {
+			if msg.Role == "user" && msg.Content == "看这个报错" && len(msg.Blocks) > 0 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatal("image never reached the session")
 }

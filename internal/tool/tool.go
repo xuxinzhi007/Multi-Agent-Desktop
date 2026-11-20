@@ -51,6 +51,7 @@ type Result struct {
 	CallID  string `json:"callId"`
 	Status  Status `json:"status"`
 	Content string `json:"content"`
+	Image   []byte `json:"-"`
 	Meta    Meta   `json:"meta"`
 }
 

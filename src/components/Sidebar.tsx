@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { API, type AgentView as Agent, type Channel, type Room } from '../mygo'
-import { bodyOf } from '../lib/message'
+import { agentTree, linkParents, type AgentNode } from '../lib/agent-tree'
 import { previewMode } from '../lib/preview-runtime'
 import CreateAgentModal from './CreateAgentModal'
 
@@ -20,6 +20,7 @@ type Props = {
   onCreateChannel: (name: string, members: string[]) => void
   onOpenSettings: () => void
   onOpenBrowser: () => void
+  onBindFeishu?: (chatId: string, agentId: string) => void
   /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
   createOpen: boolean
   onCreateOpenChange: (open: boolean) => void
@@ -63,23 +64,228 @@ function ViewTab({
   )
 }
 
-function nestAgents(agents: Agent[]): { agent: Agent; depth: number }[] {
-  const ids = new Set(agents.map((a) => a.id))
-  const children = new Map<string, Agent[]>()
-  const roots: Agent[] = []
-  for (const a of agents) {
-    if (a.parentId && ids.has(a.parentId)) {
-      children.set(a.parentId, [...(children.get(a.parentId) ?? []), a])
-    } else {
-      roots.push(a)
-    }
-  }
-  const out: { agent: Agent; depth: number }[] = []
-  for (const root of roots) {
-    out.push({ agent: root, depth: 0 })
-    for (const child of children.get(root.id) ?? []) out.push({ agent: child, depth: 1 })
-  }
-  return out
+function AgentLine({
+  agent: a,
+  active,
+  nested,
+  childCount,
+  folded,
+  onToggle,
+  onSelect,
+  onDelete,
+}: {
+  agent: Agent
+  active: boolean
+  nested: boolean
+  childCount: number
+  folded: boolean
+  onToggle?: () => void
+  onSelect: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div
+      onClick={onSelect}
+      style={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+        padding: nested ? '6px 8px 6px 8px' : '8px 10px 8px 11px',
+        borderRadius: 'var(--radius-md)',
+        cursor: 'pointer',
+        background: active ? 'var(--bg-surface-active)' : 'transparent',
+        transition: 'background var(--dur-fast) var(--ease)',
+      }}
+      onMouseEnter={(e) => {
+        if (!active) e.currentTarget.style.background = 'var(--bg-surface)'
+      }}
+      onMouseLeave={(e) => {
+        if (!active) e.currentTarget.style.background = 'transparent'
+      }}
+    >
+      {active && (
+        <span
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            width: 2,
+            height: 16,
+            borderRadius: 'var(--radius-full)',
+            background: a.color,
+          }}
+        />
+      )}
+      {childCount > 0 ? (
+        <button
+          type="button"
+          className="c-icon-btn"
+          aria-label={folded ? '展开子会话' : '收起子会话'}
+          title={folded ? '展开子会话' : '收起子会话'}
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggle?.()
+          }}
+          style={{ width: 16, height: 16, fontSize: 10, flexShrink: 0 }}
+        >
+          {folded ? '▸' : '▾'}
+        </button>
+      ) : (
+        nested && <span style={{ width: 8, flexShrink: 0 }} />
+      )}
+      <span
+        className="agent-avatar"
+        style={{
+          width: nested ? 16 : 19,
+          height: nested ? 16 : 19,
+          borderRadius: 'var(--radius-sm)',
+          background: a.color,
+          color: 'var(--bg-base)',
+          display: 'grid',
+          placeItems: 'center',
+          fontSize: nested ? 9 : 10,
+          fontWeight: 700,
+          flexShrink: 0,
+          opacity: a.status === 'idle' ? 0.55 : 1,
+          // @ts-ignore CSS 变量
+          '--avatar-color': a.color,
+        }}
+      >
+        {a.name.slice(0, 1).toUpperCase()}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            fontSize: 'var(--text-base)',
+            fontWeight: active ? 600 : 500,
+            color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+          }}
+        >
+          <span
+            style={{
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {a.name}
+          </span>
+          {childCount > 0 && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', flexShrink: 0 }}>
+              {childCount}
+            </span>
+          )}
+          <span
+            className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}
+            style={{ width: 5, height: 5 }}
+          />
+        </div>
+        <div
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-disabled)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {a.busy
+            ? `正在${a.busy}里回答`
+            : a.status === 'blocked'
+              ? `⚠ ${a.blockedReason || '等你处理'}`
+              : a.status === 'running'
+                ? '正在处理…'
+                : a.status === 'queued'
+                  ? `排队中 (${a.queueLen})`
+                  : sessionLine(a)}
+        </div>
+      </div>
+      <button
+        className="c-icon-btn c-icon-btn--danger"
+        onClick={(e) => {
+          e.stopPropagation()
+          if (confirm(`删除 agent「${a.name}」？\n\n历史消息将一并清除，不可恢复。`)) onDelete()
+        }}
+        title="删除"
+        style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}
+        onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+        onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.35')}
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
+function AgentBranch({
+  node,
+  depth,
+  activeId,
+  folded,
+  onToggle,
+  onSelect,
+  onDelete,
+}: {
+  node: AgentNode<Agent>
+  depth: number
+  activeId: string | null
+  folded: Record<string, boolean>
+  onToggle: (id: string) => void
+  onSelect: (id: string) => void
+  onDelete: (id: string) => void
+}) {
+  const a = node.agent
+  const kids = node.children
+  const shut = kids.length > 0 && !!folded[a.id]
+  const group = kids.length > 0 && depth === 0
+  return (
+    <div
+      style={{
+        marginBottom: group ? 6 : 1,
+        borderRadius: 'var(--radius-md)',
+        background: group ? 'var(--bg-surface)' : 'transparent',
+        padding: group ? 2 : 0,
+      }}
+    >
+      <AgentLine
+        agent={a}
+        active={a.id === activeId}
+        nested={depth > 0}
+        childCount={kids.length}
+        folded={shut}
+        onToggle={() => onToggle(a.id)}
+        onSelect={() => onSelect(a.id)}
+        onDelete={() => onDelete(a.id)}
+      />
+      {kids.length > 0 && !shut && (
+        <div
+          style={{
+            margin: '0 4px 2px 18px',
+            paddingLeft: 8,
+            borderLeft: `2px solid ${a.color}`,
+          }}
+        >
+          {kids.map((child) => (
+            <AgentBranch
+              key={child.agent.id}
+              node={child}
+              depth={depth + 1}
+              activeId={activeId}
+              folded={folded}
+              onToggle={onToggle}
+              onSelect={onSelect}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function sessionLine(a: Agent): string {
@@ -93,7 +299,37 @@ function sessionLine(a: Agent): string {
 
 export default function Sidebar(p: Props) {
   const [showChannelModal, setShowChannelModal] = useState(false)
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
+  const [recovered, setRecovered] = useState<Record<string, string>>({})
+  const hasParent = p.agents.some((a) => !!a.parentId)
 
+  useEffect(() => {
+    if (previewMode() || p.agents.length === 0 || hasParent) return
+    let dead = false
+    // 列表接口会把历史拿掉，父子关系只能从各会话最近的消息里认。
+    Promise.all(
+      p.agents.map((a) =>
+        API.agentMessages(a.id, 80)
+          .then((messages) => ({ id: a.id, name: a.name, parentId: a.parentId, messages: messages ?? [] }))
+          .catch(() => ({ id: a.id, name: a.name, parentId: a.parentId, messages: [] })),
+      ),
+    ).then((list) => {
+      if (dead) return
+      const next: Record<string, string> = {}
+      for (const a of linkParents(list)) {
+        if (a.parentId) next[a.id] = a.parentId
+      }
+      setRecovered(next)
+    })
+    return () => {
+      dead = true
+    }
+  }, [p.agents.length, hasParent])
+
+  const linked = linkParents(
+    p.agents.map((a) => (a.parentId || !recovered[a.id] ? a : { ...a, parentId: recovered[a.id] })),
+  )
+  const tree = agentTree(linked)
   const running = p.agents.filter((a) => a.status === 'running').length
 
   return (
@@ -281,7 +517,6 @@ export default function Sidebar(p: Props) {
         )}
         {p.feishuRooms.map((room) => {
           const active = p.activeKind === 'feishu' && room.id === p.activeId
-          const last = room.messages?.[room.messages.length - 1]
           return (
             <div
               key={room.id}
@@ -310,8 +545,27 @@ export default function Sidebar(p: Props) {
                   {room.name || '飞书会话'}
                 </div>
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                  {last ? bodyOf(last.text) : '还没有消息'}
+                  由{room.agentName || '本机会话'}回答
                 </div>
+                {p.onBindFeishu && p.agents.length > 0 && (
+                  <select
+                    aria-label={`${room.name}由谁回答`}
+                    value={room.agentId || ''}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      e.stopPropagation()
+                      if (e.target.value) p.onBindFeishu?.(room.id, e.target.value)
+                    }}
+                    style={{ marginTop: 2, maxWidth: 160, fontSize: 'var(--text-xs)' }}
+                  >
+                    {!room.agentId && <option value="">选择会话</option>}
+                    {p.agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             </div>
           )
@@ -369,129 +623,18 @@ export default function Sidebar(p: Props) {
           </div>
         )}
 
-        {nestAgents(p.agents).map(({ agent: a, depth }) => {
-          const active = p.activeKind === 'agent' && a.id === p.activeId
-          return (
-            <div
-              key={a.id}
-              onClick={() => p.onSelect('agent', a.id)}
-              style={{
-                position: 'relative',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                padding: '8px 10px 8px 11px',
-                marginLeft: depth ? 16 : 0,
-                borderRadius: 'var(--radius-md)',
-                cursor: 'pointer',
-                marginBottom: 1,
-                background: active ? 'var(--bg-surface-active)' : 'transparent',
-                transition: 'background var(--dur-fast) var(--ease)',
-              }}
-              onMouseEnter={(e) => {
-                if (!active) e.currentTarget.style.background = 'var(--bg-surface)'
-              }}
-              onMouseLeave={(e) => {
-                if (!active) e.currentTarget.style.background = 'transparent'
-              }}
-            >
-              {active && (
-                <span
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    width: 2,
-                    height: 16,
-                    borderRadius: 'var(--radius-full)',
-                    background: a.color,
-                  }}
-                />
-              )}
-              <span
-                className="agent-avatar"
-                style={{
-                  width: 19,
-                  height: 19,
-                  borderRadius: 'var(--radius-sm)',
-                  background: a.color,
-                  color: 'var(--bg-base)',
-                  display: 'grid',
-                  placeItems: 'center',
-                  fontSize: 10,
-                  fontWeight: 700,
-                  flexShrink: 0,
-                  opacity: a.status === 'idle' ? 0.55 : 1,
-                  // @ts-ignore CSS 变量
-                  '--avatar-color': a.color,
-                }}
-              >
-                {a.name.slice(0, 1).toUpperCase()}
-              </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    fontSize: 'var(--text-base)',
-                    fontWeight: active ? 600 : 500,
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  }}
-                >
-                  <span
-                    style={{
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}
-                  >
-                    {depth ? `└ ${a.name}` : a.name}
-                  </span>
-                  <span
-                    className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}
-                    style={{ width: 5, height: 5 }}
-                  />
-                </div>
-                <div
-                  style={{
-                    fontSize: 'var(--text-xs)',
-                    color: 'var(--text-disabled)',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                  }}
-                >
-                  {a.busy
-                    ? `正在${a.busy}里回答`
-                    : a.status === 'blocked'
-                    ? `⚠ ${a.blockedReason || '等你处理'}`
-                    : a.status === 'running'
-                      ? '正在处理…'
-                      : a.status === 'queued'
-                        ? `排队中 (${a.queueLen})`
-                      : sessionLine(a)}
-                </div>
-              </div>
-              <button
-                className="c-icon-btn c-icon-btn--danger"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (confirm(`删除 agent「${a.name}」？\n\n历史消息将一并清除，不可恢复。`)) {
-                    p.onDelete(a.id)
-                  }
-                }}
-                title="删除"
-                style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}
-                onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
-                onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.35')}
-              >
-                ×
-              </button>
-            </div>
-          )
-        })}
+        {tree.map((node) => (
+          <AgentBranch
+            key={node.agent.id}
+            node={node}
+            depth={0}
+            activeId={p.activeKind === 'agent' ? p.activeId : null}
+            folded={folded}
+            onToggle={(id) => setFolded((s) => ({ ...s, [id]: !s[id] }))}
+            onSelect={(id) => p.onSelect('agent', id)}
+            onDelete={p.onDelete}
+          />
+        ))}
 
       </div>
 

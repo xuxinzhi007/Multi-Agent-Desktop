@@ -11,6 +11,7 @@ import {
   type ShellEvent,
   type ShellResultEvent,
 } from '../mygo'
+import { linkParents } from './agent-tree'
 import { bodyOf } from './message'
 import type { ToolCall } from '../components/Inspector'
 
@@ -47,6 +48,8 @@ type State = {
   tools: ToolCall[]
   /** 这一轮还没落成消息的思考文本，按 agent id */
   reasoning: Record<string, string>
+  /** 这一轮模型请求：since 是发出时刻，first 是到首个推理或正文的毫秒，heard 表示先到的是哪一种。 */
+  pace: Record<string, { since: number; first?: number; heard?: 'reason' | 'text' }>
   tokenUsage: Record<string, { in: number; out: number; lastIn?: number }>
   /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
   focusAgentId: string | null
@@ -76,6 +79,7 @@ const EMPTY: State = {
   shellByAgent: {},
   tools: [],
   reasoning: {},
+  pace: {},
   tokenUsage: {},
   focusAgentId: null,
   opened: '',
@@ -139,13 +143,25 @@ export function useBackend() {
           const streaming = { ...s.streaming }
           const channelStreaming = { ...s.channelStreaming }
           const reasoning = { ...s.reasoning }
+          const pace = { ...(s.pace ?? {}) }
           let touchS = false
           let touchC = false
           let touchR = false
+          let touchP = false
+          const hear = (id: string, kind: 'reason' | 'text') => {
+            const row = pace[id]
+            if (!row) return
+            const first = row.first ?? Date.now() - row.since
+            const heard = row.heard === 'text' || kind === 'text' ? 'text' : 'reason'
+            if (row.first === first && row.heard === heard) return
+            pace[id] = { ...row, first, heard }
+            touchP = true
+          }
           for (const [id, item] of deltas) {
             if ((deltaGen.get(id) ?? 0) !== item.g) continue
             streaming[id] = (streaming[id] ?? '') + item.text
             touchS = true
+            hear(id, 'text')
           }
           for (const [id, item] of channelDeltas) {
             if ((channelGen.get(id) ?? 0) !== item.g) continue
@@ -162,13 +178,15 @@ export function useBackend() {
               reasoning[id] = prev + item.text
             }
             touchR = true
+            hear(id, 'reason')
           }
-          if (!touchS && !touchR && !touchC) return s
+          if (!touchS && !touchR && !touchC && !touchP) return s
           return {
             ...s,
             streaming: touchS ? streaming : s.streaming,
             channelStreaming: touchC ? channelStreaming : s.channelStreaming,
             reasoning: touchR ? reasoning : s.reasoning,
+            pace: touchP ? pace : s.pace,
           }
         })
       })
@@ -220,7 +238,7 @@ export function useBackend() {
         const opened = s.opened
         return {
           ...s,
-          agents: (agents ?? []).map((a) => {
+          agents: linkParents(agents ?? []).map((a) => {
             if (a.id !== opened) return shellAgent(a)
             const cur = s.agents.find((x) => x.id === a.id)
             return { ...shellAgent(a), messages: cur?.messages ?? [], last: a.last || cur?.last || '' }
@@ -237,6 +255,14 @@ export function useBackend() {
 
     sub(events.agentCreated, (a) =>
       setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, shellAgent(a)] })),
+    )
+    sub(events.agentProfile, (a) =>
+      setState((s) => ({
+        ...s,
+        agents: s.agents.map((x) =>
+          x.id === a.id ? { ...x, name: a.name, role: a.role, proposal: a.proposal } : x,
+        ),
+      })),
     )
     sub(events.agentDeleted, (id) =>
       setState((s) => ({
@@ -273,6 +299,10 @@ export function useBackend() {
         streaming: status === 'running' ? s.streaming : omit(s.streaming, id),
         channelStreaming: status === 'running' ? s.channelStreaming : omit(s.channelStreaming, id),
         reasoning: status === 'running' ? s.reasoning : omit(s.reasoning, id),
+        pace:
+          status === 'running'
+            ? { ...(s.pace ?? {}), [id]: s.pace?.[id] ?? { since: Date.now() } }
+            : omit(s.pace, id),
       }))
     })
     sub(events.agentMessage, ({ id, message, tokensIn, tokensOut }) => {
@@ -496,8 +526,9 @@ export function useBackend() {
         ...s,
         agents: s.agents.map((x) => {
           if (x.id !== a.id) return x
-          if (s.opened === a.id) return { ...x, ...a, messages: x.messages, last: a.last || x.last }
-          return shellAgent({ ...x, ...a, messages: [] })
+          const parentId = a.parentId || x.parentId
+          if (s.opened === a.id) return { ...x, ...a, parentId, messages: x.messages, last: a.last || x.last }
+          return shellAgent({ ...x, ...a, parentId, messages: [] })
         }),
       })),
     )
@@ -567,6 +598,27 @@ export function useBackend() {
         )
       case 'agent.delete':
         return API.deleteAgent((data as { id: string }).id)
+      case 'agent.profile': {
+        const { id, name, role } = data as { id: string; name: string; role: string }
+        return API.setAgentProfile(id, name, role)
+      }
+      case 'feishu.bind': {
+        const { chatId, agentId } = data as { chatId: string; agentId: string }
+        return API.setFeishuRoomAgent(chatId, agentId).then(() => {
+          setState((s) => ({
+            ...s,
+            feishuRooms: s.feishuRooms.map((r) =>
+              r.id === chatId
+                ? {
+                    ...r,
+                    agentId,
+                    agentName: s.agents.find((a) => a.id === agentId)?.name || r.agentName,
+                  }
+                : r,
+            ),
+          }))
+        })
+      }
       case 'agent.stop':
         return API.stopAgent((data as { id: string }).id)
       case 'agent.prompt': {
@@ -663,8 +715,9 @@ export function useBackend() {
                 ...s,
                 agents: s.agents.map((x) => {
                   if (x.id !== view.id) return x
-                  if (s.opened === x.id) return { ...x, ...view, messages: x.messages, last: view.last || x.last }
-                  return shellAgent({ ...x, ...view, messages: [] })
+                  const parentId = view.parentId || x.parentId
+                  if (s.opened === x.id) return { ...x, ...view, parentId, messages: x.messages, last: view.last || x.last }
+                  return shellAgent({ ...x, ...view, parentId, messages: [] })
                 }),
               }))
             }

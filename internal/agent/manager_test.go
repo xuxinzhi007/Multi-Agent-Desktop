@@ -195,8 +195,11 @@ func TestKnowledgeInjection(t *testing.T) {
 	if strings.Contains(content, "## 知识库") || strings.Contains(content, "约定: 用 Go 风格") {
 		t.Errorf("create should not inject knowledge: %q", content)
 	}
-	if !strings.Contains(content, "角色：后端专家") {
-		t.Errorf("system prompt = %q, want the role line", content)
+	if strings.Contains(content, "后端专家") {
+		t.Errorf("system prompt still carries the bio: %q", content)
+	}
+	if !strings.Contains(content, "工具规则、工作目录和安全约束由应用持有") {
+		t.Errorf("system prompt = %q", content)
 	}
 
 	m2 := newTestManager(t)
@@ -412,5 +415,56 @@ func TestStopAlsoStopsForward(t *testing.T) {
 	}
 	if ctx.Err() == nil {
 		t.Fatal("forwarded session still running")
+	}
+}
+
+func TestRenamePersistsAcrossSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	m := newTestManager(t)
+	if err := m.SetStore(path); err != nil {
+		t.Fatal(err)
+	}
+	a := m.Create("a1", "甲", "前端")
+	sys := a.Snapshot().Messages[0].Content
+	if err := m.SetProfile(a.ID, "甲乙", "在修登录超时"); err != nil {
+		t.Fatal(err)
+	}
+	m.waitSaves()
+	m2 := newTestManager(t)
+	if err := m2.SetStore(path); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := m2.Get("a1")
+	if !ok {
+		t.Fatal("missing")
+	}
+	sn := b.Snapshot()
+	if sn.Name != "甲乙" || sn.Role != "在修登录超时" {
+		t.Fatalf("name=%q role=%q", sn.Name, sn.Role)
+	}
+	if strings.Contains(sn.Messages[0].Content, "在修登录超时") || sn.Messages[0].Content != sys {
+		t.Fatalf("system changed: %q", sn.Messages[0].Content)
+	}
+}
+
+func TestTurnRewritesUnpinnedBio(t *testing.T) {
+	m := newTestManager(t)
+	a := m.Create("", "甲", "前端")
+	a.noteBio(m, "帮我看登录超时")
+	if got := a.Snapshot().Role; got != "帮我看登录超时" {
+		t.Fatalf("role = %q", got)
+	}
+}
+
+func TestPinnedBioStoresProposal(t *testing.T) {
+	m := newTestManager(t)
+	a := m.Create("", "甲", "前端")
+	if err := m.SetProfile(a.ID, "甲", "我写的简介"); err != nil {
+		t.Fatal(err)
+	}
+	a.noteBio(m, "这轮在查队列")
+	sn := a.Snapshot()
+	if sn.Role != "我写的简介" || sn.Proposal != "这轮在查队列" {
+		t.Fatalf("role=%q proposal=%q", sn.Role, sn.Proposal)
 	}
 }

@@ -96,6 +96,9 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		Emitter:      &loopEmitter{m: m, agent: a, channelID: channelID},
 		System:       system,
 		ContextLimit: llm.ContextLimit(cfg),
+		SaveImage: func(png []byte) (string, error) {
+			return llm.SaveImage(m.ImageDir(), "image/png", png)
+		},
 		Sync: func(msgs []llm.Message) {
 			if channelID != "" {
 				return
@@ -313,10 +316,9 @@ func loopSystemPrompt(workDir string) string {
 		"- ask_agent：把任务交给已有会话并等待回复。参数 name、task。",
 		"- list_notes：看知识库里已有的笔记。",
 		"- save_note：把结论写进应用正在用的知识库，页面会马上更新。参数 title、body，可选 tags。",
-		"- web：操作应用内置浏览器，用来跑页面和自动化测试。参数 op（read、open、click、type、press）。页面在应用自己的窗口里打开，登录留在那里。点击和输入用页面上看得见的文字，不要写脚本。",
+		"- web：操作应用内置浏览器。先 snapshot，再用它给出的 ref 做 click、type、key、scroll、down、up。没有控件的区域用 x、y。每次动作后看新的控件表和画面。编号过期就重新 snapshot。不要写脚本，也不要操作用户的 Chrome。",
 		"这些能力已经接在工具里。不要回答自己无法创建 agent 或无法和其他 agent 对话；需要协作时直接调用上面的工具。",
-		"飞书机器人已经接入：长连接收文本、富文本和图片。图片会给出本机路径。@ 会换成对方的名字。回复用消息卡片，不是 webhook。不要说项目没有飞书集成。",
-		"群聊会把别人的发言和你已经说过的话一起放进上下文。标成「你」的是你自己的历史发言，不要再复述。",
+		"飞书里的一句是一件任务，可以用这台电脑上的工具去做。回复会写回原来那张卡片。不要说项目没有飞书集成。",
 		"没有用工具查过这个工作目录之前，不要说某项能力、接口或集成不存在。",
 		"沉淀知识必须调用 save_note。不要直接修改 knowledge.jsonl，那样只改了磁盘，打开着的页面不会变。",
 	}

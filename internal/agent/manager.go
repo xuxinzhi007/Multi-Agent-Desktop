@@ -43,6 +43,10 @@ type Agent struct {
 	BlockedReason string `json:"blockedReason,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的，侧栏里和别人平级。
 	ParentID string `json:"parentId,omitempty"`
+	// BioPinned 为真时，简介是用户写的，一轮结束不再覆盖。
+	BioPinned bool `json:"bioPinned,omitempty"`
+	// Proposal 是一轮结束后建议改成的简介。采用前不替换现在这一行。
+	Proposal string `json:"proposal,omitempty"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
@@ -148,7 +152,8 @@ func (m *Manager) buildSystemPrompt(role string) string {
 // systemPromptFor 是无锁的纯函数，供 Create 在持锁时调用。
 // 首条 system 只写角色。已挂到会话上的笔记由当轮循环按 knowledgeIDs 带上。
 func systemPromptFor(role string) string {
-	return "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"
+	_ = role
+	return "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。"
 }
 
 // SetImageDir 指定图片字节放在哪。空则带图的消息存不下来。
@@ -297,6 +302,8 @@ func (m *Manager) Load() error {
 			LLMCfg:        saved.LLMCfg,
 			Knowledge:     append([]string(nil), saved.Knowledge...),
 			BlockedReason: saved.BlockedReason,
+			BioPinned:     saved.BioPinned,
+			Proposal:      saved.Proposal,
 			queue:         make(chan PromptRequest, 32),
 			done:          make(chan struct{}),
 		}
@@ -317,6 +324,38 @@ func (m *Manager) SetProviders(list []llm.Config) {
 	m.mu.Lock()
 	m.providers = append([]llm.Config(nil), list...)
 	m.mu.Unlock()
+}
+
+// ApplyProviderCreds 把这个厂商刚保存的地址和 Key 写进已经选了它的会话。
+// 否则会话里留着上一把 Key，换过之后对话仍用旧登录。
+func (m *Manager) ApplyProviderCreds(provider, apiKey, baseURL string) {
+	if provider == "" {
+		return
+	}
+	m.mu.RLock()
+	list := make([]*Agent, 0, len(m.agents))
+	for _, a := range m.agents {
+		list = append(list, a)
+	}
+	m.mu.RUnlock()
+	changed := false
+	for _, a := range list {
+		a.mu.Lock()
+		if a.LLMCfg != nil && a.LLMCfg.Provider == provider {
+			if apiKey != "" && a.LLMCfg.APIKey != apiKey {
+				a.LLMCfg.APIKey = apiKey
+				changed = true
+			}
+			if baseURL != "" && a.LLMCfg.BaseURL != baseURL {
+				a.LLMCfg.BaseURL = baseURL
+				changed = true
+			}
+		}
+		a.mu.Unlock()
+	}
+	if changed {
+		m.goSave()
+	}
 }
 
 func (m *Manager) Providers() []llm.Config {
@@ -706,13 +745,6 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 		req.Blocks = append(req.Blocks, blocks...)
 		req.Images = nil
 	}
-	if llm.HasImage(req.Blocks) {
-		cfg := a.EffectiveLLM(m)
-		if !llm.SeesImages(cfg.Provider, cfg.Model) {
-			return fmt.Errorf("%s", llm.BlindModel)
-		}
-	}
-
 	if err := a.enqueue(req); err != nil {
 		return fmt.Errorf("agent %s: %w", req.AgentID, err)
 	}
@@ -917,7 +949,7 @@ func (a *Agent) workerLoop(m *Manager) {
 			return
 		case req := <-a.queue:
 			a.runSafely(m, req)
-			a.settle(req)
+			a.settle(m, req)
 			m.dropForward(a.ID)
 		}
 	}
@@ -1148,10 +1180,10 @@ func fillSavedCreds(m *Manager, cfg llm.Config) llm.Config {
 	if !ok {
 		return cfg
 	}
-	if cfg.BaseURL == "" {
+	if saved.BaseURL != "" {
 		cfg.BaseURL = saved.BaseURL
 	}
-	if cfg.APIKey == "" {
+	if saved.APIKey != "" {
 		cfg.APIKey = saved.APIKey
 	}
 	return cfg
@@ -1280,7 +1312,10 @@ func (a *Agent) noteStop(reason string) {
 	a.mu.Unlock()
 }
 
-func (a *Agent) settle(req PromptRequest) {
+func (a *Agent) settle(m *Manager, req PromptRequest) {
+	if a.turnKind == "" || a.turnKind == "ok" {
+		a.noteBio(m, req.Text)
+	}
 	if req.outcome == nil {
 		if req.Done != nil {
 			close(req.Done)
@@ -1329,6 +1364,8 @@ func (a *Agent) Snapshot() *Agent {
 		ParentID:      a.ParentID,
 		Knowledge:     append([]string(nil), a.Knowledge...),
 		BlockedReason: a.BlockedReason,
+		BioPinned:     a.BioPinned,
+		Proposal:      a.Proposal,
 		StartedAt:     a.StartedAt,
 		QueuedAt:      a.QueuedAt,
 		LastTool:      a.LastTool,
@@ -1359,5 +1396,68 @@ func (a *Agent) viewMap() map[string]any {
 		"llmCfg":        llm.RedactedPtr(a.LLMCfg), // nil 表示这个会话还没选模型
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,
+		"proposal":      a.Proposal,
 	}
+}
+
+// SetProfile 改给人看的名字和简介，并立刻落盘。
+// 简介一旦由人改过，后面的轮次只提议，不再覆盖。
+func (m *Manager) SetProfile(id, name, role string) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	name = strings.TrimSpace(name)
+	role = strings.TrimSpace(role)
+	a.mu.Lock()
+	if name != "" {
+		a.Name = name
+	}
+	if role != "" && role != a.Role {
+		a.Role = role
+		a.BioPinned = true
+		a.Proposal = ""
+	}
+	a.mu.Unlock()
+	m.emit("agent.profile", a.viewMap())
+	m.goSave()
+	return nil
+}
+
+func (a *Agent) noteBio(m *Manager, text string) {
+	text = clipBio(text)
+	if text == "" {
+		return
+	}
+	a.mu.Lock()
+	changed := false
+	if a.BioPinned {
+		if a.Role != text && a.Proposal != text {
+			a.Proposal = text
+			changed = true
+		}
+	} else if a.Role != text {
+		a.Role = text
+		a.Proposal = ""
+		changed = true
+	}
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	m.emit("agent.profile", a.viewMap())
+	m.goSave()
+}
+
+func clipBio(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > 48 {
+		return string(r[:48]) + "…"
+	}
+	return s
 }

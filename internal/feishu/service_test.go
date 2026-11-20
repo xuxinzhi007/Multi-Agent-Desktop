@@ -28,8 +28,11 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 		return nil, nil
 	}
 	s.dispatch(Turn{EventID: "e1", ChatType: "p2p", MsgType: "text", Text: "你好", MessageID: "om_1"})
-	if gotAgent != "a1" || gotText != "你好" || replies["om_1"] != "好" {
-		t.Fatalf("agent=%s text=%s replies=%v", gotAgent, gotText, replies)
+	if gotAgent != "a1" || !strings.Contains(gotText, "你好") || strings.Contains(gotText, "来自飞书") {
+		t.Fatalf("agent=%s text=%s", gotAgent, gotText)
+	}
+	if !strings.Contains(gotText, "这台电脑") || replies["om_1"] == "好" {
+		t.Fatalf("text=%s replies=%v", gotText, replies)
 	}
 
 	s.botID = "ou_bot"
@@ -48,8 +51,11 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 		Text: "群里说", MessageID: "om_2",
 		Mentions: []Who{{OpenID: "ou_bot", Bot: true, Name: "助手"}},
 	})
-	if !strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "群里说") || replies["om_2"] != "好" {
-		t.Fatalf("group text=%s replies=%v", gotText, replies)
+	if strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "群里说") || !strings.Contains(gotText, "这台电脑") {
+		t.Fatalf("group text=%s", gotText)
+	}
+	if replies["om_2"] == "好" {
+		t.Fatalf("最终回复不该再发一条新消息：%v", replies)
 	}
 }
 
@@ -91,7 +97,7 @@ func TestPostImageOrder(t *testing.T) {
 	if strings.Contains(body, "图片文件：") {
 		t.Fatalf("path in wire: %s", body)
 	}
-	if replies["om"] != "看过了" {
+	if replies["om"] == "看过了" || !strings.Contains(replies["om_card"], "看过了") {
 		t.Fatalf("reply=%v", replies)
 	}
 }
@@ -127,20 +133,41 @@ func TestMergeForwardImages(t *testing.T) {
 	}
 }
 
-func TestBlindModelReply(t *testing.T) {
-	var ran bool
+func TestFeishuImageReachesModel(t *testing.T) {
+	var got RunRequest
 	replies := map[string]string{}
-	s := imageService(t, false, nil, replies)
-	s.hooks.Run = func(context.Context, RunRequest) (string, error) {
-		ran = true
-		return "不该跑", nil
-	}
+	s := imageService(t, false, &got, replies)
 	s.dispatch(Turn{
-		EventID: "b", ChatType: "p2p", MsgType: "image", MessageID: "om_b",
-		Images: []string{"k"}, Parts: []Part{{Key: "k"}},
+		EventID: "b", ChatType: "p2p", MsgType: "image", MessageID: "om_b", Text: "看这个报错",
+		Images: []string{"k"}, Parts: []Part{{Text: "看这个报错"}, {Key: "k"}},
 	})
-	if ran || replies["om_b"] != blindReply {
-		t.Fatalf("ran=%v reply=%q", ran, replies["om_b"])
+	if len(got.Pieces) < 2 || got.Pieces[0].Text != "看这个报错" || len(got.Pieces[1].Data) == 0 {
+		t.Fatalf("pieces=%+v reply=%q", got.Pieces, replies["om_b"])
+	}
+	if replies["om_b"] == "这个会话还不能看图" {
+		t.Fatal("desktop stopped before the model")
+	}
+}
+
+func TestRoomBindingChangesNextReply(t *testing.T) {
+	var got string
+	s := New(Hooks{
+		Run: func(_ context.Context, req RunRequest) (string, error) {
+			got = req.AgentID
+			return "好", nil
+		},
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_reply", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "default"}
+	s.BindRoom("oc_1", "other")
+	s.dispatch(Turn{
+		EventID: "e", ChatType: "group", ChatID: "oc_1", MsgType: "text", Text: "hi", MessageID: "om",
+		Mentions: []Who{{Bot: true}},
+	})
+	if got != "other" {
+		t.Fatalf("agent = %q", got)
 	}
 }
 
@@ -178,6 +205,14 @@ func imageService(t *testing.T, sees bool, got *RunRequest, replies map[string]s
 			replies[id] = text
 			return "om_reply", nil
 		},
+		Working: func(_ context.Context, _, _, id, text, _ string) (string, error) {
+			replies[id] = text
+			return "om_card", nil
+		},
+		Patch: func(_ context.Context, _, _, id, text, _ string) error {
+			replies[id] = text
+			return nil
+		},
 	})
 	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
 	s.grab = func(context.Context, Config, string, string) ([]byte, string, error) {
@@ -214,5 +249,128 @@ func TestStopRunCancelsModel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch kept requesting the model")
+	}
+}
+
+func TestWorkingCardThenResult(t *testing.T) {
+	var cards []string
+	s := New(Hooks{
+		Run: func(context.Context, RunRequest) (string, error) {
+			return "做完了", nil
+		},
+		Working: func(_ context.Context, _, _, _, text, stopID string) (string, error) {
+			if stopID == "" || !strings.Contains(text, "已在这台电脑上处理") {
+				t.Fatalf("working text=%q stop=%q", text, stopID)
+			}
+			cards = append(cards, text)
+			return "om_card", nil
+		},
+		Patch: func(_ context.Context, _, _, id, text, stopID string) error {
+			if id != "om_card" || stopID != "" || text != "做完了" {
+				t.Fatalf("patch id=%s text=%q stop=%q", id, text, stopID)
+			}
+			cards = append(cards, text)
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "查一下", MessageID: "om"})
+	if len(cards) != 2 || cards[1] != "做完了" {
+		t.Fatalf("cards=%v", cards)
+	}
+}
+
+func TestStopButtonCancelsAndUpdatesCard(t *testing.T) {
+	started := make(chan struct{})
+	var patched string
+	s := New(Hooks{
+		Run: func(ctx context.Context, _ RunRequest) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		Working: func(context.Context, string, string, string, string, string) (string, error) {
+			return "om_card", nil
+		},
+		Patch: func(_ context.Context, _, _, _, text, stopID string) error {
+			patched = text
+			if stopID != "" {
+				t.Fatalf("stopped card still has button")
+			}
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	done := make(chan struct{})
+	go func() {
+		s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "hi", MessageID: "om_stop"})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model call did not start")
+	}
+	s.halt("om_stop")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not finish the run")
+	}
+	if patched != "已停止" {
+		t.Fatalf("patched=%q", patched)
+	}
+}
+
+func TestProgressIsOneLineOnTheSameCard(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var lines []string
+	var lastStop string
+	s := New(Hooks{
+		Run: func(context.Context, RunRequest) (string, error) {
+			close(started)
+			<-release
+			return "做完了", nil
+		},
+		Working: func(context.Context, string, string, string, string, string) (string, error) {
+			return "om_card", nil
+		},
+		Patch: func(_ context.Context, _, _, id, text, stopID string) error {
+			if id != "om_card" {
+				t.Fatalf("patch id=%s", id)
+			}
+			lines = append(lines, text)
+			lastStop = stopID
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	done := make(chan struct{})
+	go func() {
+		s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "hi", MessageID: "om"})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model call did not start")
+	}
+	s.Progress("a1", "read_file")
+	s.Progress("a1", "bash")
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch did not finish")
+	}
+	if len(lines) < 3 || lines[0] != "正在读文件" || lines[1] != "正在跑命令" || lines[len(lines)-1] != "做完了" {
+		t.Fatalf("lines=%v", lines)
+	}
+	if lastStop != "" {
+		t.Fatalf("final card kept stop %q", lastStop)
+	}
+	if strings.Contains(lines[1], "rm ") {
+		t.Fatal("progress included the command")
 	}
 }

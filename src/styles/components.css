@@ -963,6 +963,17 @@
   color: var(--text-disabled);
   margin-top: 6px;
 }
+.c-settings__note {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  margin-top: 8px;
+}
+.c-settings__note.is-ok {
+  color: var(--success);
+}
+.c-settings__note.is-bad {
+  color: var(--danger);
+}
 .c-settings__input {
   width: 100%;
 }
@@ -1670,6 +1681,24 @@
   color: var(--text-tertiary);
 }
 
+.c-peer-call {
+  padding: 8px 10px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.c-peer-call .c-agent-head {
+  margin-bottom: 4px;
+}
+
+.c-peer-call__text {
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .c-agent-avatar {
   width: 22px;
   height: 22px;
@@ -1770,7 +1799,7 @@
 }
 
 .c-think {
-  width: 100%;
+  width: fit-content;
   max-width: 100%;
   margin: 4px 0 8px;
   padding: 4px 8px 4px 10px;
@@ -1780,8 +1809,13 @@
   background: var(--bg-inset);
 }
 
-.c-think__bar {
+.c-think:has(.c-think__body) {
   width: 100%;
+}
+
+.c-think__bar {
+  width: auto;
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1796,6 +1830,7 @@
 }
 
 .c-think__title {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1803,7 +1838,6 @@
 }
 
 .c-think__toggle {
-  margin-left: auto;
   flex-shrink: 0;
   color: var(--text-disabled);
 }
@@ -1827,6 +1861,36 @@
   flex-shrink: 0;
   border-radius: var(--radius-full);
   background: var(--text-disabled);
+}
+
+.c-think--live {
+  width: fit-content;
+  background: transparent;
+  border-left-color: transparent;
+  padding-left: 0;
+}
+
+.c-think__meta {
+  flex-shrink: 0;
+  color: var(--text-disabled);
+  font-variant-numeric: tabular-nums;
+}
+
+.c-think__pulse--wait {
+  background: var(--text-disabled);
+}
+
+.c-think__pulse--think,
+.c-think__pulse--tool {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+.c-think__pulse--think {
+  background: var(--warning);
+}
+
+.c-think__pulse--tool {
+  background: var(--accent-bright);
 }
 
 .c-think__pulse--live {

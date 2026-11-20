@@ -261,6 +261,38 @@ func TestSessionLLMConfig(t *testing.T) {
 	}
 }
 
+func TestEffectiveLLMPrefersSavedProviderKey(t *testing.T) {
+	m := newQuietManager(t, llm.Config{Provider: "qoder", Model: "old-model", APIKey: "sk-global"})
+	a := m.Create("a1", "A1", "r")
+	if err := m.SetAgentLLM("a1", llm.Config{Provider: "qoder", Model: "Qwen3.8-Max", APIKey: "sk-old"}); err != nil {
+		t.Fatal(err)
+	}
+	m.SetProviders([]llm.Config{{Provider: "qoder", BaseURL: "https://api3.qoder.sh", APIKey: "sk-new"}})
+	got := a.EffectiveLLM(m)
+	if got.APIKey != "sk-new" || got.Model != "Qwen3.8-Max" {
+		t.Fatalf("EffectiveLLM = %+v", got)
+	}
+	a.mu.Lock()
+	stored := ""
+	if a.LLMCfg != nil {
+		stored = a.LLMCfg.APIKey
+	}
+	a.mu.Unlock()
+	if stored != "sk-old" {
+		t.Fatalf("stored key before apply = %q", stored)
+	}
+	m.ApplyProviderCreds("qoder", "sk-new", "https://api3.qoder.sh")
+	a.mu.Lock()
+	stored = ""
+	if a.LLMCfg != nil {
+		stored = a.LLMCfg.APIKey
+	}
+	a.mu.Unlock()
+	if stored != "sk-new" {
+		t.Fatalf("stored key = %q", stored)
+	}
+}
+
 // TC-007 补充 —— 不存在的会话设置模型必须报错。
 func TestSetAgentLLMMissingAgent(t *testing.T) {
 	m := newQuietManager(t, llm.Config{Provider: "mock"})

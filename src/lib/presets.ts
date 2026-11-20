@@ -33,17 +33,19 @@ export const ROLE_PRESETS = [
 
 export const PROVIDERS = [
   { id: 'mock', label: 'Mock（内置）', hint: '本地规则引擎，无需任何配置' },
+  { id: 'ollama', label: 'Ollama', hint: 'http://127.0.0.1:11434，本地免费' },
   { id: 'openai', label: 'OpenAI 兼容', hint: 'OpenAI 或各类兼容网关' },
   { id: 'qoder', label: 'Qoder', hint: '浏览器授权，不用填 Key' },
   { id: 'deepseek', label: 'DeepSeek', hint: 'https://api.deepseek.com' },
-  { id: 'claude', label: 'Claude', hint: '需 OpenAI 兼容网关' },
+  { id: 'claude', label: 'Claude', hint: '需 OpenAI 兼容网关（如 one-api / LiteLLM），填网关地址' },
 ]
 
 export const DEFAULT_BASE: Record<string, string> = {
+  ollama: 'http://127.0.0.1:11434',
   openai: 'https://api.openai.com',
   qoder: 'https://api3.qoder.sh',
   deepseek: 'https://api.deepseek.com',
-  claude: 'https://api.anthropic.com',
+  claude: '',
 }
 
 export const DEFAULT_MODEL: Record<string, string> = {

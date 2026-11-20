@@ -51,16 +51,92 @@ func SeesImages(provider, model string) bool {
 	for _, k := range []string{
 		"gpt-4o", "gpt-4.1", "gpt-5",
 		"claude-3", "claude-4", "claude-opus", "claude-sonnet", "claude-haiku",
+		"llava", "qwen-vl", "internvl", "minicpm-v", "cogvlm", "glm-4v",
+		"gemini", "pixtral", "moondream",
 	} {
 		if strings.Contains(m, k) {
 			return true
 		}
 	}
-	if strings.Contains(m, "o1") || strings.Contains(m, "o3") || strings.Contains(m, "o4") {
+	if strings.Contains(m, "o1-") || strings.Contains(m, "o3-") || strings.Contains(m, "o4-") {
 		return true
 	}
 	_ = provider
 	return false
+}
+
+// ImageRefused 表示这次失败是模型或服务拒收图片。
+func ImageRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, k := range []string{"image", "vision", "multimodal", "image_url"} {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// StripImages 留下文字，拿掉图片字节。历史里的图不动，只给重试用。
+func StripImages(msgs []Message) []Message {
+	out := make([]Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = m
+		if len(m.Blocks) == 0 {
+			continue
+		}
+		var kept []Block
+		for _, b := range m.Blocks {
+			if b.ID == "" && len(b.Data) == 0 {
+				kept = append(kept, b)
+			}
+		}
+		out[i].Blocks = kept
+	}
+	return out
+}
+
+func messagesHaveImage(msgs []Message) bool {
+	for _, m := range msgs {
+		if HasImage(m.Blocks) {
+			return true
+		}
+	}
+	return false
+}
+
+// AnswerDespiteImages 先带图请求。拒收时去掉图再答文字，并写明原因。
+func AnswerDespiteImages(msgs []Message, call func([]Message) (Turn, error)) (Turn, error) {
+	turn, err := call(msgs)
+	if err == nil || !messagesHaveImage(msgs) || !ImageRefused(err) {
+		return turn, err
+	}
+	reason := err
+	turn, err = call(StripImages(msgs))
+	if err != nil {
+		return Turn{}, err
+	}
+	note := "这张图没有被这个模型收下：" + oneLineErr(reason)
+	if strings.TrimSpace(turn.Text) == "" {
+		turn.Text = note
+	} else {
+		turn.Text = note + "\n" + turn.Text
+	}
+	return turn, nil
+}
+
+func oneLineErr(err error) string {
+	s := strings.TrimSpace(err.Error())
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > 180 {
+		s = string(r[:180]) + "…"
+	}
+	return s
 }
 
 // HasImage 表示这些段里有图。

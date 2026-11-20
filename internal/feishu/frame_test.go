@@ -49,4 +49,30 @@ func TestReplyCardUsesMarkdown(t *testing.T) {
 	if !strings.Contains(body.Content, `"tag":"markdown"`) || !strings.Contains(body.Content, "已经接入") {
 		t.Fatalf("content=%s", body.Content)
 	}
+	if !strings.Contains(body.Content, `"update_multi":true`) {
+		t.Fatalf("content=%s", body.Content)
+	}
+}
+
+func TestWorkingCardKeepsStop(t *testing.T) {
+	raw, err := cardMessage("已在这台电脑上处理", "om_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Content, `"act":"stop"`) || !strings.Contains(body.Content, `"id":"om_1"`) || !strings.Contains(body.Content, "停止") {
+		t.Fatalf("content=%s", body.Content)
+	}
+	done, err := cardBody("做完了", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(done), "停止") {
+		t.Fatalf("final card=%s", done)
+	}
 }

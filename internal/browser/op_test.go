@@ -3,14 +3,14 @@ package browser
 import "testing"
 
 func TestPageJSDoesNotTakeRawScript(t *testing.T) {
-	js, err := PageJS(Op{Op: "click", Text: `保存";alert(1)`})
+	js, err := PageJS(Op{Op: "type", Ref: "e1", Value: `保存";alert(1)`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := `"保存\";alert(1)"`; !contains(js, want) {
 		t.Fatalf("text was not escaped:\n%s", js)
 	}
-	show, err := ShowJS(Op{Op: "click", Text: "保存"})
+	show, err := ShowJS(Op{Op: "click", Ref: "e1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,17 +20,21 @@ func TestPageJSDoesNotTakeRawScript(t *testing.T) {
 	if contains(show, "target.click()") || contains(show, "mousedown") {
 		t.Fatal("show script should not click yet")
 	}
-	move, err := MoveJS(Op{Op: "click", Text: "保存"})
+	move, err := MoveJS(Op{Op: "click", Ref: "e1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !contains(move, "left .35s linear") || contains(move, "target.click()") {
 		t.Fatal("move script should only glide the cursor")
 	}
-	if !contains(js, "mousedown") || !contains(js, "target.click()") {
+	click, err := PageJS(Op{Op: "click", Ref: "e1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(click, "mousedown") || !contains(click, "target.click()") {
 		t.Fatal("click script should press and activate the control")
 	}
-	if contains(js, "const bar") {
+	if contains(click, "const bar") {
 		t.Fatal("click script redeclares bar")
 	}
 	if _, err := PageJS(Op{Op: "open", URL: "javascript:alert(1)"}); err == nil {
@@ -41,6 +45,57 @@ func TestPageJSDoesNotTakeRawScript(t *testing.T) {
 	}
 	if _, err := PageJS(Op{Op: "press", Key: "Meta"}); err == nil {
 		t.Fatal("meta key accepted")
+	}
+}
+
+func TestClickNeedsRefOrPoint(t *testing.T) {
+	if _, err := Normalize(Op{Op: "click"}); err == nil || !contains(err.Error(), "ref") {
+		t.Fatal(err)
+	}
+	op, err := Normalize(Op{Op: "click", Ref: "e12"})
+	if err != nil || op.Ref != "e12" {
+		t.Fatal(err)
+	}
+	if _, err := Normalize(Op{Op: "click", Ref: `e1";alert(1)`}); err == nil {
+		t.Fatal("ref was not constrained")
+	}
+	x, y := 12.0, 40.0
+	if _, err := Normalize(Op{Op: "double_click", X: &x, Y: &y}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSnapshotScriptStampsRefs(t *testing.T) {
+	js, err := PageJS(Op{Op: "snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"data-mad-ref", "flt-semantics-host", "elements"} {
+		if !contains(js, want) {
+			t.Fatalf("snapshot missing %s", want)
+		}
+	}
+}
+
+func TestKeyAllowsModifiers(t *testing.T) {
+	js, err := PageJS(Op{Op: "key", Key: "Enter", Mods: []string{"ctrl"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(js, "ctrlKey:true") || contains(js, "requestSubmit") {
+		t.Fatalf("modified enter should not submit:\n%s", js)
+	}
+	if _, err := PageJS(Op{Op: "key", Key: "Meta"}); err == nil {
+		t.Fatal("meta accepted as a key")
+	}
+}
+
+func TestReleaseBeforeLeavesHeldPointer(t *testing.T) {
+	if releaseBefore("snapshot") || releaseBefore("move") || releaseBefore("up") || releaseBefore("wait") {
+		t.Fatal("look and drag steps should keep the button down")
+	}
+	if !releaseBefore("click") || !releaseBefore("open") || !releaseBefore("type") {
+		t.Fatal("a new action should release the held pointer first")
 	}
 }
 

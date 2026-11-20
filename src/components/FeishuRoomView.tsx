@@ -44,7 +44,7 @@ export default function FeishuRoomView({ room }: { room: Room }) {
             {room.name || '飞书会话'}
           </div>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-            飞书里的记录。在飞书里 @ 机器人才会回答，这里不能发消息。
+            由{room.agentName || '本机会话'}回答。这里只能看记录。
           </div>
         </div>
       </header>

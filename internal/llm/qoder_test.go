@@ -12,6 +12,28 @@ import (
 	"time"
 )
 
+func TestThinkingEnabledSplitsQoderModels(t *testing.T) {
+	on := Config{Provider: "qoder", Model: "Qwen3.8-Max"}
+	if !ThinkingEnabled(on) || thinkingLabel(on) != "中" || chatBudget(on) != 180*time.Second || wireEffort(on) != "medium" {
+		t.Fatalf("empty thinking: on=%v label=%s budget=%s effort=%s", ThinkingEnabled(on), thinkingLabel(on), chatBudget(on), wireEffort(on))
+	}
+	high := Config{Provider: "qoder", Model: "Qwen3.8-Max", Thinking: "high"}
+	if wireEffort(high) != "high" || chatBudget(high) != 5*time.Minute {
+		t.Fatalf("high effort budget=%s wire=%s", chatBudget(high), wireEffort(high))
+	}
+	off := Config{Provider: "qoder", Model: "Qwen3.8-Max", Thinking: "off"}
+	if ThinkingEnabled(off) || thinkingLabel(off) != "思考关" || chatBudget(off) != 180*time.Second {
+		t.Fatalf("explicit off: on=%v label=%s budget=%s", ThinkingEnabled(off), thinkingLabel(off), chatBudget(off))
+	}
+	plain := Config{Provider: "qoder", Model: "Efficient"}
+	if ThinkingEnabled(plain) || chatBudget(plain) != 180*time.Second {
+		t.Fatal("non-reasoning model should stay off")
+	}
+	if !ThinkingEnabled(Config{Provider: "deepseek", Model: "deepseek-chat"}) {
+		t.Fatal("deepseek empty thinking should be on")
+	}
+}
+
 func TestQoderEncodeMatchesProvider(t *testing.T) {
 	got := string(qoderEncode([]byte("hi")))
 	if got != "$HzP" {
@@ -146,5 +168,45 @@ func TestAuthorizeQoderDeviceFlow(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "dt-new") || !strings.Contains(string(b), "Ada") {
 		t.Fatalf("auth file = %s", b)
+	}
+}
+
+func TestQoderIdentityUsesSavedLoginWhenKeyIsStale(t *testing.T) {
+	dir := t.TempDir()
+	prev := qoderAuthPath
+	qoderAuthPath = filepath.Join(dir, "auth.json")
+	t.Cleanup(func() { qoderAuthPath = prev })
+	if err := writeQoderCreds(qoderCreds{
+		Access:    "dt-new",
+		Expires:   time.Now().Add(time.Hour),
+		UserID:    "user-new",
+		MachineID: "machine-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := qoderIdentity("dt-old")
+	if err != nil || id.Access != "dt-new" || id.UserID != "user-new" {
+		t.Fatalf("identity = %+v err=%v", id, err)
+	}
+	if _, err := qoderIdentity("pt-other"); err == nil || !strings.Contains(err.Error(), "需要先在设置里保存") {
+		t.Fatalf("pat err = %v", err)
+	}
+	quotaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authorization") != "Bearer dt-new" {
+			http.Error(w, "bad token", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"userQuota":{"total":100,"remaining":12,"unit":"Credits"}}`))
+	}))
+	defer quotaSrv.Close()
+	prevAPI := qoderOpenAPI
+	qoderOpenAPI = quotaSrv.URL
+	t.Cleanup(func() { qoderOpenAPI = prevAPI })
+	quota, err := QoderAccountStatus(context.Background(), "dt-new")
+	if err != nil || quota != "剩余 12 / 100 Credits" {
+		t.Fatalf("quota = %q err=%v", quota, err)
+	}
+	if _, err := QoderAccountStatus(context.Background(), "dt-old"); err == nil {
+		t.Fatal("stale key should not count as the saved account")
 	}
 }

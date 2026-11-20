@@ -87,8 +87,10 @@ export interface AgentView {
   busy?: string;
   /** Last 是最后一句非 system 内容，截断后给列表用。 */
   last?: string;
-  /** SeesImages 表示这个会话当前的模型能看图。 */
+  /** SeesImages 表示这个会话当前的模型能看图。界面不再用它提前结束发图。 */
   seesImages?: boolean;
+  /** Proposal 是一轮结束后建议改成的简介。 */
+  proposal?: string;
   /** ParentID 是创建它的会话。空表示用户自己建的。 */
   parentId?: string;
 }
@@ -97,8 +99,6 @@ export interface Block {
   text?: string;
   id?: string;
   mime?: string;
-  /** 还没落盘的图，base64。落盘后只留 id。 */
-  data?: string;
 }
 
 export interface Channel {
@@ -264,8 +264,8 @@ export interface MiniAgentStatus {
   lastTool?: string;
   /** 本轮已生成字符数 */
   chars?: number;
-  /** 0-100。没有进度时不传，岛上不画进度条。 */
-  progress?: number;
+  /** 0-100，由状态与产出推算 */
+  progress: number;
   /** 在等人的原因 */
   blockedReason?: string;
   /** 真实错误内容 */
@@ -347,6 +347,7 @@ export interface ProviderEndpoint {
   saved: boolean;
   ok: boolean;
   reason?: string;
+  quota?: string;
   models?: string[];
 }
 
@@ -381,6 +382,9 @@ export interface Result {
 export interface Room {
   id: string;
   name: string;
+  kind?: string;
+  agentId?: string;
+  agentName?: string;
   messages: Line[];
 }
 
@@ -711,6 +715,10 @@ export const API = {
   setAgentLLM(agentId: string, cfg: Config): Promise<AgentView> {
     return call("API.SetAgentLLM", agentId, cfg);
   },
+  /** SetAgentProfile 改给人看的名字和简介，立刻保存并显示。 */
+  setAgentProfile(id: string, name: string, role: string): Promise<AgentView> {
+    return call("API.SetAgentProfile", id, name, role);
+  },
   /** SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。 */
   setAgentWorkDir(agentId: string, dir: string): Promise<AgentView> {
     return call("API.SetAgentWorkDir", agentId, dir);
@@ -725,6 +733,10 @@ export const API = {
    */
   setChannelSpeaker(channelId: string, agentId: string): Promise<Channel> {
     return call("API.SetChannelSpeaker", channelId, agentId);
+  },
+  /** SetFeishuRoomAgent 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。 */
+  setFeishuRoomAgent(chatID: string, agentID: string): Promise<void> {
+    return call("API.SetFeishuRoomAgent", chatID, agentID);
   },
   /**
    * SetLLMConfig 切换全局模型配置，并落盘到 config.json。
@@ -777,6 +789,7 @@ export const API = {
 /** Events sent by the Go side. Subscribe with `events.name.on(listener)`. */
 export const events = {
   agentCreated: event<AgentView>("agent.created"),
+  agentProfile: event<AgentView>("agent.profile"),
   agentDeleted: event<string>("agent.deleted"),
   agentStatus: event<StatusEvent>("agent.status"),
   agentDelta: event<DeltaEvent>("agent.delta"),

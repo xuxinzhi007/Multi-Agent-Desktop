@@ -26,12 +26,15 @@ export default function ModelPicker({
   agentId,
   model,
   provider,
+  mark,
   onPick,
 }: {
   agentId: string
   /** 这次对话已经记下的模型。空字符串表示还没选。 */
   model: string
   provider?: string
+  /** 推理强度，跟在模型名后面。 */
+  mark?: string
   onPick: (m: ModelChoice) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -92,7 +95,7 @@ export default function ModelPicker({
   }
 
   const shown = model || bound
-  const label = shown || '选择模型'
+  const label = shown ? (mark ? `${shown} · ${mark}` : shown) : '选择模型'
   const selected = (m: ModelChoice) =>
     m.ready && m.model === shown && (!provider || !model || m.provider === provider)
   const ready = items.filter((m) => m.ready)
@@ -112,7 +115,8 @@ export default function ModelPicker({
           ✦
         </span>
         <span className="mp__label" title={label}>
-          {shortModel(label)}
+          {shown ? shortModel(shown) : '选择模型'}
+          {shown && mark ? ` · ${mark}` : ''}
         </span>
         <svg className="mp__caret" viewBox="0 0 12 12" aria-hidden>
           <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
