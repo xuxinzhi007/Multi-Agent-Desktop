@@ -55,7 +55,7 @@ export function ImageStrip({ images, onRemove }: { images: DraftImage[]; onRemov
 export function MessageShots({ blocks, content }: { blocks?: Block[]; content: string }) {
   const list = blocks ?? []
   const hasText = list.some((b) => b.text)
-  const shots = list.filter((b) => b.id || b.data)
+  const shots = list.filter((b) => b.id)
   if (hasText) {
     return (
       <div>
@@ -82,13 +82,13 @@ export function MessageShots({ blocks, content }: { blocks?: Block[]; content: s
 }
 
 function Shot({ block }: { block: Block }) {
-  const [url, setUrl] = useState(block.data ? `data:${block.mime || 'image/png'};base64,${block.data}` : '')
+  const [url, setUrl] = useState('')
   useEffect(() => {
-    if (block.data || !block.id) return
+    if (!block.id) return
     let stop = false
     API.imageData(block.id)
       .then((file) => {
-        if (!stop && file?.data) setUrl(`data:${file.mime || 'image/png'};base64,${file.data}`)
+        if (!stop && file?.data) setUrl(`data:${file.mime || block.mime || 'image/png'};base64,${file.data}`)
       })
       .catch(() => {
         if (!stop) setUrl('')
@@ -96,7 +96,7 @@ function Shot({ block }: { block: Block }) {
     return () => {
       stop = true
     }
-  }, [block.id, block.data, block.mime])
+  }, [block.id, block.mime])
   if (!url) return <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>图没拿到</div>
   return <img src={url} alt="" style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8, display: 'block', margin: '4px 0' }} />
 }

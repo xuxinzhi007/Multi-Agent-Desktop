@@ -416,21 +416,34 @@ function grouped(items: ModelChoice[] | null) {
   return order.map((provider) => ({ provider, items: map.get(provider) ?? [] }))
 }
 
+function progressOf(status: string, chars: number): number {
+  if (status === 'done') return 100
+  if (chars <= 0) return 0
+  const p = Math.floor((chars * 100) / 800)
+  if (p > 95) return 95
+  if (p < 1) return 1
+  return p
+}
+
 function fromList(agents: AgentView[]): MiniStatus {
   return {
     paused: false,
-    agents: agents.map((a) => ({
-      id: a.id,
-      name: a.name,
-      role: a.role,
-      color: a.color,
-      status: a.status,
-      chars: a.chars ?? 0,
-      lastTool: a.lastTool ?? '',
-      startedAt: a.startedAt ?? 0,
-      blockedReason: a.blockedReason ?? '',
-      task: bodyOf(a.last || ''),
-    })),
+    agents: agents.map((a) => {
+      const chars = a.chars ?? 0
+      return {
+        id: a.id,
+        name: a.name,
+        role: a.role,
+        color: a.color,
+        status: a.status,
+        chars,
+        lastTool: a.lastTool ?? '',
+        startedAt: a.startedAt ?? 0,
+        blockedReason: a.blockedReason ?? '',
+        task: bodyOf(a.last || ''),
+        progress: progressOf(a.status, chars),
+      }
+    }),
   }
 }
 
