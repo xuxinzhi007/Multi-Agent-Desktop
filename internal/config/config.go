@@ -10,10 +10,13 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"multi-agent-desktop/internal/llm"
@@ -29,8 +32,10 @@ type Settings struct {
 	Providers []llm.Config `json:"providers,omitempty"`
 	// WorkDir 是新建会话的默认工作目录。空则用应用数据目录下的 workspace，不用用户主目录。
 	WorkDir string `json:"workDir,omitempty"`
-	// Feishu 是企业自建机器人。Secret 与模型 Key 放在同一份 0600 文件里。
+	// Feishu 是旧的单个机器人。读入后迁进 FeishuBots，再写回时去掉。
 	Feishu Feishu `json:"feishu,omitempty"`
+	// FeishuBots 是企业自建机器人。Secret 与模型 Key 放在同一份 0600 文件里。
+	FeishuBots []FeishuBot `json:"feishuBots,omitempty"`
 }
 
 // Feishu 是飞书机器人的接入配置。
@@ -42,6 +47,21 @@ type Feishu struct {
 	// MentionOnly 为真时，群里只有 @ 机器人或回复它才回答。没写这个字段时，群里自己接话。
 	MentionOnly bool `json:"mentionOnly,omitempty"`
 	// 用户授权后的令牌。机器人没有的权限用它，不回给窗口。
+	UserAccess  string `json:"userAccess,omitempty"`
+	UserRefresh string `json:"userRefresh,omitempty"`
+	UserExpire  int64  `json:"userExpire,omitempty"`
+}
+
+// FeishuBot 是一个企业自建机器人。
+type FeishuBot struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	AppID     string `json:"appId,omitempty"`
+	AppSecret string `json:"appSecret,omitempty"`
+	AgentID   string `json:"agentId,omitempty"`
+	// MentionOnly 为真时，群里只有 @ 机器人或回复它才回答。
+	MentionOnly bool   `json:"mentionOnly,omitempty"`
 	UserAccess  string `json:"userAccess,omitempty"`
 	UserRefresh string `json:"userRefresh,omitempty"`
 	UserExpire  int64  `json:"userExpire,omitempty"`
@@ -84,7 +104,14 @@ func (s *Store) load() error {
 	if st.LLM.Provider == "mock" {
 		st.LLM.Provider = ""
 	}
+	changed, err := migrateFeishu(&st)
+	if err != nil {
+		return err
+	}
 	s.cur = st
+	if changed {
+		return s.write(st)
+	}
 	return nil
 }
 
@@ -136,13 +163,168 @@ func (s *Store) UpsertProvider(cfg llm.Config) ([]llm.Config, error) {
 	return out, s.write(snap)
 }
 
-// SetFeishu 更新飞书机器人配置并落盘。
-func (s *Store) SetFeishu(f Feishu) error {
+// SaveFeishuBot 新增或覆盖一个机器人并落盘。id 为空则分配。Secret 留空沿用旧值。
+// App ID 与另一条相同则拒绝。App ID 变了就清掉用户令牌。
+func (s *Store) SaveFeishuBot(in FeishuBot) (FeishuBot, error) {
 	s.mu.Lock()
-	s.cur.Feishu = f
-	next := s.cur
+	list := append([]FeishuBot(nil), s.cur.FeishuBots...)
+	prev, idx, found := feishuByID(list, strings.TrimSpace(in.ID))
+	if strings.TrimSpace(in.ID) != "" && !found {
+		s.mu.Unlock()
+		return FeishuBot{}, fmt.Errorf("机器人不存在")
+	}
+	next := MergeFeishuBot(prev, in)
+	if next.ID == "" {
+		id, err := newBotID()
+		if err != nil {
+			s.mu.Unlock()
+			return FeishuBot{}, err
+		}
+		for _, b := range list {
+			if b.ID == id {
+				s.mu.Unlock()
+				return FeishuBot{}, fmt.Errorf("机器人编号冲突")
+			}
+		}
+		next.ID = id
+	}
+	if err := duplicateFeishuApp(list, next); err != nil {
+		s.mu.Unlock()
+		return FeishuBot{}, err
+	}
+	if found {
+		list[idx] = next
+	} else {
+		list = append(list, next)
+	}
+	s.cur.FeishuBots = list
+	s.cur.Feishu = Feishu{}
+	snap := s.cur
 	s.mu.Unlock()
-	return s.write(next)
+	return next, s.write(snap)
+}
+
+// DeleteFeishuBot 删掉一个机器人并落盘。
+func (s *Store) DeleteFeishuBot(id string) error {
+	s.mu.Lock()
+	next := make([]FeishuBot, 0, len(s.cur.FeishuBots))
+	found := false
+	for _, b := range s.cur.FeishuBots {
+		if b.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, b)
+	}
+	if !found {
+		s.mu.Unlock()
+		return fmt.Errorf("机器人不存在")
+	}
+	s.cur.FeishuBots = next
+	snap := s.cur
+	s.mu.Unlock()
+	return s.write(snap)
+}
+
+func feishuByID(list []FeishuBot, id string) (FeishuBot, int, bool) {
+	if id == "" {
+		return FeishuBot{}, -1, false
+	}
+	for i, b := range list {
+		if b.ID == id {
+			return b, i, true
+		}
+	}
+	return FeishuBot{}, -1, false
+}
+
+// MergeFeishuBot 把这次提交叠到已保存的机器人上。
+func MergeFeishuBot(prev, in FeishuBot) FeishuBot {
+	next := FeishuBot{
+		ID:          strings.TrimSpace(in.ID),
+		Name:        strings.TrimSpace(in.Name),
+		Enabled:     in.Enabled,
+		AppID:       strings.TrimSpace(in.AppID),
+		AppSecret:   strings.TrimSpace(in.AppSecret),
+		AgentID:     strings.TrimSpace(in.AgentID),
+		MentionOnly: in.MentionOnly,
+		UserAccess:  in.UserAccess,
+		UserRefresh: in.UserRefresh,
+		UserExpire:  in.UserExpire,
+	}
+	if next.ID == "" {
+		next.ID = prev.ID
+	}
+	if next.AppSecret == "" {
+		next.AppSecret = prev.AppSecret
+	}
+	if prev.ID != "" && next.AppID != prev.AppID {
+		next.UserAccess = ""
+		next.UserRefresh = ""
+		next.UserExpire = 0
+		return next
+	}
+	if next.UserAccess == "" && next.UserRefresh == "" {
+		next.UserAccess = prev.UserAccess
+		next.UserRefresh = prev.UserRefresh
+		next.UserExpire = prev.UserExpire
+	}
+	return next
+}
+
+func duplicateFeishuApp(list []FeishuBot, next FeishuBot) error {
+	if next.AppID == "" {
+		return nil
+	}
+	for _, b := range list {
+		if b.ID != next.ID && b.AppID == next.AppID {
+			return fmt.Errorf("这个 App ID 已经有一个机器人")
+		}
+	}
+	return nil
+}
+
+func migrateFeishu(st *Settings) (bool, error) {
+	if len(st.FeishuBots) > 0 {
+		if feishuLegacyUsed(st.Feishu) {
+			st.Feishu = Feishu{}
+			return true, nil
+		}
+		return false, nil
+	}
+	if !feishuLegacyUsed(st.Feishu) {
+		return false, nil
+	}
+	id, err := newBotID()
+	if err != nil {
+		return false, err
+	}
+	old := st.Feishu
+	st.FeishuBots = []FeishuBot{{
+		ID:          id,
+		Enabled:     old.Enabled,
+		AppID:       old.AppID,
+		AppSecret:   old.AppSecret,
+		AgentID:     old.AgentID,
+		MentionOnly: old.MentionOnly,
+		UserAccess:  old.UserAccess,
+		UserRefresh: old.UserRefresh,
+		UserExpire:  old.UserExpire,
+	}}
+	st.Feishu = Feishu{}
+	return true, nil
+}
+
+func feishuLegacyUsed(f Feishu) bool {
+	return f.Enabled || f.AppID != "" || f.AppSecret != "" || f.AgentID != "" || f.MentionOnly || f.UserAccess != "" || f.UserRefresh != "" || f.UserExpire != 0
+}
+
+func newBotID() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("config: bot id: %w", err)
+	}
+	return "bot_" + hex.EncodeToString(b[:]), nil
 }
 
 // SetWorkDir 更新默认工作目录并落盘。

@@ -237,6 +237,25 @@ func QoderAccountStatus(ctx context.Context, apiKey string) (string, error) {
 	return qoderQuotaText(ctx, c), nil
 }
 
+type qoderQuotaBucket struct {
+	Total     float64 `json:"total"`
+	Used      float64 `json:"used"`
+	Remaining float64 `json:"remaining"`
+	Unit      string  `json:"unit"`
+	Cap       float64 `json:"cap"`
+}
+
+func (b qoderQuotaBucket) limit() float64 {
+	if b.Total > 0 {
+		return b.Total
+	}
+	return b.Cap
+}
+
+func (b qoderQuotaBucket) present() bool {
+	return b.limit() > 0 || b.Used > 0 || b.Remaining > 0
+}
+
 func qoderQuotaText(ctx context.Context, c qoderCreds) string {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, qoderOpenAPI+"/api/v2/quota/usage", nil)
 	if err != nil {
@@ -254,27 +273,70 @@ func qoderQuotaText(ctx context.Context, c qoderCreds) string {
 		return ""
 	}
 	var data struct {
-		UserQuota struct {
-			Total     float64 `json:"total"`
-			Remaining float64 `json:"remaining"`
-			Unit      string  `json:"unit"`
-		} `json:"userQuota"`
-		IsQuotaExceeded bool `json:"isQuotaExceeded"`
+		UserQuota          qoderQuotaBucket `json:"userQuota"`
+		AddOnQuota         qoderQuotaBucket `json:"addOnQuota"`
+		OrgResourcePackage qoderQuotaBucket `json:"orgResourcePackage"`
+		SharedQuota        qoderQuotaBucket `json:"sharedQuota"`
+		IsQuotaExceeded    bool             `json:"isQuotaExceeded"`
 	}
 	if json.Unmarshal(payload, &data) != nil {
 		return ""
 	}
-	if data.UserQuota.Total == 0 && data.UserQuota.Remaining == 0 && !data.IsQuotaExceeded {
+	org := data.OrgResourcePackage
+	if !org.present() {
+		org = data.SharedQuota
+	}
+	type labeledQuota struct {
+		label  string
+		bucket qoderQuotaBucket
+	}
+	var parts []labeledQuota
+	if data.UserQuota.present() {
+		parts = append(parts, labeledQuota{"订阅", data.UserQuota})
+	}
+	if data.AddOnQuota.present() {
+		parts = append(parts, labeledQuota{"加量包", data.AddOnQuota})
+	}
+	if org.present() {
+		parts = append(parts, labeledQuota{"资源包", org})
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	unit := data.UserQuota.Unit
-	if unit == "" {
-		unit = "Credits"
+	anyLeft := false
+	for _, p := range parts {
+		if p.bucket.Remaining > 0 {
+			anyLeft = true
+			break
+		}
 	}
-	if data.IsQuotaExceeded {
-		return fmt.Sprintf("额度已用完（%g / %g %s）", data.UserQuota.Remaining, data.UserQuota.Total, unit)
+	if data.IsQuotaExceeded && !anyLeft {
+		if len(parts) == 1 && parts[0].label == "订阅" {
+			b := parts[0].bucket
+			return fmt.Sprintf("额度已用完（%g / %g %s）", b.Remaining, b.limit(), qoderQuotaUnit(b))
+		}
+		bits := make([]string, len(parts))
+		for i, p := range parts {
+			bits[i] = fmt.Sprintf("%s %g / %g %s", p.label, p.bucket.Remaining, p.bucket.limit(), qoderQuotaUnit(p.bucket))
+		}
+		return "额度已用完（" + strings.Join(bits, "；") + "）"
 	}
-	return fmt.Sprintf("剩余 %g / %g %s", data.UserQuota.Remaining, data.UserQuota.Total, unit)
+	if len(parts) == 1 && parts[0].label == "订阅" {
+		b := parts[0].bucket
+		return fmt.Sprintf("剩余 %g / %g %s", b.Remaining, b.limit(), qoderQuotaUnit(b))
+	}
+	bits := make([]string, len(parts))
+	for i, p := range parts {
+		bits[i] = fmt.Sprintf("%s剩余 %g / %g %s", p.label, p.bucket.Remaining, p.bucket.limit(), qoderQuotaUnit(p.bucket))
+	}
+	return strings.Join(bits, "；")
+}
+
+func qoderQuotaUnit(b qoderQuotaBucket) string {
+	if b.Unit != "" {
+		return b.Unit
+	}
+	return "Credits"
 }
 
 // AdoptQoderAPIKey 把用户填写的 Key 换成可发请求的登录。

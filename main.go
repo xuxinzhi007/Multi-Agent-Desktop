@@ -39,7 +39,7 @@ type API struct {
 	channels   *channel.Manager
 	kb         knowledge.Store
 	settings   *config.Store
-	bot        *feishu.Service
+	bot        *feishu.Hub
 	win        *mygo.Window
 	islands    *islandSwitch
 	desk       *browser.Desk
@@ -1418,8 +1418,10 @@ func (s *API) PrivacyStatus() []PrivacyGrant {
 	return out
 }
 
-// FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。
+// FeishuView 是设置页看到的一个飞书机器人。Secret 不回传。
 type FeishuView struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
 	Enabled     bool   `json:"enabled"`
 	AppID       string `json:"appId"`
 	HasSecret   bool   `json:"hasSecret"`
@@ -1430,8 +1432,10 @@ type FeishuView struct {
 	Detail      string `json:"detail,omitempty"`
 }
 
-// FeishuSave 是设置页提交的飞书配置。AppSecret 为空表示沿用已保存的值。
+// FeishuSave 是设置页提交的一个机器人。AppSecret 为空表示沿用已保存的值。ID 为空表示新建。
 type FeishuSave struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
 	Enabled     bool   `json:"enabled"`
 	AppID       string `json:"appId"`
 	AppSecret   string `json:"appSecret"`
@@ -1445,24 +1449,28 @@ func (s *API) ListFeishuRooms() []feishu.Room {
 		return nil
 	}
 	rooms := s.bot.Rooms()
-	defID := ""
-	defName := ""
+	bots := []config.FeishuBot{}
 	if s.settings != nil {
-		defID = s.settings.Get().Feishu.AgentID
+		bots = s.settings.Get().FeishuBots
 	}
-	if defID != "" {
-		if a, ok := s.mgr.Get(defID); ok {
-			defName = a.Snapshot().Name
-		}
+	byID := map[string]config.FeishuBot{}
+	for _, b := range bots {
+		byID[b.ID] = b
 	}
 	for i := range rooms {
 		id := rooms[i].AgentID
-		name := ""
 		if id == "" {
-			id = defID
-			name = defName
-		} else if a, ok := s.mgr.Get(id); ok {
-			name = a.Snapshot().Name
+			if b, ok := byID[rooms[i].BotID]; ok {
+				id = b.AgentID
+			} else if rooms[i].BotID == "" && len(bots) == 1 {
+				id = bots[0].AgentID
+			}
+		}
+		name := ""
+		if id != "" {
+			if a, ok := s.mgr.Get(id); ok {
+				name = a.Snapshot().Name
+			}
 		}
 		rooms[i].AgentID = id
 		rooms[i].AgentName = name
@@ -1494,58 +1502,130 @@ func (s *API) SetAgentProfile(id, name, role string) (AgentView, error) {
 	return toAgentView(a), nil
 }
 
-// GetFeishu 返回飞书机器人配置和长连接状态。
-func (s *API) GetFeishu() FeishuView {
-	cfg := config.Feishu{}
+// ListFeishu 返回全部飞书机器人和各自的长连接状态。
+func (s *API) ListFeishu() []FeishuView {
+	bots := []config.FeishuBot{}
 	if s.settings != nil {
-		cfg = s.settings.Get().Feishu
+		bots = s.settings.Get().FeishuBots
 	}
-	return s.feishuView(cfg)
+	out := make([]FeishuView, 0, len(bots))
+	for _, b := range bots {
+		out = append(out, s.feishuView(b))
+	}
+	return out
 }
 
-// SaveFeishu 保存飞书机器人配置，并按开关拉起或停掉长连接。
+// SaveFeishu 保存一个机器人，并只重启这一个的长连接。
 func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
-	cur := config.Feishu{}
-	if s.settings != nil {
-		cur = s.settings.Get().Feishu
+	if s.settings == nil {
+		return FeishuView{}, fmt.Errorf("会话还没准备好")
 	}
-	next := config.Feishu{
+	prev := config.FeishuBot{}
+	if in.ID != "" {
+		for _, b := range s.settings.Get().FeishuBots {
+			if b.ID == in.ID {
+				prev = b
+				break
+			}
+		}
+	}
+	next := config.MergeFeishuBot(prev, config.FeishuBot{
+		ID:          in.ID,
+		Name:        in.Name,
 		Enabled:     in.Enabled,
-		AppID:       strings.TrimSpace(in.AppID),
-		AppSecret:   strings.TrimSpace(in.AppSecret),
-		AgentID:     strings.TrimSpace(in.AgentID),
+		AppID:       in.AppID,
+		AppSecret:   in.AppSecret,
+		AgentID:     in.AgentID,
 		MentionOnly: in.MentionOnly,
-		UserAccess:  cur.UserAccess,
-		UserRefresh: cur.UserRefresh,
-		UserExpire:  cur.UserExpire,
-	}
-	if next.AppSecret == "" {
-		next.AppSecret = cur.AppSecret
-	}
+	})
 	if next.Enabled {
-		if next.AppID == "" || next.AppSecret == "" || next.AgentID == "" {
-			return FeishuView{}, fmt.Errorf("启用前要填写 App ID、App Secret，并选择一个会话")
-		}
-		if s.mgr == nil {
-			return FeishuView{}, fmt.Errorf("会话还没准备好")
-		}
-		if _, ok := s.mgr.Get(next.AgentID); !ok {
-			return FeishuView{}, fmt.Errorf("绑定的会话不存在")
-		}
-	}
-	if s.settings != nil {
-		if err := s.settings.SetFeishu(next); err != nil {
+		if err := s.validateFeishu(next); err != nil {
 			return FeishuView{}, err
 		}
 	}
-	if s.bot != nil {
-		s.bot.Apply(feishuConfig(next))
+	saved, err := s.settings.SaveFeishuBot(next)
+	if err != nil {
+		return FeishuView{}, err
 	}
-	return s.feishuView(next), nil
+	s.syncFeishu()
+	return s.feishuView(saved), nil
 }
 
-func (s *API) feishuView(cfg config.Feishu) FeishuView {
+// SetFeishuEnabled 立刻只改这一个机器人的启用，并拉起或停掉它的长连接。
+func (s *API) SetFeishuEnabled(id string, enabled bool) (FeishuView, error) {
+	if s.settings == nil {
+		return FeishuView{}, fmt.Errorf("会话还没准备好")
+	}
+	var cur config.FeishuBot
+	found := false
+	for _, b := range s.settings.Get().FeishuBots {
+		if b.ID == id {
+			cur = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		return FeishuView{}, fmt.Errorf("机器人不存在")
+	}
+	cur.Enabled = enabled
+	if cur.Enabled {
+		if err := s.validateFeishu(cur); err != nil {
+			return FeishuView{}, err
+		}
+	}
+	saved, err := s.settings.SaveFeishuBot(cur)
+	if err != nil {
+		return FeishuView{}, err
+	}
+	s.syncFeishu()
+	return s.feishuView(saved), nil
+}
+
+// DeleteFeishu 停掉这个机器人的长连接并删掉配置。
+func (s *API) DeleteFeishu(id string) error {
+	if s.settings == nil {
+		return fmt.Errorf("会话还没准备好")
+	}
+	if err := s.settings.DeleteFeishuBot(id); err != nil {
+		return err
+	}
+	s.syncFeishu()
+	return nil
+}
+
+func (s *API) validateFeishu(bot config.FeishuBot) error {
+	if bot.AppID == "" || bot.AppSecret == "" || bot.AgentID == "" {
+		return fmt.Errorf("启用前要填写 App ID、App Secret，并选择一个会话")
+	}
+	if s.mgr == nil {
+		return fmt.Errorf("会话还没准备好")
+	}
+	if _, ok := s.mgr.Get(bot.AgentID); !ok {
+		return fmt.Errorf("绑定的会话不存在")
+	}
+	return nil
+}
+
+func (s *API) syncFeishu() {
+	if s.bot == nil {
+		return
+	}
+	bots := []config.FeishuBot{}
+	if s.settings != nil {
+		bots = s.settings.Get().FeishuBots
+	}
+	list := make([]feishu.Bot, 0, len(bots))
+	for _, b := range bots {
+		list = append(list, feishu.Bot{ID: b.ID, Config: feishuConfig(b)})
+	}
+	s.bot.Sync(list)
+}
+
+func (s *API) feishuView(cfg config.FeishuBot) FeishuView {
 	view := FeishuView{
+		ID:          cfg.ID,
+		Name:        cfg.Name,
 		Enabled:     cfg.Enabled,
 		AppID:       cfg.AppID,
 		HasSecret:   cfg.AppSecret != "",
@@ -1555,7 +1635,7 @@ func (s *API) feishuView(cfg config.Feishu) FeishuView {
 		Status:      "stopped",
 	}
 	if s.bot != nil {
-		st := s.bot.Status()
+		st := s.bot.Status(cfg.ID)
 		if st.State != "" {
 			view.Status = st.State
 		}
@@ -1564,7 +1644,7 @@ func (s *API) feishuView(cfg config.Feishu) FeishuView {
 	return view
 }
 
-func feishuConfig(cfg config.Feishu) feishu.Config {
+func feishuConfig(cfg config.FeishuBot) feishu.Config {
 	return feishu.Config{
 		Enabled:     cfg.Enabled,
 		AppID:       cfg.AppID,
@@ -1575,11 +1655,22 @@ func feishuConfig(cfg config.Feishu) feishu.Config {
 	}
 }
 
-// AuthorizeFeishuUser 打开飞书授权页，把用户令牌留在本机配置里。
-func (s *API) AuthorizeFeishuUser(ctx context.Context) (FeishuView, error) {
-	cfg := config.Feishu{}
-	if s.settings != nil {
-		cfg = s.settings.Get().Feishu
+// AuthorizeFeishuUser 打开飞书授权页，把这个机器人的用户令牌留在本机配置里。
+func (s *API) AuthorizeFeishuUser(ctx context.Context, id string) (FeishuView, error) {
+	if s.settings == nil {
+		return FeishuView{}, fmt.Errorf("会话还没准备好")
+	}
+	var cfg config.FeishuBot
+	found := false
+	for _, b := range s.settings.Get().FeishuBots {
+		if b.ID == id {
+			cfg = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		return FeishuView{}, fmt.Errorf("机器人不存在")
 	}
 	if cfg.AppID == "" || cfg.AppSecret == "" {
 		return FeishuView{}, fmt.Errorf("先保存 App ID 和 App Secret")
@@ -1593,15 +1684,12 @@ func (s *API) AuthorizeFeishuUser(ctx context.Context) (FeishuView, error) {
 	cfg.UserAccess = access
 	cfg.UserRefresh = refresh
 	cfg.UserExpire = exp.Unix()
-	if s.settings != nil {
-		if err := s.settings.SetFeishu(cfg); err != nil {
-			return FeishuView{}, err
-		}
+	saved, err := s.settings.SaveFeishuBot(cfg)
+	if err != nil {
+		return FeishuView{}, err
 	}
-	if s.bot != nil {
-		s.bot.Apply(feishuConfig(cfg))
-	}
-	return s.feishuView(cfg), nil
+	s.syncFeishu()
+	return s.feishuView(saved), nil
 }
 
 // SettingsPath 返回配置文件路径。
@@ -2778,7 +2866,7 @@ func main() {
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
 	mgr.SetFeed(&channelFeed{ch: channels, api: api})
-	api.bot = feishu.New(feishu.Hooks{
+	api.bot = feishu.NewHub(feishu.Hooks{
 		Run:     api.runFeishu,
 		Show:    api.showFeishu,
 		Sees:    api.agentSees,
@@ -2788,7 +2876,7 @@ func main() {
 		Dial:    feishu.Dial,
 	})
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
-	api.bot.Apply(feishuConfig(effective.Feishu))
+	api.syncFeishu()
 	api.desk = browser.NewDesk()
 	api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
 	browser.SetDesk(api.desk)
@@ -2797,7 +2885,7 @@ func main() {
 
 	mygo.App.OnQuit(func() {
 		if api.bot != nil {
-			api.bot.Apply(feishu.Config{})
+			api.bot.Sync(nil)
 		}
 		if mgr != nil {
 			mgr.Shutdown()

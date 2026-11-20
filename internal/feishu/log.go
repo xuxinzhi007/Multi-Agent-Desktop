@@ -27,6 +27,7 @@ type Room struct {
 	Kind      string `json:"kind,omitempty"`
 	AgentID   string `json:"agentId,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
+	BotID     string `json:"botId,omitempty"`
 	Messages  []Line `json:"messages"`
 }
 
@@ -42,6 +43,7 @@ type room struct {
 	Name    string
 	Kind    string
 	AgentID string
+	BotID   string
 	Lines   []Line
 	Seen    map[string]struct{}
 }
@@ -87,6 +89,9 @@ func (l *Log) load() {
 		}
 		if r.AgentID != "" {
 			dst.AgentID = r.AgentID
+		}
+		if r.BotID != "" {
+			dst.BotID = r.BotID
 		}
 		for _, line := range r.Messages {
 			l.addLocked(line)
@@ -151,6 +156,37 @@ func (l *Log) Bind(id, agentID string) {
 	l.room(id).AgentID = strings.TrimSpace(agentID)
 	l.mu.Unlock()
 	l.save()
+}
+
+// SetBot 记下这个会话是哪个机器人收到的。
+func (l *Log) SetBot(id, botID string) {
+	if l == nil || id == "" || strings.TrimSpace(botID) == "" {
+		return
+	}
+	botID = strings.TrimSpace(botID)
+	l.mu.Lock()
+	r := l.room(id)
+	if r.BotID == botID {
+		l.mu.Unlock()
+		return
+	}
+	r.BotID = botID
+	l.mu.Unlock()
+	l.save()
+}
+
+// Bot 返回记下这个会话的机器人。空表示还没有。
+func (l *Log) Bot(id string) string {
+	if l == nil || id == "" {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.rooms[id]
+	if r == nil {
+		return ""
+	}
+	return r.BotID
 }
 
 // Agent 返回单独指定的本机会话。空表示沿用默认。
@@ -249,7 +285,7 @@ func (l *Log) Rooms() []Room {
 	for _, id := range l.order {
 		r := l.rooms[id]
 		lines := append([]Line(nil), r.Lines...)
-		out = append(out, Room{ID: id, Name: roomTitle(r), Kind: r.Kind, AgentID: r.AgentID, Messages: lines})
+		out = append(out, Room{ID: id, Name: roomTitle(r), Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, Messages: lines})
 	}
 	return out
 }
@@ -323,7 +359,7 @@ func (l *Log) save() {
 	rooms := make([]Room, 0, len(l.order))
 	for _, id := range l.order {
 		r := l.rooms[id]
-		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, Messages: append([]Line(nil), r.Lines...)})
+		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, Messages: append([]Line(nil), r.Lines...)})
 	}
 	l.mu.Unlock()
 	if path == "" {

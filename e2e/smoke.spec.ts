@@ -83,12 +83,54 @@ test('设置弹窗能打开且分组可见', async ({ page }) => {
   await expect(page.getByRole('radiogroup', { name: '主题' })).toBeVisible()
   await nav.getByRole('button', { name: '飞书' }).click()
   const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('还没有机器人')).toBeVisible()
+  await dialog.getByRole('button', { name: '添加' }).click()
   await expect(dialog.getByLabel('飞书 App ID')).toBeVisible()
   await expect(dialog.getByLabel('飞书 App Secret')).toBeVisible()
-  await expect(dialog.getByLabel('绑定会话')).toBeVisible()
-  await expect(dialog.getByText('私聊和群聊的文本都会交给这个会话')).toBeVisible()
+  await expect(dialog.getByLabel('默认会话')).toBeVisible()
+  await expect(dialog.locator('summary', { hasText: '连不上时' })).toBeVisible()
+  await expect(dialog.getByText('重定向 URL')).toBeHidden()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toBeHidden()
+})
+
+test('飞书授权和保存在名单上，连上后显示已保存', async ({ page }) => {
+  await mockRuntime(page, {
+    agents: [],
+    channels: [],
+    notes: [],
+    feishu: [
+      {
+        id: 'b1',
+        name: '默默',
+        enabled: true,
+        appId: 'cli_a9ad56c361ba9bc6',
+        hasSecret: true,
+        hasUser: false,
+        agentId: 'backend',
+        mentionOnly: false,
+        status: 'connected',
+      },
+    ],
+  })
+  await page.reload()
+  await page.waitForSelector('.c-shell')
+  await page.locator('aside').first().getByRole('button').filter({ hasText: '⚙' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('navigation', { name: '设置分类' }).getByRole('button', { name: '飞书' }).click()
+  const row = dialog.getByRole('listitem')
+  const auth = row.getByRole('button', { name: '用我的飞书身份授权' })
+  await expect(auth).toBeVisible()
+  await expect(row.getByText('已保存')).toBeVisible()
+  await expect(row.getByRole('button', { name: '保存' })).toHaveCount(0)
+  await row.getByRole('button').first().click()
+  await dialog.getByLabel('机器人名字').fill('改过')
+  const save = row.getByRole('button', { name: '保存' })
+  await expect(save).toBeVisible()
+  await expect(row.getByText('已保存')).toHaveCount(0)
+  const deleteBox = await row.getByRole('button', { name: '删除' }).boundingBox()
+  const saveBox = await save.boundingBox()
+  expect(deleteBox && saveBox && deleteBox.x < saveBox.x).toBeTruthy()
 })
 
 test('没有横向滚动条（布局不溢出）', async ({ page }) => {

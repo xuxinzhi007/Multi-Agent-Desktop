@@ -13,9 +13,10 @@ type MockState = {
   agents: unknown[]
   channels: unknown[]
   notes: unknown[]
+  feishu?: unknown[]
 }
 
-const EMPTY_STATE: MockState = { agents: [], channels: [], notes: [] }
+const EMPTY_STATE: MockState = { agents: [], channels: [], notes: [], feishu: [] }
 
 /** 每个方法调用记录，测试可以断言。 */
 export type CallLog = { method: string; args: unknown[] }
@@ -88,20 +89,30 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.SetLLMConfig': (cfg) => cfg,
       'API.SettingsPath': () =>
         '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
-      'API.GetFeishu': () => ({
-        enabled: false,
+      'API.ListFeishu': () => initial.feishu ?? [],
+      'API.DeleteFeishu': () => undefined,
+      'API.SetFeishuEnabled': (id: unknown, enabled: unknown) => ({
+        id: String(id ?? ''),
+        name: '',
+        enabled: !!enabled,
         appId: '',
         hasSecret: false,
+        hasUser: false,
         agentId: '',
-        status: 'stopped',
+        mentionOnly: false,
+        status: enabled ? 'connecting' : 'stopped',
       }),
       'API.SaveFeishu': (input) => {
-        const in_ = input as { enabled?: boolean; appId?: string; appSecret?: string; agentId?: string }
+        const in_ = input as { id?: string; name?: string; enabled?: boolean; appId?: string; appSecret?: string; agentId?: string; mentionOnly?: boolean }
         return {
+          id: in_.id || 'bot_test',
+          name: in_.name ?? '',
           enabled: !!in_.enabled,
           appId: in_.appId ?? '',
           hasSecret: !!in_.appSecret,
+          hasUser: false,
           agentId: in_.agentId ?? '',
+          mentionOnly: !!in_.mentionOnly,
           status: in_.enabled ? 'connecting' : 'stopped',
         }
       },

@@ -187,8 +187,10 @@ export interface ErrorEvent {
   error: string;
 }
 
-/** FeishuSave 是设置页提交的飞书配置。AppSecret 为空表示沿用已保存的值。 */
+/** FeishuSave 是设置页提交的一个机器人。AppSecret 为空表示沿用已保存的值。ID 为空表示新建。 */
 export interface FeishuSave {
+  id: string;
+  name: string;
   enabled: boolean;
   appId: string;
   appSecret: string;
@@ -196,8 +198,10 @@ export interface FeishuSave {
   mentionOnly: boolean;
 }
 
-/** FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。 */
+/** FeishuView 是设置页看到的一个飞书机器人。Secret 不回传。 */
 export interface FeishuView {
+  id: string;
+  name: string;
   enabled: boolean;
   appId: string;
   hasSecret: boolean;
@@ -395,6 +399,7 @@ export interface Room {
   kind?: string;
   agentId?: string;
   agentName?: string;
+  botId?: string;
   messages: Line[];
 }
 
@@ -494,9 +499,9 @@ export const API = {
   attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
     return call("API.AttachNoteToAgent", noteId, agentId);
   },
-  /** AuthorizeFeishuUser 打开飞书授权页，把用户令牌留在本机配置里。 */
-  authorizeFeishuUser(): Promise<FeishuView> {
-    return call("API.AuthorizeFeishuUser");
+  /** AuthorizeFeishuUser 打开飞书授权页，把这个机器人的用户令牌留在本机配置里。 */
+  authorizeFeishuUser(id: string): Promise<FeishuView> {
+    return call("API.AuthorizeFeishuUser", id);
   },
   /** BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。 */
   blockAgent(id: string, reason: string): Promise<void> {
@@ -529,6 +534,10 @@ export const API = {
   deleteChannel(id: string): Promise<boolean> {
     return call("API.DeleteChannel", id);
   },
+  /** DeleteFeishu 停掉这个机器人的长连接并删掉配置。 */
+  deleteFeishu(id: string): Promise<void> {
+    return call("API.DeleteFeishu", id);
+  },
   /** DeleteNote 删除一条笔记。 */
   deleteNote(id: string): Promise<boolean> {
     return call("API.DeleteNote", id);
@@ -559,10 +568,6 @@ export const API = {
   /** GetAgentKnowledge 返回 agent 附加的知识笔记 ID 列表。 */
   getAgentKnowledge(agentId: string): Promise<string[]> {
     return call("API.GetAgentKnowledge", agentId);
-  },
-  /** GetFeishu 返回飞书机器人配置和长连接状态。 */
-  getFeishu(): Promise<FeishuView> {
-    return call("API.GetFeishu");
   },
   /** GetLLMConfig 返回当前模型配置。 */
   getLLMConfig(): Promise<Config> {
@@ -611,6 +616,10 @@ export const API = {
   /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
     return call("API.ListChannels");
+  },
+  /** ListFeishu 返回全部飞书机器人和各自的长连接状态。 */
+  listFeishu(): Promise<FeishuView[]> {
+    return call("API.ListFeishu");
   },
   /** ListFeishuRooms 返回飞书群和私聊的记录。这不是应用里的频道。 */
   listFeishuRooms(): Promise<Room[]> {
@@ -702,7 +711,7 @@ export const API = {
   runShell(req: ShellRequest): Promise<void> {
     return call("API.RunShell", req);
   },
-  /** SaveFeishu 保存飞书机器人配置，并按开关拉起或停掉长连接。 */
+  /** SaveFeishu 保存一个机器人，并只重启这一个的长连接。 */
   saveFeishu(in_: FeishuSave): Promise<FeishuView> {
     return call("API.SaveFeishu", in_);
   },
@@ -743,6 +752,10 @@ export const API = {
    */
   setChannelSpeaker(channelId: string, agentId: string): Promise<Channel> {
     return call("API.SetChannelSpeaker", channelId, agentId);
+  },
+  /** SetFeishuEnabled 立刻只改这一个机器人的启用，并拉起或停掉它的长连接。 */
+  setFeishuEnabled(id: string, enabled: boolean): Promise<FeishuView> {
+    return call("API.SetFeishuEnabled", id, enabled);
   },
   /** SetFeishuRoomAgent 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。 */
   setFeishuRoomAgent(chatID: string, agentID: string): Promise<void> {

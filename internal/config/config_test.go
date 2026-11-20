@@ -184,16 +184,77 @@ func TestFeishuSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	want := Feishu{Enabled: true, AppID: "cli_x", AppSecret: "sec", AgentID: "a1"}
-	if err := st.SetFeishu(want); err != nil {
-		t.Fatalf("SetFeishu: %v", err)
+	saved, err := st.SaveFeishuBot(FeishuBot{Enabled: true, AppID: "cli_x", AppSecret: "sec", AgentID: "a1", UserAccess: "tok"})
+	if err != nil {
+		t.Fatalf("SaveFeishuBot: %v", err)
+	}
+	if saved.ID == "" {
+		t.Fatal("id empty")
 	}
 	again, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	got := again.Get().Feishu
-	if got != want {
-		t.Fatalf("Feishu = %+v, want %+v", got, want)
+	got := again.Get().FeishuBots
+	if len(got) != 1 || got[0].ID != saved.ID || got[0].AppSecret != "sec" || got[0].UserAccess != "tok" {
+		t.Fatalf("bots = %+v", got)
+	}
+	if again.Get().Feishu != (Feishu{}) {
+		t.Fatalf("legacy feishu = %+v", again.Get().Feishu)
+	}
+}
+
+func TestFeishuLegacyMigratesOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	raw := []byte(`{"feishu":{"enabled":true,"appId":"cli_x","appSecret":"sec","agentId":"a1","userAccess":"tok"}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	bots := st.Get().FeishuBots
+	if len(bots) != 1 || bots[0].AppID != "cli_x" || bots[0].AppSecret != "sec" || bots[0].UserAccess != "tok" || bots[0].ID == "" {
+		t.Fatalf("bots = %+v", bots)
+	}
+	if st.Get().Feishu != (Feishu{}) {
+		t.Fatalf("legacy still set: %+v", st.Get().Feishu)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Get().FeishuBots) != 1 || again.Get().FeishuBots[0].ID != bots[0].ID {
+		t.Fatalf("second open = %+v", again.Get().FeishuBots)
+	}
+}
+
+func TestFeishuBotsKeepSecretAndRejectDuplicateApp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.SaveFeishuBot(FeishuBot{AppID: "cli_a", AppSecret: "sec", UserAccess: "tok", UserRefresh: "ref"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := st.SaveFeishuBot(FeishuBot{ID: first.ID, AppID: "cli_a", Name: "甲"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.AppSecret != "sec" || kept.UserAccess != "tok" || kept.Name != "甲" {
+		t.Fatalf("kept = %+v", kept)
+	}
+	changed, err := st.SaveFeishuBot(FeishuBot{ID: first.ID, AppID: "cli_b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.AppSecret != "sec" || changed.UserAccess != "" || changed.UserRefresh != "" {
+		t.Fatalf("changed = %+v", changed)
+	}
+	if _, err := st.SaveFeishuBot(FeishuBot{AppID: "cli_b", AppSecret: "other"}); err == nil || err.Error() != "这个 App ID 已经有一个机器人" {
+		t.Fatalf("dup err = %v", err)
 	}
 }

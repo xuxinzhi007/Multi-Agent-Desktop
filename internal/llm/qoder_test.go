@@ -210,3 +210,29 @@ func TestQoderIdentityUsesSavedLoginWhenKeyIsStale(t *testing.T) {
 		t.Fatal("stale key should not count as the saved account")
 	}
 }
+
+func TestQoderQuotaIncludesResourcePackage(t *testing.T) {
+	dir := t.TempDir()
+	prev := qoderAuthPath
+	qoderAuthPath = filepath.Join(dir, "auth.json")
+	t.Cleanup(func() { qoderAuthPath = prev })
+	if err := writeQoderCreds(qoderCreds{
+		Access:    "dt-pack",
+		Expires:   time.Now().Add(time.Hour),
+		UserID:    "user-pack",
+		MachineID: "machine-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	quotaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"isQuotaExceeded":false,"userQuota":{"total":3000,"used":3000,"remaining":0,"unit":"credits"},"orgResourcePackage":{"used":10789,"remaining":211,"cap":11000,"unit":"credits"}}`))
+	}))
+	defer quotaSrv.Close()
+	prevAPI := qoderOpenAPI
+	qoderOpenAPI = quotaSrv.URL
+	t.Cleanup(func() { qoderOpenAPI = prevAPI })
+	quota, err := QoderAccountStatus(context.Background(), "dt-pack")
+	if err != nil || quota != "订阅剩余 0 / 3000 credits；资源包剩余 211 / 11000 credits" {
+		t.Fatalf("quota = %q err=%v", quota, err)
+	}
+}

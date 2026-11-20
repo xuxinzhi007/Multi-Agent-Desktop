@@ -373,26 +373,64 @@ function AccessBoard() {
   )
 }
 
+type FeishuDraft = {
+  id: string
+  name: string
+  enabled: boolean
+  joinAll: boolean
+  appId: string
+  secret: string
+  agentId: string
+  dirty: boolean
+}
+
+function botLabel(name: string, appId: string): string {
+  const n = name.trim()
+  if (n) return n
+  if (appId.trim()) return appId.trim()
+  return '未命名'
+}
+
+function sessionLabel(agentId: string, agents: AgentView[]): string {
+  if (!agentId) return '未选会话'
+  const found = agents.find((a) => a.id === agentId)
+  return found ? found.name : '会话不存在'
+}
+
+function statusText(state: string | undefined): string {
+  if (state === 'connected') return '已连接'
+  if (state === 'connecting') return '连接中'
+  if (state === 'error') return '连接失败'
+  return '未连接'
+}
+
+function draftFromBot(bot: FeishuView): FeishuDraft {
+  return {
+    id: bot.id,
+    name: bot.name,
+    enabled: bot.enabled,
+    joinAll: !bot.mentionOnly,
+    appId: bot.appId,
+    secret: '',
+    agentId: bot.agentId,
+    dirty: false,
+  }
+}
+
 function FeishuBoard() {
-  const [view, setView] = useState<FeishuView | null>(null)
+  const [bots, setBots] = useState<FeishuView[]>([])
+  const [pending, setPending] = useState<FeishuDraft[]>([])
+  const [drafts, setDrafts] = useState<Record<string, FeishuDraft>>({})
   const [agents, setAgents] = useState<AgentView[]>([])
-  const [enabled, setEnabled] = useState(false)
-  const [joinAll, setJoinAll] = useState(true)
-  const [appId, setAppId] = useState('')
-  const [secret, setSecret] = useState('')
-  const [agentId, setAgentId] = useState('')
+  const [selected, setSelected] = useState('')
   const [showSecret, setShowSecret] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
   const load = async () => {
-    const [next, list] = await Promise.all([API.getFeishu(), API.listAgents()])
-    setView(next)
+    const [next, list] = await Promise.all([API.listFeishu(), API.listAgents()])
+    setBots(next ?? [])
     setAgents(list)
-    setEnabled(next.enabled)
-    setJoinAll(!next.mentionOnly)
-    setAppId(next.appId)
-    setAgentId(next.agentId)
   }
 
   useEffect(() => {
@@ -401,26 +439,124 @@ function FeishuBoard() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      API.getFeishu()
-        .then(setView)
+      API.listFeishu()
+        .then((next) => setBots(next ?? []))
         .catch(() => {})
     }, 2000)
     return () => window.clearInterval(timer)
   }, [])
 
-  const save = async () => {
+  const saved = bots.find((b) => b.id === selected)
+  const fresh = pending.find((b) => b.id === selected)
+  const active = saved || fresh ? selected : ''
+  const base = saved ? draftFromBot(saved) : fresh
+  const draft = active && drafts[active] ? drafts[active] : base
+
+  const patchDraft = (id: string, patch: Partial<FeishuDraft>) => {
+    setDrafts((cur) => {
+      const prev = cur[id] ?? (id === active ? base : undefined)
+      if (!prev) return cur
+      return { ...cur, [id]: { ...prev, ...patch, dirty: true } }
+    })
+  }
+
+  const putBot = (view: FeishuView) => {
+    setBots((cur) => {
+      const has = cur.some((b) => b.id === view.id)
+      return has ? cur.map((b) => (b.id === view.id ? view : b)) : [...cur, view]
+    })
+  }
+
+  const add = () => {
+    const id = `new-${Date.now()}`
+    const row: FeishuDraft = {
+      id,
+      name: '',
+      enabled: false,
+      joinAll: true,
+      appId: '',
+      secret: '',
+      agentId: '',
+      dirty: true,
+    }
+    setPending((cur) => [...cur, row])
+    setDrafts((cur) => ({ ...cur, [id]: row }))
+    setSelected(id)
+    setErr('')
+    setShowSecret(false)
+  }
+
+  const toggleEnabled = (id: string, enabled: boolean) => {
+    if (id.startsWith('new-')) {
+      patchDraft(id, { enabled })
+      return
+    }
+    setErr('')
+    API.setFeishuEnabled(id, enabled)
+      .then((view) => {
+        putBot(view)
+        setDrafts((cur) => {
+          const d = cur[id]
+          if (!d) return cur
+          return { ...cur, [id]: { ...d, enabled: view.enabled } }
+        })
+      })
+      .catch((e: unknown) => setErr(errText(e)))
+  }
+
+  const remove = (id: string) => {
+    if (!id.startsWith('new-') && !window.confirm('删掉这个机器人？它的长连接会停掉。')) return
+    if (id.startsWith('new-')) {
+      setPending((cur) => cur.filter((b) => b.id !== id))
+      setDrafts((cur) => {
+        const next = { ...cur }
+        delete next[id]
+        return next
+      })
+      if (selected === id) setSelected('')
+      return
+    }
+    setBusy(true)
+    setErr('')
+    API.deleteFeishu(id)
+      .then(() => {
+        setBots((cur) => cur.filter((b) => b.id !== id))
+        setDrafts((cur) => {
+          const next = { ...cur }
+          delete next[id]
+          return next
+        })
+        if (selected === id) setSelected('')
+      })
+      .catch((e: unknown) => setErr(errText(e)))
+      .finally(() => setBusy(false))
+  }
+
+  const saveBot = async (id: string) => {
+    const source = drafts[id] ?? pending.find((b) => b.id === id)
+    if (!source) return
+    setSelected(id)
     setBusy(true)
     setErr('')
     try {
-      const next = await API.saveFeishu({
-        enabled,
-        appId,
-        appSecret: secret,
-        agentId,
-        mentionOnly: !joinAll,
+      const view = await API.saveFeishu({
+        id: source.id.startsWith('new-') ? '' : source.id,
+        name: source.name,
+        enabled: source.enabled,
+        appId: source.appId,
+        appSecret: source.secret,
+        agentId: source.agentId,
+        mentionOnly: !source.joinAll,
       })
-      setView(next)
-      setSecret('')
+      putBot(view)
+      setPending((cur) => cur.filter((b) => b.id !== source.id))
+      setDrafts((cur) => {
+        const next = { ...cur }
+        delete next[source.id]
+        return next
+      })
+      setSelected(view.id)
+      setShowSecret(false)
     } catch (e) {
       setErr(errText(e))
     } finally {
@@ -428,122 +564,199 @@ function FeishuBoard() {
     }
   }
 
-  const statusText = (state: string | undefined) => {
-    if (state === 'connected') return '已连接'
-    if (state === 'connecting') return '连接中'
-    if (state === 'error') return '连接失败'
-    return '未连接'
-  }
+  const rows = [
+    ...bots.map((b) => ({
+      id: b.id,
+      name: b.name,
+      appId: b.appId,
+      agentId: drafts[b.id]?.agentId ?? b.agentId,
+      enabled: drafts[b.id]?.enabled ?? b.enabled,
+      status: b.status,
+      hasSecret: b.hasSecret,
+      hasUser: b.hasUser,
+      saved: true,
+    })),
+    ...pending.map((b) => ({
+      id: b.id,
+      name: drafts[b.id]?.name ?? b.name,
+      appId: drafts[b.id]?.appId ?? b.appId,
+      agentId: drafts[b.id]?.agentId ?? b.agentId,
+      enabled: drafts[b.id]?.enabled ?? b.enabled,
+      status: 'stopped',
+      hasSecret: false,
+      hasUser: false,
+      saved: false,
+    })),
+  ]
 
   return (
     <section className="c-settings__card">
       <div className="c-settings__card-head">
         <div>
           <div className="c-settings__card-title">飞书机器人</div>
-          <div className="c-settings__card-sub">记下飞书会话。群里可以自己接话，也可以改成只有 @ 或回复才回答</div>
+          <div className="c-settings__card-sub">每个机器人单独保存</div>
         </div>
-        <span className={`c-providers__badge ${view?.status === 'connected' ? 'is-ok' : 'is-bad'}`}>
-          {statusText(view?.status)}
-        </span>
+        <button type="button" className="c-btn c-btn--ghost c-feishu__add" onClick={add}>
+          添加
+        </button>
       </div>
       <div className="c-settings__card-body">
-        <label className="c-settings__field">
-          <span className="c-settings__field-label">启用</span>
-          <input
-            type="checkbox"
-            aria-label="启用飞书机器人"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-          />
-        </label>
-        <label className="c-settings__field">
-          <span className="c-settings__field-label">群里自己接话</span>
-          <input
-            type="checkbox"
-            aria-label="群里自己接话"
-            checked={joinAll}
-            onChange={(e) => setJoinAll(e.target.checked)}
-          />
-        </label>
-        <label className="c-settings__field">
-          <span className="c-settings__field-label">App ID</span>
-          <input
-            className="c-settings__input"
-            aria-label="飞书 App ID"
-            value={appId}
-            spellCheck={false}
-            onChange={(e) => setAppId(e.target.value)}
-          />
-        </label>
-        <label className="c-settings__field">
-          <span className="c-settings__field-label">App Secret</span>
-          <span className="c-settings__input-row">
-            <input
-              className="c-settings__input"
-              aria-label="飞书 App Secret"
-              type={showSecret ? 'text' : 'password'}
-              autoComplete="off"
-              spellCheck={false}
-              value={secret}
-              placeholder={view?.hasSecret ? '已保存，留空则不修改' : ''}
-              onChange={(e) => setSecret(e.target.value)}
-            />
-            <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowSecret((v) => !v)}>
-              {showSecret ? '隐藏' : '显示'}
-            </button>
-          </span>
-        </label>
-        <label className="c-settings__field">
-          <span className="c-settings__field-label">默认会话</span>
-          <select
-            className="c-settings__input"
-            aria-label="默认会话"
-            value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
-          >
-            <option value="">选择一个会话</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="c-settings__hint">
-          飞书群和应用里的群不是同一个。打开「群里自己接话」后，不用 @ 也会回答，并回到原来那条消息。关掉后只在 @ 机器人或回复它时回答，其它消息仍记账。自己接话时，飞书后台要开通「获取群组中所有消息」并发布。图片优先用机器人身份下载；下不来且你已授权时，会先发确认卡片。连不上时再看：订阅方式选长连接，事件订 im.message.receive_v1、im.chat.member.bot.added_v1 和 card.action.trigger。重定向 URL 填 http://127.0.0.1:17321/callback。
-        </p>
-        <div className="c-settings__field">
-          <button
-            type="button"
-            className="c-btn c-btn--ghost"
-            disabled={busy || !view?.hasSecret}
-            onClick={() => {
-              setBusy(true)
-              setErr('')
-              API.authorizeFeishuUser()
-                .then((next) => setView(next))
-                .catch((e: unknown) => setErr(errText(e)))
-                .finally(() => setBusy(false))
-            }}
-          >
-            {view?.hasUser ? '已授权，重新授权' : '用我的飞书身份授权'}
-          </button>
+        {rows.length === 0 && <p className="c-settings__prose">还没有机器人</p>}
+        <div role="list" aria-label="飞书机器人" className="c-providers">
+          {rows.map((row) => {
+            const on = row.id === active
+            const label = botLabel(row.name, row.appId)
+            const state = row.status
+            const badge = state === 'connected' ? 'is-ok' : state === 'error' ? 'is-bad' : ''
+            return (
+              <div key={row.id} role="listitem" className={`c-providers__row c-feishu__row ${on ? 'is-on' : ''}`}>
+                <button type="button" className="c-providers__pick" onClick={() => { setSelected(row.id); setErr(''); setShowSecret(false) }}>
+                  <span className="c-providers__name">{label}</span>
+                  <span className="c-providers__url">{sessionLabel(row.agentId, agents)}</span>
+                </button>
+                {row.saved && (
+                  <button
+                    type="button"
+                    className="c-btn c-btn--ghost c-feishu__auth"
+                    disabled={busy || !row.hasSecret || !row.appId}
+                    onClick={() => {
+                      setSelected(row.id)
+                      setErr('')
+                      setBusy(true)
+                      API.authorizeFeishuUser(row.id)
+                        .then(putBot)
+                        .catch((e: unknown) => setErr(errText(e)))
+                        .finally(() => setBusy(false))
+                    }}
+                  >
+                    {row.hasUser ? '已授权，重新授权' : '用我的飞书身份授权'}
+                  </button>
+                )}
+                <span className={`c-providers__badge ${badge}`}>{statusText(state)}</span>
+                <input
+                  type="checkbox"
+                  aria-label={`${label} 启用`}
+                  checked={row.enabled}
+                  onChange={(e) => toggleEnabled(row.id, e.target.checked)}
+                />
+                <button type="button" className="c-btn c-btn--ghost" onClick={() => remove(row.id)}>
+                  删除
+                </button>
+                {(drafts[row.id]?.dirty || !row.saved) && (
+                  <button
+                    type="button"
+                    className="c-btn c-btn--primary c-feishu__save"
+                    disabled={busy}
+                    onClick={() => void saveBot(row.id)}
+                  >
+                    {busy && row.id === active ? '正在保存…' : '保存'}
+                  </button>
+                )}
+                {!drafts[row.id]?.dirty && row.saved && (state === 'connected' || !row.enabled) && (
+                  <span className="c-feishu__saved">已保存</span>
+                )}
+              </div>
+            )
+          })}
         </div>
-        {view?.detail && (
-          <p className="c-settings__hint" role="status">
-            {view.detail}
+        {draft && (
+          <>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">名字</span>
+              <input
+                className="c-settings__input"
+                aria-label="机器人名字"
+                value={draft.name}
+                onChange={(e) => patchDraft(draft.id, { name: e.target.value })}
+              />
+            </label>
+            <div className="c-feishu__switches">
+              <label className="c-feishu__switch">
+                <input
+                  type="checkbox"
+                  aria-label="启用飞书机器人"
+                  checked={draft.enabled}
+                  onChange={(e) => toggleEnabled(draft.id, e.target.checked)}
+                />
+                启用
+              </label>
+              <label className="c-feishu__switch">
+                <input
+                  type="checkbox"
+                  aria-label="群里自己接话"
+                  checked={draft.joinAll}
+                  onChange={(e) => patchDraft(draft.id, { joinAll: e.target.checked })}
+                />
+                群里自己接话
+              </label>
+            </div>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">App ID</span>
+              <input
+                className="c-settings__input"
+                aria-label="飞书 App ID"
+                value={draft.appId}
+                spellCheck={false}
+                onChange={(e) => patchDraft(draft.id, { appId: e.target.value })}
+              />
+            </label>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">App Secret</span>
+              <span className="c-settings__input-row">
+                <input
+                  className="c-settings__input"
+                  aria-label="飞书 App Secret"
+                  type={showSecret ? 'text' : 'password'}
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={draft.secret}
+                  placeholder={saved?.hasSecret ? '已保存，留空则不修改' : ''}
+                  onChange={(e) => patchDraft(draft.id, { secret: e.target.value })}
+                />
+                <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowSecret((v) => !v)}>
+                  {showSecret ? '隐藏' : '显示'}
+                </button>
+              </span>
+            </label>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">默认会话</span>
+              <select
+                className="c-settings__input"
+                aria-label="默认会话"
+                value={draft.agentId}
+                onChange={(e) => patchDraft(draft.id, { agentId: e.target.value })}
+              >
+                <option value="">选择一个会话</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <details className="c-settings__fold">
+              <summary>连不上时</summary>
+              <p className="c-settings__hint">
+                飞书群和应用里的群不是同一个。打开「群里自己接话」后，不用 @ 也会回答，并回到原来那条消息。关掉后只在 @ 机器人或回复它时回答，其它消息仍记账。自己接话时，飞书后台要开通「获取群组中所有消息」并发布。图片优先用机器人身份下载；下不来且你已授权时，会先发确认卡片。连不上时再看：订阅方式选长连接，事件订 im.message.receive_v1、im.chat.member.bot.added_v1 和 card.action.trigger。重定向 URL 填 http://127.0.0.1:17321/callback。
+              </p>
+            </details>
+            {saved?.detail && (
+              <p className="c-settings__note is-bad" role="status">
+                {saved.detail}
+              </p>
+            )}
+            {err && (
+              <p className="c-settings__note is-bad" role="status">
+                {err}
+              </p>
+            )}
+          </>
+        )}
+        {!draft && err && (
+          <p className="c-settings__note is-bad" role="status">
+            {err}
           </p>
         )}
-        <div className="c-settings__field">
-          <button type="button" className="c-btn c-btn--primary" disabled={busy} onClick={() => void save()}>
-            {busy ? '正在保存…' : '保存'}
-          </button>
-          {err && (
-            <span className="c-settings__hint" role="status">
-              {err}
-            </span>
-          )}
-        </div>
       </div>
     </section>
   )
@@ -576,7 +789,7 @@ const TAB_HEAD: Record<TabId, { title: string; desc: string }> = {
   },
   feishu: {
     title: '飞书',
-    desc: '把一个企业自建机器人的私聊和群聊接到本机的一个会话上。',
+    desc: '把企业自建机器人接到本机会话。每个机器人单独保存。',
   },
   access: {
     title: '权限',

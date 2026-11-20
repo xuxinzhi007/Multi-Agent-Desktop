@@ -58,6 +58,7 @@ type Service struct {
 	holds   map[string]held
 	log     *Log
 	botID   string
+	owner   string
 	history func(ctx context.Context, appID, secret, chatID string, since int64) ([]Line, error)
 	load    func(ctx context.Context, appID, secret, messageID string) ([]Item, error)
 	grab    func(ctx context.Context, cfg Config, messageID, key string) ([]byte, string, error)
@@ -102,6 +103,36 @@ func (s *Service) SetLog(path string) {
 	book := s.log
 	s.mu.Unlock()
 	book.SetPath(path)
+}
+
+// ShareLog 让多个机器人共用一份会话记录。
+func (s *Service) ShareLog(book *Log) {
+	if s == nil || book == nil {
+		return
+	}
+	s.mu.Lock()
+	s.log = book
+	s.mu.Unlock()
+}
+
+// SetOwner 记下这份连接属于哪个机器人，写进会话记录。
+func (s *Service) SetOwner(id string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.owner = id
+	s.mu.Unlock()
+}
+
+// Current 返回当前生效的配置。
+func (s *Service) Current() Config {
+	if s == nil {
+		return Config{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg
 }
 
 // Rooms 返回飞书会话记录。
@@ -729,6 +760,12 @@ func (s *Service) noteLine(t Turn) {
 		text = "［图片］"
 	}
 	s.log.Add(Line{ID: t.MessageID, ChatID: t.ChatID, From: from, FromID: t.SenderID, Text: text, At: at})
+	s.mu.Lock()
+	owner := s.owner
+	s.mu.Unlock()
+	if owner != "" {
+		s.log.SetBot(t.ChatID, owner)
+	}
 	s.log.Kind(t.ChatID, t.ChatType)
 	if t.ChatType == "p2p" && from != "" && from != "有人" && t.ChatName == "" {
 		s.log.Name(t.ChatID, from)

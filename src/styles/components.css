@@ -1148,6 +1148,60 @@
   flex: 1;
   min-width: 0;
 }
+.c-feishu__add {
+  margin-left: auto;
+}
+.c-feishu__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.c-feishu__row .c-providers__pick {
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+}
+.c-feishu__row .c-providers__url {
+  flex: 0 1 auto;
+}
+.c-feishu__auth {
+  margin-left: auto;
+  flex: none;
+  padding: 4px 10px;
+  font-size: var(--text-xs);
+}
+.c-feishu__save {
+  flex: none;
+  padding: 4px 10px;
+  font-size: var(--text-xs);
+}
+.c-feishu__saved {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--success);
+  white-space: nowrap;
+}
+.c-feishu__switches {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.c-feishu__switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.c-settings__fold {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.c-settings__fold summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
 
 /* 状态行：加载 / 错误 / 空，统一外观，只换语义色 */
 .c-settings__status {
