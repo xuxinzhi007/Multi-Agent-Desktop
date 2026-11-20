@@ -167,8 +167,13 @@ func findType(text string) string {
 func actBody(op Op) string {
 	switch op.Op {
 	case "read":
-		return `const text = ((document.body && document.body.innerText) || "").replace(/\n{3,}/g, "\n\n").slice(0, 4000);
-  return JSON.stringify({url: location.href, title: document.title, text});`
+		return `const flutterNode = document.querySelector("flt-glass-pane, flt-semantics-placeholder, flt-semantics-host, flt-scene-host, script[src*='flutter.js'], script[src*='main.dart.js']");
+  const placeholder = document.querySelector("flt-semantics-placeholder");
+  if (placeholder) placeholder.click();
+  const host = document.querySelector("flt-semantics-host");
+  const raw = ((host && host.innerText) || (document.body && document.body.innerText) || "");
+  const text = raw.replace(/Enable accessibility/gi, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+  return JSON.stringify({url: location.href, title: document.title, text, flutter: !!flutterNode});`
 	case "click":
 		return `if (!target) return "not-found";
   const box = target.getBoundingClientRect();

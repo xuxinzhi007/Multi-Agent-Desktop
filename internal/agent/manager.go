@@ -41,6 +41,8 @@ type Agent struct {
 	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
 	// BlockedReason 是「在等人」的原因，仅 Status == blocked 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
+	// ParentID 是创建它的会话。空表示用户自己建的，侧栏里和别人平级。
+	ParentID string `json:"parentId,omitempty"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
@@ -455,6 +457,10 @@ func (m *Manager) Unblock(id string) error {
 var palette = []string{"#5b9dff", "#3ecf8e", "#e8a33d", "#c47aff", "#ff7a8a", "#4dd0e1"}
 
 func (m *Manager) Create(id, name, role string) *Agent {
+	return m.create(id, name, role, "")
+}
+
+func (m *Manager) create(id, name, role, parentID string) *Agent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -478,9 +484,10 @@ func (m *Manager) Create(id, name, role string) *Agent {
 		Messages: []llm.Message{
 			{Role: "system", Content: systemPromptFor(role)},
 		},
-		Backend: "loop",
-		queue:   make(chan PromptRequest, 32),
-		done:    make(chan struct{}),
+		Backend:  "loop",
+		ParentID: parentID,
+		queue:    make(chan PromptRequest, 32),
+		done:     make(chan struct{}),
 	}
 
 	m.agents[id] = a
@@ -1125,6 +1132,7 @@ func (a *Agent) Snapshot() *Agent {
 		Backend:       a.Backend,
 		WorkDir:       a.WorkDir,
 		LLMCfg:        a.LLMCfg,
+		ParentID:      a.ParentID,
 		Knowledge:     append([]string(nil), a.Knowledge...),
 		BlockedReason: a.BlockedReason,
 		StartedAt:     a.StartedAt,
@@ -1153,6 +1161,7 @@ func (a *Agent) viewMap() map[string]any {
 		"queueLen":      a.QueueLen,
 		"backend":       a.Backend,
 		"workDir":       a.WorkDir,
+		"parentId":      a.ParentID,
 		"llmCfg":        a.LLMCfg, // nil 表示这个会话还没选模型
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,

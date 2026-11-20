@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -34,7 +35,11 @@ type Bash struct {
 func (*Bash) Name() string { return "bash" }
 
 func (*Bash) Description() string {
-	return "Run a shell command. Returns stdout and stderr. " +
+	shell := "a POSIX shell (zsh -dfc, or sh -c)"
+	if runtime.GOOS == "windows" {
+		shell = "PowerShell (-NoProfile -NonInteractive). Do not use bash syntax such as && or heredocs unless you know they work in PowerShell"
+	}
+	return "Run " + shell + ". Returns stdout and stderr. " +
 		"Prefer read_file/write_file/edit_file for file operations — " +
 		"they are validated and reversible."
 }
@@ -75,12 +80,12 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, "/bin/sh", "-c", in.Command)
+	cmd := proc.CommandContext(execCtx, in.Command)
 	if b.WorkDir != "" {
 		cmd.Dir = b.WorkDir
 	}
 	// 关键：独立进程组 + 取消时杀整组。
-	// sh -c 派生的子进程不会随父进程退出而退出，
+	// shell 派生的子进程不会随父进程退出而退出，
 	// 不杀组的话取消 ctx 之后管道仍然打开，上层就永远等不到关闭。
 	proc.Setup(cmd)
 

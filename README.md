@@ -227,7 +227,8 @@ multi-agent-desktop/
 - **Mock 回复是占位的**，别当真实分析看
 - **检查器的「改动 / 任务」始终为空** —— 后端还没有产出这两类结构化数据的路径
 - **shell 是同步等结果**，长命令会卡住，没有超时控制
-- **shell 不读登录脚本**（`zsh -dfc`，没有 zsh 时用 `sh -c`）。登录脚本会去碰桌面、文稿、下载，macOS 就按文件夹反复弹权限。工作目录不能是主目录或这些文件夹本身；放在其中的项目子目录可以，系统最多问一次
+- **shell 不读登录脚本**。macOS / Linux 用 `zsh -dfc`（没有 zsh 时用 `sh -c`）；Windows 用 `powershell.exe -NoProfile -NonInteractive`，模型应写 PowerShell，不要写 bash。登录脚本会去碰桌面、文稿、下载，macOS 就按文件夹反复弹权限。工作目录不能是主目录、盘符根（如 `C:\`）或这些文件夹本身；放在其中的项目子目录可以，系统最多问一次
+- **屏幕协助只在 macOS**。Windows / Linux 上打开会得到明确错误，不会静默空转
 - **工具调用没有审批闸门**，CLI agent 直接执行
 - **无 worktree 隔离**，多 agent 并行改同一仓库会冲突
 - **API Key 明文落盘**（`config.json`，权限 600）—— 计划迁移到系统钥匙串

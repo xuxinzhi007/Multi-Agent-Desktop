@@ -23,6 +23,17 @@ func invoke(t *testing.T, tl tool.Tool, args string) tool.Result {
 	return tl.Execute(context.Background(), json.RawMessage(args))
 }
 
+func commandJSON(t *testing.T, command string) string {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestBashBasic(t *testing.T) {
 	b := &Bash{WorkDir: tmpDir(t)}
 	res := invoke(t, b, `{"command":"echo hello"}`)
@@ -49,7 +60,11 @@ func TestBashRejectsHome(t *testing.T) {
 // 必须把退出码和 stderr 一起交给模型，它才知道怎么改。
 func TestBashNonZeroExitIsResultNotError(t *testing.T) {
 	b := &Bash{WorkDir: tmpDir(t)}
-	res := invoke(t, b, `{"command":"echo oops >&2; exit 3"}`)
+	cmd := `echo oops >&2; exit 3`
+	if runtime.GOOS == "windows" {
+		cmd = `[Console]::Error.WriteLine('oops'); exit 3`
+	}
+	res := invoke(t, b, commandJSON(t, cmd))
 
 	if res.Status != tool.StatusOK {
 		t.Fatalf("非零退出不该是工具错误，status = %q", res.Status)
@@ -88,7 +103,11 @@ func TestBashTimeoutKillsProcessGroup(t *testing.T) {
 
 func TestBashOutputLimited(t *testing.T) {
 	b := &Bash{WorkDir: tmpDir(t), MaxOutput: 100}
-	res := invoke(t, b, `{"command":"yes x | head -c 100000"}`)
+	cmd := `yes x | head -c 100000`
+	if runtime.GOOS == "windows" {
+		cmd = `'x' * 100000`
+	}
+	res := invoke(t, b, commandJSON(t, cmd))
 	// 采集阶段的限制，避免超大输出吃光内存
 	if len(res.Content) > 2000 {
 		t.Fatalf("output not limited: %d bytes", len(res.Content))

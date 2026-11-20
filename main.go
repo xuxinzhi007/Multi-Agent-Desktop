@@ -380,6 +380,8 @@ type AgentView struct {
 	Busy string `json:"busy,omitempty"`
 	// Last 是最后一句非 system 内容，截断后给列表用。
 	Last string `json:"last,omitempty"`
+	// ParentID 是创建它的会话。空表示用户自己建的。
+	ParentID string `json:"parentId,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -403,6 +405,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		LastTool:      s.LastTool,
 		Chars:         s.Chars,
 		Busy:          s.BusyPlace,
+		ParentID:      s.ParentID,
 	}
 }
 
@@ -421,6 +424,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 		v.Knowledge = ids
 	}
 	v.BlockedReason, _ = m["blockedReason"].(string)
+	v.ParentID, _ = m["parentId"].(string)
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = lc

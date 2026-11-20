@@ -195,7 +195,7 @@ func (t *createAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool
 	}
 	from.mu.Unlock()
 	dir := from.EffectiveWorkDir(t.m)
-	created := t.m.Create("", in.Name, in.Role)
+	created := t.m.create("", in.Name, in.Role, from.ID)
 	if copyLLM {
 		_ = t.m.SetAgentLLM(created.ID, sessionLLM)
 	}

@@ -87,6 +87,8 @@ export interface AgentView {
   busy?: string;
   /** Last 是最后一句非 system 内容，截断后给列表用。 */
   last?: string;
+  /** ParentID 是创建它的会话。空表示用户自己建的。 */
+  parentId?: string;
 }
 
 export interface Channel {
