@@ -2,6 +2,19 @@ package browser
 
 import "testing"
 
+func TestClickByVisibleText(t *testing.T) {
+	js, err := PageJS(Op{Op: "click", Text: "最近 24h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(js, `"最近 24h"`) || !contains(js, "textContent") {
+		t.Fatal(js)
+	}
+	if _, err := PageJS(Op{Op: "click"}); err == nil {
+		t.Fatal("click without a target was accepted")
+	}
+}
+
 func TestPageJSDoesNotTakeRawScript(t *testing.T) {
 	js, err := PageJS(Op{Op: "type", Ref: "e1", Value: `保存";alert(1)`})
 	if err != nil {

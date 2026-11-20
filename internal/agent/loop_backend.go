@@ -110,6 +110,12 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		SaveImage: func(png []byte) (string, error) {
 			return llm.SaveImage(m.ImageDir(), "image/png", png)
 		},
+		Steer: func() []llm.Message {
+			if channelID != "" {
+				return nil
+			}
+			return a.foldIntoTurn(m)
+		},
 		Sync: func(msgs []llm.Message) {
 			if channelID != "" {
 				return
@@ -335,7 +341,7 @@ func loopSystemPrompt(workDir string) string {
 		"- save_note：把结论写进知识库并挂到自己身上，后面的轮次会带上。参数 title、body，可选 tags。",
 		"- set_profile：改自己的名字、简介或工作目录。参数 name、role、dir 至少填一个。简介用来记住你现在负责什么。",
 		"- delete_agent：删除自己，或删除你创建的子会话。参数 name，不填就是删除自己。不能删除别人的会话。",
-		"- web：操作应用内置浏览器。先 snapshot，再用它给出的 ref 做 click、type、key、scroll、down、up。没有控件的区域用 x、y。每次动作后看新的控件表和画面。编号过期就重新 snapshot。不要写脚本，也不要操作用户的 Chrome。",
+		"- web：操作应用内置浏览器。查日志、改筛选、点菜单时，用一次 web 的 steps 做完，每步的 text 写页面上能看见的文字，不要每点一下就等一轮。下拉打开后的选项写在下一步。只有最后的页面会回来。一次查完就根据结果回答；查询语法不对就改这一次 steps，不要连着试十几轮。没有控件的区域才用 x、y。不要写脚本，也不要操作用户的 Chrome。",
 		"这些能力已经接在工具里。不要回答自己无法创建 agent 或无法和其他 agent 对话；需要协作时直接调用上面的工具。",
 		"飞书里的一句是一件任务，可以用这台电脑上的工具去做。回复会写回原来那张卡片。不要说项目没有飞书集成。",
 		"没有用工具查过这个工作目录之前，不要说某项能力、接口或集成不存在。",

@@ -70,3 +70,43 @@ func TestImageRefusalStillAnswersText(t *testing.T) {
 		t.Fatalf("text = %q", turn.Text)
 	}
 }
+
+func TestUpstreamGlitchDropsImageAndContinues(t *testing.T) {
+	calls := 0
+	glitch := fmt.Errorf(`qoder: 上游状态 400: {"code":"provider_error","message":"Error in upstream response","details":"{\"error\":{\"code\":\"1214\"}}"}`)
+	msgs := []Message{{Role: "tool", Content: "data-service ref e48", Blocks: []Block{{ID: "shot", Data: []byte{1, 2, 3}}}}}
+	turn, err := AnswerDespiteImages(msgs, func(in []Message) (Turn, error) {
+		calls++
+		if messagesHaveImage(in) {
+			return Turn{}, glitch
+		}
+		if !strings.Contains(in[0].Content, "ref e48") {
+			t.Fatalf("lost the page text: %q", in[0].Content)
+		}
+		return Turn{Text: "点击时间范围"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || turn.Text != "点击时间范围" {
+		t.Fatalf("calls=%d text=%q", calls, turn.Text)
+	}
+}
+
+func TestUpstreamGlitchRetriesPlainRequestOnce(t *testing.T) {
+	calls := 0
+	msgs := []Message{{Role: "user", Content: "继续"}}
+	turn, err := AnswerDespiteImages(msgs, func([]Message) (Turn, error) {
+		calls++
+		if calls == 1 {
+			return Turn{}, fmt.Errorf("qoder: 上游状态 400: provider_error code 1214")
+		}
+		return Turn{Text: "好"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || turn.Text != "好" {
+		t.Fatalf("calls=%d text=%q", calls, turn.Text)
+	}
+}

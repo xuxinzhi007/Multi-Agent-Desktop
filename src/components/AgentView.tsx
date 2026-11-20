@@ -288,9 +288,15 @@ function ThinkRail({
 }) {
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const pin = useRef(true)
+  const onBodyScroll = () => {
+    const el = bodyRef.current
+    if (!el) return
+    pin.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }
   useEffect(() => {
     const el = bodyRef.current
-    if (!el || !open) return
+    if (!el || !open || !pin.current) return
     el.scrollTop = el.scrollHeight
   }, [children, open])
   const hasBody = children != null && children !== false && children !== ''
@@ -309,7 +315,7 @@ function ThinkRail({
         {hasBody && <span className="c-think__toggle">{open ? '收起' : '展开'}</span>}
       </button>
       {open && hasBody && (
-        <div className="c-think__body" ref={bodyRef}>
+        <div className="c-think__body" ref={bodyRef} onScroll={onBodyScroll}>
           {children}
         </div>
       )}
@@ -318,10 +324,8 @@ function ThinkRail({
 }
 
 function ReasoningCard({ text, live }: { text: string; live?: boolean }) {
-  const tail = text.trim().split('\n').filter(Boolean).at(-1) ?? ''
-  const title = tail ? `思考 · ${tail}` : '思考'
   return (
-    <ThinkRail live={live} title={title}>
+    <ThinkRail live={live} title={live ? '思考中' : '思考'}>
       {text}
     </ThinkRail>
   )
@@ -356,20 +360,9 @@ function Thinking({
   const parts = [label]
   if (pace) parts.push(`已等 ${formatWait(waited)}`)
   if (pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
-  const has = !!reasoning || steps.length > 0
   return (
     <ThinkRail live title={parts.join(' · ')} tone={current ? 'tool' : thinking ? 'think' : 'wait'}>
-      {has ? (
-        <>
-          {reasoning}
-          {steps.map((s, i) => (
-            <div key={`${s.tool}-${i}`} style={{ color: s.status === 'error' ? 'var(--danger)' : 'var(--text-tertiary)' }}>
-              {s.status === 'running' ? '…' : s.status === 'error' ? '✕' : s.status === 'waiting' ? '!' : '✓'}{' '}
-              {stepText(s.tool, s.target)}
-            </div>
-          ))}
-        </>
-      ) : undefined}
+      {reasoning || undefined}
     </ThinkRail>
   )
 }
@@ -1109,7 +1102,7 @@ export default function AgentView(p: Props) {
               onClick={submit}
               disabled={!hasDraft}
             >
-              {mode === 'shell' ? '执行' : turnLive ? '排队' : '发送'}
+              {mode === 'shell' ? '执行' : turnLive ? '插入' : '发送'}
             </button>
           </div>
         </div>
@@ -1129,7 +1122,7 @@ export default function AgentView(p: Props) {
             {imageNote
                 ? imageNote
                 : turnLive
-                  ? '这一轮还在进行。停止会打断它，并清掉还没开始的排队；写好再点排队，会等这一轮结束。'
+                  ? '这一轮还在进行。发出去会在下一步之前插进当前任务。停止会打断它，并清掉还没插进去的消息。'
                   : 'Enter 发送 · Shift+Enter 换行'}
           </span>
           <ContextMeter

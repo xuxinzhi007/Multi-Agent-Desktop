@@ -77,6 +77,8 @@ type Config struct {
 	AppID     string
 	AppSecret string
 	AgentID   string
+	// MentionOnly 为真时，群里只有被 @ 或被回复才回答。
+	MentionOnly bool
 	// UserAccess 是用户授权后的令牌。空表示还没有授权。
 	UserAccess string
 }
@@ -255,7 +257,10 @@ func (s *Service) dispatch(t Turn) {
 	if fresh {
 		go s.fill(cfg, t.ChatID, 0)
 	}
-	if t.ChatType == "group" && !s.spokenTo(t) {
+	if t.ChatType == "group" && s.fromSelf(t) {
+		return
+	}
+	if t.ChatType == "group" && cfg.MentionOnly && !s.spokenTo(t) {
 		return
 	}
 	s.mu.Lock()
@@ -279,6 +284,11 @@ func (s *Service) dispatch(t Turn) {
 		return
 	}
 	text := taskLead + joinPieces(pieces)
+	if t.ChatType == "group" && s.log != nil && t.ChatID != "" {
+		if framed := s.log.Prompt(t.ChatID, t.ChatName, !cfg.MentionOnly); framed != "" {
+			text = taskLead + framed
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cardID := s.sendWorking(cfg.AppID, cfg.AppSecret, t.MessageID, workingLine, t.MessageID)
@@ -673,6 +683,16 @@ func (s *Service) spokenTo(t Turn) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) fromSelf(t Turn) bool {
+	if t.SenderType == "app" || t.SenderType == "bot" {
+		return true
+	}
+	s.mu.Lock()
+	id := s.botID
+	s.mu.Unlock()
+	return id != "" && t.SenderID != "" && t.SenderID == id
 }
 
 func (s *Service) arrive(cfg Config, t Turn) {

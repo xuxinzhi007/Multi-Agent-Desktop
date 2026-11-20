@@ -16,6 +16,24 @@ func TestNavigationArrivedDoesNotAcceptBlank(t *testing.T) {
 	}
 }
 
+func TestReopenRestoresTheSameLogsPage(t *testing.T) {
+	d := NewDesk()
+	d.pageURL = "https://devops.x2robot.com/logs"
+	d.pageState = []byte("kept")
+	u, st := d.reopen("https://devops.x2robot.com/logs/")
+	if u != d.pageURL || string(st) != "kept" {
+		t.Fatalf("same page: %s %q", u, st)
+	}
+	u, st = d.reopen("")
+	if u != d.pageURL || string(st) != "kept" {
+		t.Fatalf("snapshot: %s %q", u, st)
+	}
+	u, st = d.reopen("https://example.com/other")
+	if u != "https://example.com/other" || st != nil {
+		t.Fatalf("other page: %s %q", u, st)
+	}
+}
+
 func TestNavigationArrivedTreatsTrailingSlashAsSameDocument(t *testing.T) {
 	watch := navWatch{}
 	if !watch.arrived("https://chat.flaiapp.com/welcome/", false, "https://chat.flaiapp.com/welcome") {

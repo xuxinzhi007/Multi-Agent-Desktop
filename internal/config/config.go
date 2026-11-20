@@ -39,6 +39,8 @@ type Feishu struct {
 	AppID     string `json:"appId,omitempty"`
 	AppSecret string `json:"appSecret,omitempty"`
 	AgentID   string `json:"agentId,omitempty"`
+	// MentionOnly 为真时，群里只有 @ 机器人或回复它才回答。没写这个字段时，群里自己接话。
+	MentionOnly bool `json:"mentionOnly,omitempty"`
 	// 用户授权后的令牌。机器人没有的权限用它，不回给窗口。
 	UserAccess  string `json:"userAccess,omitempty"`
 	UserRefresh string `json:"userRefresh,omitempty"`

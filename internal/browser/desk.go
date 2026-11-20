@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,11 +15,38 @@ import (
 
 // Desk 是应用自己的浏览器窗口。登录留在名为 workbench 的会话里，不进用户的 Chrome。
 type Desk struct {
-	mu    sync.Mutex
-	actMu sync.Mutex
-	sess  *mygo.Session
-	win   *mygo.Window
-	held  bool
+	mu        sync.Mutex
+	actMu     sync.Mutex
+	sess      *mygo.Session
+	win       *mygo.Window
+	held      bool
+	statePath string
+	pageURL   string
+	pageState []byte
+}
+
+type pageKeep struct {
+	URL   string `json:"url"`
+	State []byte `json:"state,omitempty"`
+}
+
+// SetStatePath 记住上次打开的页面。窗口关掉或进程重开时从这里回来，而不是空白页。
+func (d *Desk) SetStatePath(path string) {
+	d.mu.Lock()
+	d.statePath = path
+	d.mu.Unlock()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var keep pageKeep
+	if json.Unmarshal(b, &keep) != nil || !strings.HasPrefix(keep.URL, "http") {
+		return
+	}
+	d.mu.Lock()
+	d.pageURL = keep.URL
+	d.pageState = keep.State
+	d.mu.Unlock()
 }
 
 // Shot 是一次动作之后交回的页面。Body 是观察 JSON，PNG 是当前视口。
@@ -71,12 +99,56 @@ func (d *Desk) Open(url string) (string, error) {
 }
 
 func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
+	return d.Run(ctx, []Op{op})
+}
+
+// Run 按顺序做完这些动作。中间步骤只点击，不把页面交回。
+// 最后一步，或打开、刷新、前进、后退之后，才读取控件表。
+func (d *Desk) Run(ctx context.Context, ops []Op) (Shot, error) {
+	if len(ops) == 0 {
+		return Shot{}, errors.New("没有动作")
+	}
+	if len(ops) > 12 {
+		ops = ops[:12]
+	}
+	d.actMu.Lock()
+	defer d.actMu.Unlock()
+	var last Shot
+	for i, op := range ops {
+		stop := stopsRun(op.Op)
+		shot, err := d.actLocked(ctx, op, i == len(ops)-1 || stop)
+		if shot.Body != "" {
+			last = shot
+		}
+		if err != nil {
+			return last, err
+		}
+		if stop && i < len(ops)-1 {
+			return last, nil
+		}
+		if i < len(ops)-1 {
+			if err := hold(ctx, 350*time.Millisecond); err != nil {
+				return last, err
+			}
+		}
+	}
+	return last, nil
+}
+
+func stopsRun(op string) bool {
+	switch strings.ToLower(strings.TrimSpace(op)) {
+	case "open", "back", "forward", "reload":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Desk) actLocked(ctx context.Context, op Op, observe bool) (Shot, error) {
 	op, err := Normalize(op)
 	if err != nil {
 		return Shot{}, err
 	}
-	d.actMu.Lock()
-	defer d.actMu.Unlock()
 	if op.Op == "open" {
 		w, err := d.ensure(op.URL)
 		if err != nil {
@@ -84,10 +156,10 @@ func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
 		}
 		page := w.Page()
 		if err := waitForNavigation(ctx, page, op.URL); err != nil {
-			shot, _ := d.finish(ctx, w, "")
+			shot, _ := d.finish(ctx, w, "", true)
 			return shot, err
 		}
-		return d.finish(ctx, w, "")
+		return d.finish(ctx, w, "", true)
 	}
 	w, err := d.ensure("")
 	if err != nil {
@@ -103,7 +175,7 @@ func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
 	}
 	switch op.Op {
 	case "snapshot":
-		return d.finish(ctx, w, note)
+		return d.finish(ctx, w, note, true)
 	case "back":
 		page.GoBack()
 	case "forward":
@@ -114,7 +186,7 @@ func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
 		return d.wait(ctx, w, op, note)
 	default:
 		if err := d.play(ctx, page, op); err != nil {
-			shot, snapErr := d.finish(ctx, w, note)
+			shot, snapErr := d.finish(ctx, w, note, false)
 			if snapErr != nil {
 				return shot, err
 			}
@@ -129,40 +201,20 @@ func (d *Desk) Act(ctx context.Context, op Op) (Shot, error) {
 	}
 	if op.Op == "back" || op.Op == "forward" || op.Op == "reload" {
 		if err := waitReady(ctx, page); err != nil {
-			shot, _ := d.finish(ctx, w, note)
+			shot, _ := d.finish(ctx, w, note, false)
 			return shot, err
 		}
 	}
-	return d.finish(ctx, w, note)
+	if !observe {
+		return Shot{}, nil
+	}
+	capture := op.Op == "snapshot" || op.Op == "open"
+	return d.finish(ctx, w, note, capture)
 }
 
 func (d *Desk) play(ctx context.Context, page *mygo.Page, op Op) error {
 	if err := waitReady(ctx, page); err != nil {
 		return err
-	}
-	if op.Op != "key" && op.Op != "up" && op.Op != "scroll" {
-		show, err := ShowJS(op)
-		if err != nil {
-			return err
-		}
-		if show != "" {
-			if _, err := page.EvalContext(ctx, show); err != nil {
-				return err
-			}
-			if err := hold(ctx, 160*time.Millisecond); err != nil {
-				return err
-			}
-			move, err := MoveJS(op)
-			if err != nil {
-				return err
-			}
-			if _, err := page.EvalContext(ctx, move); err != nil {
-				return err
-			}
-			if err := hold(ctx, 400*time.Millisecond); err != nil {
-				return err
-			}
-		}
 	}
 	js, err := PageJS(op)
 	if err != nil {
@@ -199,7 +251,7 @@ func (d *Desk) wait(ctx context.Context, w *mygo.Window, op Op, note string) (Sh
 	defer timer.Stop()
 	var last Shot
 	for {
-		shot, err := d.finish(ctx, w, note)
+		shot, err := d.finish(ctx, w, note, false)
 		last = shot
 		if err != nil {
 			return shot, err
@@ -243,12 +295,12 @@ func waitMet(body string, op Op) bool {
 	return false
 }
 
-func (d *Desk) finish(ctx context.Context, w *mygo.Window, note string) (Shot, error) {
+func (d *Desk) finish(ctx context.Context, w *mygo.Window, note string, capture bool) (Shot, error) {
 	page := w.Page()
 	js := snapshotJS()
 	var last string
 	var err error
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 12; i++ {
 		last, err = evalString(ctx, page, js)
 		if err != nil {
 			return Shot{}, err
@@ -256,15 +308,20 @@ func (d *Desk) finish(ctx context.Context, w *mygo.Window, note string) (Shot, e
 		if readPayloadReady(last) {
 			break
 		}
-		if err := hold(ctx, 400*time.Millisecond); err != nil {
+		if err := hold(ctx, 200*time.Millisecond); err != nil {
 			return Shot{}, err
 		}
 	}
 	if isBlankDocument(payloadURL(last)) {
 		return Shot{Body: withNote(last, note)}, errors.New("页面没有离开空白页")
 	}
+	d.remember(page)
+	body := withNote(last, note)
+	if !capture {
+		return Shot{Body: body}, nil
+	}
 	png, _ := w.CapturePage()
-	return Shot{Body: withNote(last, note), PNG: png}, nil
+	return Shot{Body: body, PNG: png}, nil
 }
 
 func withNote(body, note string) string {
@@ -288,25 +345,27 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 	w := d.win
 	d.mu.Unlock()
 	if w != nil && !w.IsDestroyed() {
-		w.Show()
-		w.Focus()
-		if url != "" {
+		if url != "" && !sameDocument(w.Page().URL(), url) {
+			w.Show()
+			w.Focus()
 			if err := w.Page().LoadURL(url); err != nil {
 				return nil, err
 			}
 		}
 		return w, nil
 	}
+	pageURL, state := d.reopen(url)
 	w = mygo.NewWindow(mygo.WindowOptions{
 		Title:     "浏览器",
 		Width:     1100,
 		Height:    760,
 		MinWidth:  640,
 		MinHeight: 480,
-		URL:       "",
+		URL:       pageURL,
 		StateKey:  "workbench",
 		Page: mygo.PageOptions{
 			Session:         d.sess,
+			SessionState:    state,
 			Untrusted:       true,
 			DevTools:        mygo.DevToolsEnabled,
 			SwipeNavigation: true,
@@ -339,16 +398,52 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 	d.mu.Lock()
 	d.win = w
 	d.mu.Unlock()
-	if url != "" {
-		if err := page.LoadURL(url); err != nil {
-			return nil, err
-		}
-	} else {
+	if pageURL == "" && state == nil {
 		page.LoadHTML(`<!doctype html><meta charset="utf-8"><title>浏览器</title><body style="font:15px -apple-system;padding:32px;color:#1c2430">把要测的页面地址交给会话，它会在这个窗口里打开。登录会留在这里。</body>`, "about:blank")
 	}
 	w.Show()
 	w.Focus()
 	return w, nil
+}
+
+func (d *Desk) reopen(want string) (string, []byte) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if want != "" && !sameDocument(d.pageURL, want) {
+		return want, nil
+	}
+	return d.pageURL, d.pageState
+}
+
+func (d *Desk) remember(page *mygo.Page) {
+	u := page.URL()
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return
+	}
+	state, err := page.SessionState()
+	if err != nil {
+		state = nil
+	}
+	d.mu.Lock()
+	d.pageURL = u
+	if len(state) > 0 {
+		d.pageState = state
+	}
+	path := d.statePath
+	keep := pageKeep{URL: u, State: d.pageState}
+	d.mu.Unlock()
+	if path == "" {
+		return
+	}
+	b, err := json.Marshal(keep)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 func waitForNavigation(ctx context.Context, page *mygo.Page, want string) error {
@@ -397,9 +492,12 @@ func payloadURL(out string) string {
 }
 
 func waitReady(ctx context.Context, page *mygo.Page) error {
+	if readyNow(page) {
+		return nil
+	}
 	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
-	tick := time.NewTicker(150 * time.Millisecond)
+	tick := time.NewTicker(80 * time.Millisecond)
 	defer tick.Stop()
 	saw := false
 	for {
@@ -418,6 +516,10 @@ func waitReady(ctx context.Context, page *mygo.Page) error {
 			}
 		}
 	}
+}
+
+func readyNow(page *mygo.Page) bool {
+	return !page.IsLoading() && page.URL() != ""
 }
 
 func evalString(ctx context.Context, page *mygo.Page, js string) (string, error) {

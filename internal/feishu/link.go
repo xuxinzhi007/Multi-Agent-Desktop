@@ -250,19 +250,20 @@ func turnFromPayload(raw []byte) (Turn, bool) {
 		who = append(who, Who{OpenID: m.ID.OpenID, Name: m.Name, Bot: m.Type == "bot"})
 	}
 	return Turn{
-		EventID:   body.Header.EventID,
-		ChatType:  msg.ChatType,
-		ChatID:    msg.ChatID,
-		MsgType:   msg.MessageType,
-		Text:      text,
-		Images:    keys,
-		Parts:     parts,
-		MessageID: msg.MessageID,
-		ParentID:  msg.ParentID,
-		Sender:    body.Event.Sender.SenderID.OpenID,
-		SenderID:  body.Event.Sender.SenderID.OpenID,
-		At:        at,
-		Mentions:  who,
+		EventID:    body.Header.EventID,
+		ChatType:   msg.ChatType,
+		ChatID:     msg.ChatID,
+		MsgType:    msg.MessageType,
+		Text:       text,
+		Images:     keys,
+		Parts:      parts,
+		MessageID:  msg.MessageID,
+		ParentID:   msg.ParentID,
+		Sender:     body.Event.Sender.SenderID.OpenID,
+		SenderID:   body.Event.Sender.SenderID.OpenID,
+		SenderType: body.Event.Sender.SenderType,
+		At:         at,
+		Mentions:   who,
 	}, true
 }
 

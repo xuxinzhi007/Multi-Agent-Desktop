@@ -79,6 +79,19 @@ func ImageRefused(err error) bool {
 	return false
 }
 
+// UpstreamGlitch 是上游没有给出具体原因的失败。
+// Qoder 把模型服务的异常包成 provider_error / 1214。同一条请求再试一次，
+// 带画面时去掉画面再试，文字观察还在。
+func UpstreamGlitch(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "1214") ||
+		strings.Contains(s, "provider_error") ||
+		strings.Contains(s, "error in upstream response")
+}
+
 // StripImages 留下文字，拿掉图片字节。历史里的图不动，只给重试用。
 func StripImages(msgs []Message) []Message {
 	out := make([]Message, len(msgs))
@@ -107,24 +120,34 @@ func messagesHaveImage(msgs []Message) bool {
 	return false
 }
 
-// AnswerDespiteImages 先带图请求。拒收时去掉图再答文字，并写明原因。
+// AnswerDespiteImages 先按原样请求。
+// 模型拒收图片，或上游回了 1214 这类没有细节的失败时，再给一次机会：
+// 请求里有画面就去掉画面，只留文字；没有画面就原样再试一次。
 func AnswerDespiteImages(msgs []Message, call func([]Message) (Turn, error)) (Turn, error) {
 	turn, err := call(msgs)
-	if err == nil || !messagesHaveImage(msgs) || !ImageRefused(err) {
-		return turn, err
+	if err == nil {
+		return turn, nil
 	}
-	reason := err
-	turn, err = call(StripImages(msgs))
-	if err != nil {
-		return Turn{}, err
+	if messagesHaveImage(msgs) && (ImageRefused(err) || UpstreamGlitch(err)) {
+		reason := err
+		turn, err = call(StripImages(msgs))
+		if err != nil {
+			return Turn{}, err
+		}
+		if ImageRefused(reason) {
+			note := "这张图没有被这个模型收下：" + oneLineErr(reason)
+			if strings.TrimSpace(turn.Text) == "" {
+				turn.Text = note
+			} else {
+				turn.Text = note + "\n" + turn.Text
+			}
+		}
+		return turn, nil
 	}
-	note := "这张图没有被这个模型收下：" + oneLineErr(reason)
-	if strings.TrimSpace(turn.Text) == "" {
-		turn.Text = note
-	} else {
-		turn.Text = note + "\n" + turn.Text
+	if UpstreamGlitch(err) {
+		return call(msgs)
 	}
-	return turn, nil
+	return Turn{}, err
 }
 
 func oneLineErr(err error) string {

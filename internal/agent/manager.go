@@ -71,6 +71,8 @@ type Agent struct {
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
 	queue  chan PromptRequest `json:"-"` // 待处理消息队列
+	folded []PromptRequest    `json:"-"` // 已插进当前这一轮、等它结束再回复的消息
+	later  []PromptRequest    `json:"-"` // 群消息，等当前这一轮结束再单独跑
 	done   chan struct{}      `json:"-"` // worker 退出信号
 	// testHookPanic 仅测试用：在 execute 入口注入 panic，
 	// 验证 worker 的 recover 真的让 goroutine 活下来。
@@ -977,6 +979,8 @@ func (a *Agent) workerLoop(m *Manager) {
 			a.runSafely(m, req)
 			a.settle(m, req)
 			m.dropForward(a.ID)
+			for a.playLater(m) {
+			}
 		}
 	}
 }
@@ -1338,6 +1342,63 @@ func (a *Agent) noteStop(reason string) {
 	a.mu.Unlock()
 }
 
+// foldIntoTurn 把排队的本会话消息插进正在跑的这一轮。群消息留到这一轮结束。
+func (a *Agent) foldIntoTurn(m *Manager) []llm.Message {
+	var out []llm.Message
+	var later []PromptRequest
+	for {
+		select {
+		case req := <-a.queue:
+			if req.ChannelID != "" {
+				later = append(later, req)
+				continue
+			}
+			msg := llm.Message{Role: "user", Content: req.Text, Blocks: req.Blocks, Timestamp: time.Now().Unix()}
+			out = append(out, msg)
+			a.mu.Lock()
+			a.folded = append(a.folded, req)
+			a.QueueLen = len(a.queue)
+			a.mu.Unlock()
+			m.emit("agent.message", map[string]any{"id": a.ID, "message": msg})
+		default:
+			a.mu.Lock()
+			a.later = append(a.later, later...)
+			a.QueueLen = len(a.queue) + len(a.later)
+			a.mu.Unlock()
+			if len(out) > 0 {
+				m.goSave()
+			}
+			return out
+		}
+	}
+}
+
+func (a *Agent) finishFolded(text, errMsg string) {
+	a.mu.Lock()
+	folded := a.folded
+	a.folded = nil
+	a.mu.Unlock()
+	for _, req := range folded {
+		complete(req, text, errMsg)
+	}
+}
+
+func (a *Agent) playLater(m *Manager) bool {
+	a.mu.Lock()
+	if len(a.later) == 0 {
+		a.mu.Unlock()
+		return false
+	}
+	req := a.later[0]
+	a.later = a.later[1:]
+	a.QueueLen = len(a.queue) + len(a.later)
+	a.mu.Unlock()
+	a.runSafely(m, req)
+	a.settle(m, req)
+	m.dropForward(a.ID)
+	return true
+}
+
 func (a *Agent) settle(m *Manager, req PromptRequest) {
 	if a.turnKind == "" || a.turnKind == "ok" {
 		a.noteBio(m, req.Text)
@@ -1346,6 +1407,7 @@ func (a *Agent) settle(m *Manager, req PromptRequest) {
 		if req.Done != nil {
 			close(req.Done)
 		}
+		a.finishFolded("", "")
 		return
 	}
 	sn := a.Snapshot()
@@ -1368,6 +1430,7 @@ func (a *Agent) settle(m *Manager, req PromptRequest) {
 		}
 	}
 	complete(req, text, errMsg)
+	a.finishFolded(text, errMsg)
 }
 
 // Snapshot 在锁内返回 Agent 的一致性拷贝，供跨 goroutine 读取历史/状态。

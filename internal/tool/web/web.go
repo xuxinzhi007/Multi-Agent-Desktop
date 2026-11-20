@@ -19,7 +19,7 @@ func (*Tool) Description() string {
 	return "操作应用内置浏览器。登录留在这个窗口里，不使用用户的 Chrome。" +
 		"先 snapshot 看控件编号，再用编号操作。没有 DOM 的区域用 x、y。" +
 		"op 可以是 snapshot、open、back、forward、reload、move、click、double_click、right_click、down、up、scroll、type、key、wait。" +
-		"每次动作都会交回网址、标题、正文、控件表和当前画面。编号只对刚刚这次观察有效。不要编造脚本。"
+		"定位页面上的结果时，用 steps 一次做完，不要每点一下就停。每步用 text 写页面上能看见的文字，例如先点「环境」再点「test」，输入用 text 指定输入框、value 写内容。下拉打开后的选项写在下一步，浏览器会自己等到它出现。最多 12 步，只有最后的页面会返回。编号过期就改用 text，不要为了试错连着 snapshot。"
 }
 
 func (*Tool) Writes() bool { return true }
@@ -40,27 +40,62 @@ func (*Tool) Schema() json.RawMessage {
 			"dx": {"type": "number"},
 			"dy": {"type": "number"},
 			"urlContains": {"type": "string"},
-			"timeoutMs": {"type": "integer"}
+			"timeoutMs": {"type": "integer"},
+			"steps": {
+				"type": "array",
+				"maxItems": 12,
+				"items": {
+					"type": "object",
+					"properties": {
+						"op": {"type": "string"},
+						"url": {"type": "string"},
+						"ref": {"type": "string"},
+						"text": {"type": "string"},
+						"value": {"type": "string"},
+						"key": {"type": "string"},
+						"x": {"type": "number"},
+						"y": {"type": "number"}
+					},
+					"required": ["op"]
+				}
+			}
 		},
 		"required": ["op"],
 		"additionalProperties": false
 	}`)
 }
 
-func act(ctx context.Context, op browser.Op) (browser.Shot, error) {
+func stepsOf(raw json.RawMessage) ([]browser.Op, error) {
+	var wrap struct {
+		browser.Op
+		Steps []browser.Op `json:"steps"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return nil, err
+	}
+	if len(wrap.Steps) == 0 {
+		return []browser.Op{wrap.Op}, nil
+	}
+	if len(wrap.Steps) > 12 {
+		wrap.Steps = wrap.Steps[:12]
+	}
+	return wrap.Steps, nil
+}
+
+func run(ctx context.Context, ops []browser.Op) (browser.Shot, error) {
 	d := browser.CurrentDesk()
 	if d == nil {
 		return browser.Shot{}, errors.New("内置浏览器还没打开")
 	}
-	return d.Act(ctx, op)
+	return d.Run(ctx, ops)
 }
 
 func (*Tool) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
-	var op browser.Op
-	if err := json.Unmarshal(raw, &op); err != nil {
+	ops, err := stepsOf(raw)
+	if err != nil {
 		return tool.Fail("参数无法解析：%v", err)
 	}
-	shot, err := act(ctx, op)
+	shot, err := run(ctx, ops)
 	if err != nil && shot.Body == "" {
 		return tool.Fail("%s", err.Error())
 	}

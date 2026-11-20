@@ -1420,21 +1420,23 @@ func (s *API) PrivacyStatus() []PrivacyGrant {
 
 // FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。
 type FeishuView struct {
-	Enabled   bool   `json:"enabled"`
-	AppID     string `json:"appId"`
-	HasSecret bool   `json:"hasSecret"`
-	HasUser   bool   `json:"hasUser"`
-	AgentID   string `json:"agentId"`
-	Status    string `json:"status"`
-	Detail    string `json:"detail,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	AppID       string `json:"appId"`
+	HasSecret   bool   `json:"hasSecret"`
+	HasUser     bool   `json:"hasUser"`
+	AgentID     string `json:"agentId"`
+	MentionOnly bool   `json:"mentionOnly"`
+	Status      string `json:"status"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // FeishuSave 是设置页提交的飞书配置。AppSecret 为空表示沿用已保存的值。
 type FeishuSave struct {
-	Enabled   bool   `json:"enabled"`
-	AppID     string `json:"appId"`
-	AppSecret string `json:"appSecret"`
-	AgentID   string `json:"agentId"`
+	Enabled     bool   `json:"enabled"`
+	AppID       string `json:"appId"`
+	AppSecret   string `json:"appSecret"`
+	AgentID     string `json:"agentId"`
+	MentionOnly bool   `json:"mentionOnly"`
 }
 
 // ListFeishuRooms 返回飞书群和私聊的记录。这不是应用里的频道。
@@ -1512,6 +1514,7 @@ func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
 		AppID:       strings.TrimSpace(in.AppID),
 		AppSecret:   strings.TrimSpace(in.AppSecret),
 		AgentID:     strings.TrimSpace(in.AgentID),
+		MentionOnly: in.MentionOnly,
 		UserAccess:  cur.UserAccess,
 		UserRefresh: cur.UserRefresh,
 		UserExpire:  cur.UserExpire,
@@ -1543,12 +1546,13 @@ func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
 
 func (s *API) feishuView(cfg config.Feishu) FeishuView {
 	view := FeishuView{
-		Enabled:   cfg.Enabled,
-		AppID:     cfg.AppID,
-		HasSecret: cfg.AppSecret != "",
-		HasUser:   cfg.UserAccess != "",
-		AgentID:   cfg.AgentID,
-		Status:    "stopped",
+		Enabled:     cfg.Enabled,
+		AppID:       cfg.AppID,
+		HasSecret:   cfg.AppSecret != "",
+		HasUser:     cfg.UserAccess != "",
+		AgentID:     cfg.AgentID,
+		MentionOnly: cfg.MentionOnly,
+		Status:      "stopped",
 	}
 	if s.bot != nil {
 		st := s.bot.Status()
@@ -1562,11 +1566,12 @@ func (s *API) feishuView(cfg config.Feishu) FeishuView {
 
 func feishuConfig(cfg config.Feishu) feishu.Config {
 	return feishu.Config{
-		Enabled:    cfg.Enabled,
-		AppID:      cfg.AppID,
-		AppSecret:  cfg.AppSecret,
-		AgentID:    cfg.AgentID,
-		UserAccess: cfg.UserAccess,
+		Enabled:     cfg.Enabled,
+		AppID:       cfg.AppID,
+		AppSecret:   cfg.AppSecret,
+		AgentID:     cfg.AgentID,
+		MentionOnly: cfg.MentionOnly,
+		UserAccess:  cfg.UserAccess,
 	}
 }
 
@@ -2781,6 +2786,7 @@ func main() {
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.bot.Apply(feishuConfig(effective.Feishu))
 	api.desk = browser.NewDesk()
+	api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
 	browser.SetDesk(api.desk)
 
 	mygo.Bind(api)

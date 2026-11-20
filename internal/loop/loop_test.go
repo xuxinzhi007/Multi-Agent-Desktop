@@ -218,6 +218,41 @@ func TestRunExecutesToolsAndContinues(t *testing.T) {
 	}
 }
 
+func TestSteerJoinsTheNextModelCall(t *testing.T) {
+	m := &scriptedModel{turns: []llm.Turn{
+		{Calls: []tool.Call{{ID: "1", Name: "t", Input: json.RawMessage(`{"a":"x"}`)}}},
+		{Text: "改到生产环境"},
+	}}
+	r, _ := newRunner(m, textTool())
+	n := 0
+	r.Steer = func() []llm.Message {
+		n++
+		if n == 2 {
+			return []llm.Message{{Role: "user", Content: "这个是生产环境的"}}
+		}
+		return nil
+	}
+	st := r.Run(context.Background(), &State{
+		ID:       "steer",
+		Messages: []llm.Message{{Role: "user", Content: "查日志"}},
+	})
+	if st.FinalText != "改到生产环境" {
+		t.Fatalf("final = %q", st.FinalText)
+	}
+	m.mu.Lock()
+	seen := append([]llm.Message(nil), m.seen...)
+	m.mu.Unlock()
+	var found bool
+	for _, msg := range seen {
+		if msg.Role == "user" && msg.Content == "这个是生产环境的" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the next model call did not see the inserted message")
+	}
+}
+
 // ── 验收 2：停止必须真正中断并记录原因 ──
 func TestStopInterrupts(t *testing.T) {
 	m := &scriptedModel{block: true}

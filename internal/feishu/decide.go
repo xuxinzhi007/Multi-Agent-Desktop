@@ -12,13 +12,14 @@ type Turn struct {
 	Parts     []Part
 	MessageID string
 	// ParentID 是被回复的那条消息。飞书事件里只有 id，正文要再取一次。
-	ParentID string
-	ChatID   string
-	ChatName string
-	Sender   string
-	SenderID string
-	At       int64
-	Mentions []Who
+	ParentID   string
+	ChatID     string
+	ChatName   string
+	Sender     string
+	SenderID   string
+	SenderType string
+	At         int64
+	Mentions   []Who
 	// Joined 为真时，这是机器人进群，不是一条聊天消息。
 	Joined bool
 	// Action 非空时这是卡片按钮，不是一条新消息。

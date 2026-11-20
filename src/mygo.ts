@@ -193,6 +193,7 @@ export interface FeishuSave {
   appId: string;
   appSecret: string;
   agentId: string;
+  mentionOnly: boolean;
 }
 
 /** FeishuView 是设置页看到的飞书机器人状态。Secret 不回传。 */
@@ -202,6 +203,7 @@ export interface FeishuView {
   hasSecret: boolean;
   hasUser: boolean;
   agentId: string;
+  mentionOnly: boolean;
   status: string;
   detail?: string;
 }

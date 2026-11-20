@@ -40,10 +40,10 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 		EventID: "quiet", ChatType: "group", ChatID: "oc_1", MsgType: "text",
 		Text: "别人在说话", MessageID: "om_quiet",
 	})
-	if replies["om_quiet"] != "" {
-		t.Fatalf("群里没 @ 时不该回复：%v", replies)
+	if !strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "不用别人 @") {
+		t.Fatalf("没 @ 也该把这句交给会话：%s", gotText)
 	}
-	if rooms := s.Rooms(); len(rooms) != 1 || len(rooms[0].Messages) != 1 || rooms[0].Messages[0].Text != "别人在说话" {
+	if rooms := s.Rooms(); len(rooms) != 1 || len(rooms[0].Messages) != 2 || rooms[0].Messages[0].Text != "别人在说话" || rooms[0].Messages[1].Text != "好" {
 		t.Fatalf("rooms=%+v", rooms)
 	}
 	s.dispatch(Turn{
@@ -51,11 +51,21 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 		Text: "群里说", MessageID: "om_2",
 		Mentions: []Who{{OpenID: "ou_bot", Bot: true, Name: "助手"}},
 	})
-	if strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "群里说") || !strings.Contains(gotText, "这台电脑") {
+	if !strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "群里说") || !strings.Contains(gotText, "这台电脑") {
 		t.Fatalf("group text=%s", gotText)
 	}
 	if replies["om_2"] == "好" {
 		t.Fatalf("最终回复不该再发一条新消息：%v", replies)
+	}
+
+	gotText = ""
+	s.cfg.MentionOnly = true
+	s.dispatch(Turn{
+		EventID: "quiet2", ChatType: "group", ChatID: "oc_1", MsgType: "text",
+		Text: "又说了一句", MessageID: "om_quiet2",
+	})
+	if gotText != "" {
+		t.Fatalf("关掉自己接话后，没 @ 不该跑模型：%s", gotText)
 	}
 }
 

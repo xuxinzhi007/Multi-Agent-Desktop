@@ -167,6 +167,8 @@ type Runner struct {
 	System string
 	// Sync 在每次检查点把当前完整消息拷出去。会话落盘用它，避免只在整轮结束时才写。
 	Sync func([]llm.Message)
+	// Steer 在每次问模型之前取出后到的用户消息，插进这一轮，而不是等整轮结束。
+	Steer func() []llm.Message
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
@@ -260,6 +262,13 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			return st
 		}
 
+		if r.Steer != nil {
+			if extra := r.Steer(); len(extra) > 0 {
+				st.Messages = append(st.Messages, extra...)
+				r.checkpoint(runCtx, st)
+			}
+		}
+
 		st.Iteration++
 		st.Budget.UsedIterations++
 		st.Phase = PhaseThinking
@@ -345,6 +354,19 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			r.emit(Event{Kind: "done", Phase: st.Phase, Iter: st.Iteration, Text: turn.Text})
 			r.checkpoint(runCtx, st)
 			return st
+		}
+
+		// 用户在这轮生成期间插了话：这批工具先不做，下一轮带着新说明再决定。
+		if r.Steer != nil {
+			if extra := r.Steer(); len(extra) > 0 {
+				for _, c := range turn.Calls {
+					res := tool.Fail("这步先不做：用户插了一句，先看新的说明。")
+					st.Messages = append(st.Messages, toolMessage(c, res, nil))
+				}
+				st.Messages = append(st.Messages, extra...)
+				r.checkpoint(runCtx, st)
+				continue
+			}
 		}
 
 		// ── 7. 执行工具

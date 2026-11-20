@@ -255,7 +255,7 @@ func (l *Log) Rooms() []Room {
 }
 
 // Prompt 把这个会话最近的对话拼成给模型的正文。
-func (l *Log) Prompt(chatID, name string) string {
+func (l *Log) Prompt(chatID, name string, join bool) string {
 	if l == nil {
 		return ""
 	}
@@ -275,7 +275,11 @@ func (l *Log) Prompt(chatID, name string) string {
 	var b strings.Builder
 	b.WriteString("来自飞书「")
 	b.WriteString(name)
-	b.WriteString("」。下面是这里已经发生的对话。只根据这些内容回答最后一句，不要讨论本应用怎么实现。\n")
+	if join {
+		b.WriteString("」。你在这个群里。不用别人 @ 你，看到新的一句就接话。只根据这些内容回答最后一句，不要讨论本应用怎么实现。\n")
+	} else {
+		b.WriteString("」。别人 @ 了你或回复了你。只根据这些内容回答最后一句，不要讨论本应用怎么实现。\n")
+	}
 	for _, line := range lines {
 		who := line.From
 		if who == "" {

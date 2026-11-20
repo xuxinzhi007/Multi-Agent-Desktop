@@ -63,8 +63,8 @@ func Normalize(op Op) (Op, error) {
 		op.URL = u
 		return op, nil
 	case "move", "click", "double_click", "right_click", "down":
-		if op.Ref == "" && !hasPoint(op) {
-			return Op{}, errors.New(op.Op + " 需要 ref 或坐标")
+		if op.Ref == "" && !hasPoint(op) && op.Text == "" {
+			return Op{}, errors.New(op.Op + " 需要 ref、坐标或页面上的文字")
 		}
 		return op, nil
 	case "up":
@@ -262,11 +262,43 @@ func findTarget(op Op) string {
 	if hasPoint(op) {
 		return fmt.Sprintf("const target = document.elementFromPoint(%g, %g);", *op.X, *op.Y)
 	}
+	if op.Text != "" {
+		return findByText(op.Text)
+	}
 	if op.Op == "up" {
 		return `const p = window.__madPointer || {x:0,y:0};
   const target = document.elementFromPoint(p.x, p.y) || document.body;`
 	}
 	return `const target = document.activeElement || document.body;`
+}
+
+func findByText(label string) string {
+	return `const target = (() => {
+  const want = ` + jsString(strings.ToLower(strings.TrimSpace(label))) + `;
+  const sel = 'a,button,input,textarea,select,option,summary,li,span,div,[role],[contenteditable="true"]';
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  let best = null;
+  let score = 1e9;
+  for (const n of document.querySelectorAll(sel)) {
+    if (n.id === "mad-agent-takeover" || n.id === "mad-agent-cursor" || n.closest("#mad-agent-takeover")) continue;
+    const r = n.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    let name = n.getAttribute("aria-label") || n.getAttribute("placeholder") || "";
+    if (!name && (n.tagName === "INPUT" || n.tagName === "TEXTAREA")) name = n.value || "";
+    if (!name) {
+      name = "";
+      for (const c of n.childNodes) if (c.nodeType === 3) name += c.textContent;
+      if (!norm(name)) name = n.textContent || "";
+    }
+    name = norm(name);
+    if (!name) continue;
+    const low = name.toLowerCase();
+    if (low !== want && !low.includes(want)) continue;
+    const s = (low === want ? 0 : 100) + name.length;
+    if (s < score) { best = n; score = s; }
+  }
+  return best;
+})();`
 }
 
 func pointJS(op Op) string {
@@ -405,20 +437,22 @@ func snapshotJS() string {
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
   document.querySelectorAll("[data-mad-ref]").forEach((n) => n.removeAttribute("data-mad-ref"));
   const sel = 'a,button,input,textarea,select,option,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="radio"],[contenteditable="true"]';
-  const nodes = Array.from(document.querySelectorAll(sel)).filter((n) => {
+  const all = document.querySelectorAll(sel);
+  const nodes = [];
+  for (let i = 0; i < all.length && nodes.length < 80; i++) {
+    const n = all[i];
     const r = n.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return false;
-    const style = getComputedStyle(n);
-    return style.visibility !== "hidden" && style.display !== "none";
-  });
+    if (r.width < 1 || r.height < 1) continue;
+    nodes.push(n);
+  }
   const elements = [];
-  nodes.slice(0, 80).forEach((n, i) => {
+  nodes.forEach((n, i) => {
     const ref = "e" + (i + 1);
     n.setAttribute("data-mad-ref", ref);
-    const name = norm(n.innerText || n.value || n.getAttribute("aria-label") || n.getAttribute("placeholder") || n.getAttribute("name") || "");
+    const name = norm(n.getAttribute("aria-label") || n.value || n.getAttribute("placeholder") || n.getAttribute("name") || n.textContent || "");
     elements.push({ref, role: n.getAttribute("role") || n.tagName.toLowerCase(), name: name.slice(0, 80)});
   });
-  const raw = ((host && host.innerText) || (document.body && document.body.innerText) || "");
+  const raw = ((host && host.textContent) || (document.body && document.body.textContent) || "");
   const text = raw.replace(/Enable accessibility/gi, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
   return JSON.stringify({url: location.href, title: document.title, text, flutter: !!flutterNode, elements});
 })()`
