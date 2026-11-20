@@ -32,19 +32,22 @@ const (
 	PhaseBudget   Phase = "budget_exhausted"
 )
 
-// Budget 是四项上限。
+// Budget 是轮次、工具、墙钟和提示词 token 四项上限。
 //
 // 只存「已用量」不存「剩余量」：剩余量在 pause/resume 时
 // 极易被重置成初始值，而已用量只增不减，语义天然正确。
+// MaxPromptTokens 为 0 时，开跑后按模型窗口推导。超了先压缩，不直接停。
 type Budget struct {
-	MaxIterations int   `json:"maxIterations"`
-	MaxToolCalls  int   `json:"maxToolCalls"`
-	MaxWallMS     int64 `json:"maxWallMs"`
+	MaxIterations   int   `json:"maxIterations"`
+	MaxToolCalls    int   `json:"maxToolCalls"`
+	MaxWallMS       int64 `json:"maxWallMs"`
+	MaxPromptTokens int   `json:"maxPromptTokens"`
 
-	UsedIterations int   `json:"usedIterations"`
-	UsedToolCalls  int   `json:"usedToolCalls"`
-	StartedAt      int64 `json:"startedAt"`
-	PausedMS       int64 `json:"pausedMs"`
+	UsedIterations   int   `json:"usedIterations"`
+	UsedToolCalls    int   `json:"usedToolCalls"`
+	UsedPromptTokens int   `json:"usedPromptTokens"`
+	StartedAt        int64 `json:"startedAt"`
+	PausedMS         int64 `json:"pausedMs"`
 }
 
 // DefaultBudget 给第一次跑的人一个不至于烧穿钱包的上限。
@@ -219,6 +222,9 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 	if st.Budget.StartedAt == 0 {
 		st.Budget.StartedAt = time.Now().UnixMilli()
 	}
+	if st.Budget.MaxPromptTokens <= 0 {
+		st.Budget.MaxPromptTokens = r.promptBudget()
+	}
 	if r.MaxRoundsWithoutProgress <= 0 {
 		r.MaxRoundsWithoutProgress = defaultNoProgress
 	}
@@ -260,7 +266,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		// iter.start 一起报出去，Compact 才有机会被用户看见而不是静默发生。
 		// context / promptBudget 都是纯函数，提前调用不改变下面的检查点时机。
 		raw := r.context(st)
-		budget := r.promptBudget()
+		budget := st.Budget.MaxPromptTokens
 		r.emit(Event{
 			Kind: "iter.start", Phase: st.Phase, Iter: st.Iteration,
 			CtxUsed: llm.EstMessages(raw), CtxBudget: budget, CtxLimit: r.ContextLimit,
@@ -273,10 +279,26 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
 		// 增量只往外推，不在这里写检查点。
 		msgs := llm.Compact(raw, budget)
-		turn, streamed, err := r.turn(runCtx, msgs)
-		if err != nil && budget > 0 && llm.IsContextOverflow(err.Error()) && runCtx.Err() == nil {
-			msgs = llm.Compact(raw, budget/2)
+		st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
+		var turn llm.Turn
+		var streamed bool
+		var err error
+		for try := 0; try < 4; try++ {
 			turn, streamed, err = r.turn(runCtx, msgs)
+			if err == nil || budget == 512 || !llm.IsContextOverflow(err.Error()) || runCtx.Err() != nil {
+				break
+			}
+			if budget <= 0 {
+				budget = 2048
+			} else {
+				budget /= 2
+			}
+			if budget < 512 {
+				budget = 512
+			}
+			st.Budget.MaxPromptTokens = budget
+			msgs = llm.Compact(raw, budget)
+			st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
 		}
 		if err != nil {
 			if runCtx.Err() != nil {
@@ -291,6 +313,9 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			}
 			st.Phase = PhaseFailed
 			st.StopReason = err.Error()
+			if llm.IsContextOverflow(st.StopReason) {
+				st.StopReason = "上下文装不下，压缩后仍然超过窗口"
+			}
 			r.emit(Event{Kind: "failed", Phase: st.Phase, Iter: st.Iteration, Reason: st.StopReason})
 			r.checkpoint(runCtx, st)
 			return st

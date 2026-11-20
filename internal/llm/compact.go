@@ -51,8 +51,10 @@ func IsContextOverflow(msg string) bool {
 	return strings.Contains(s, "exceed_context") ||
 		strings.Contains(s, "context size") ||
 		strings.Contains(s, "context_length") ||
+		strings.Contains(s, "context length") ||
 		strings.Contains(s, "maximum context") ||
-		strings.Contains(s, "too many tokens")
+		strings.Contains(s, "too many tokens") ||
+		strings.Contains(s, "context window")
 }
 
 // Compact 把历史收进 budget 个 token 里。
@@ -214,6 +216,11 @@ func estMessages(msgs []Message) int {
 	n := 0
 	for _, m := range msgs {
 		n += 4 + EstTokens(m.Content) + EstTokens(m.Reasoning)
+		for _, b := range m.Blocks {
+			if b.ID != "" || len(b.Data) > 0 {
+				n += 800
+			}
+		}
 		for _, c := range m.ToolCalls {
 			n += 4 + EstTokens(c.Name) + EstTokens(string(c.Input))
 		}

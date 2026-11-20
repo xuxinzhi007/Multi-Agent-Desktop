@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import AgentView from './components/AgentView'
 import ChannelView from './components/ChannelView'
+import FeishuRoomView from './components/FeishuRoomView'
 import FleetView from './components/FleetView'
 import AmbientBackground from './components/AmbientBackground'
 import Inspector, { type InspectorTab } from './components/Inspector'
@@ -14,7 +15,7 @@ import { API } from './mygo'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
 
-type ActiveRef = { kind: 'agent' | 'channel'; id: string } | null
+type ActiveRef = { kind: 'agent' | 'channel' | 'feishu'; id: string } | null
 /** 主区域展示什么：舰队总览，还是单个 agent 的对话 */
 type MainView = 'fleet' | 'chat'
 
@@ -83,6 +84,10 @@ export default function App() {
     () => (active?.kind === 'channel' ? (s.channels.find((c) => c.id === active.id) ?? null) : null),
     [s.channels, active],
   )
+  const activeFeishu = useMemo(
+    () => (active?.kind === 'feishu' ? (s.feishuRooms.find((r) => r.id === active.id) ?? null) : null),
+    [s.feishuRooms, active],
+  )
   const streaming = activeAgent ? s.streaming[activeAgent.id] ?? '' : ''
   const err = activeAgent ? s.errors[activeAgent.id] : undefined
 
@@ -105,6 +110,7 @@ export default function App() {
       <Sidebar
         agents={s.agents}
         channels={s.channels}
+        feishuRooms={s.feishuRooms}
         activeId={active?.id ?? null}
         activeKind={active?.kind ?? null}
         connected={s.connected}
@@ -132,7 +138,7 @@ export default function App() {
         onCreateOpenChange={setCreateOpen}
       />
 
-      {view === 'fleet' && !activeChannel ? (
+      {view === 'fleet' && !activeChannel && !activeFeishu ? (
         <FleetView
           agents={s.agents}
           streaming={s.streaming}
@@ -144,18 +150,20 @@ export default function App() {
           onQuickCreate={(name, role) => createAgent(name, role, 'loop')}
           onCreateRequest={() => setCreateOpen(true)}
         />
+      ) : activeFeishu ? (
+        <FeishuRoomView room={activeFeishu} />
       ) : activeChannel ? (
         <ChannelView
           channel={activeChannel}
           agents={s.agents}
           streaming={s.channelStreaming}
-          onSend={(text, mentions) =>
+          onSend={(text, _mentions, images) =>
             s.send('channel.send', {
               channelId: activeChannel.id,
               fromId: 'user',
               fromName: '你',
               text,
-              mentions,
+              images,
             })
           }
           onSetSpeaker={(agentId) =>
@@ -171,7 +179,9 @@ export default function App() {
           tokenUsage={activeAgent ? s.tokenUsage[activeAgent.id] : undefined}
           agents={s.agents}
           disableRoute  // 单聊模式：禁用 @ 路由
-          onPrompt={(text) => activeAgent && s.send('agent.prompt', { agentId: activeAgent.id, text })}
+          onPrompt={(text, images) =>
+            activeAgent && s.send('agent.prompt', { agentId: activeAgent.id, text, images })
+          }
           onStop={() => activeAgent && s.send('agent.stop', { id: activeAgent.id })}
           onShell={(command) =>
             s.send('shell.run', { agentId: activeAgent?.id ?? '', command })
@@ -179,6 +189,7 @@ export default function App() {
           shellLogs={activeAgent ? (s.shellByAgent[activeAgent.id] ?? []) : []}
           steps={activeAgent ? s.tools.filter((t) => t.id === activeAgent.id).slice(-8) : []}
           reasoning={activeAgent ? s.reasoning[activeAgent.id] : ''}
+          queued={activeAgent ? s.outbox[activeAgent.id] : undefined}
           onRoute={(targetName, text) => {
             if (!activeAgent) return
             const target = s.agents.find((a) => a.name === targetName || a.id === targetName)

@@ -44,6 +44,7 @@ type API struct {
 	desk       *browser.Desk
 	screen     *screen.Loop
 	screenOnce sync.Once
+	imageDir   string
 }
 
 // Agent 是前端可见的会话视图。
@@ -380,6 +381,8 @@ type AgentView struct {
 	Busy string `json:"busy,omitempty"`
 	// Last 是最后一句非 system 内容，截断后给列表用。
 	Last string `json:"last,omitempty"`
+	// SeesImages 表示这个会话当前的模型能看图。
+	SeesImages bool `json:"seesImages,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的。
 	ParentID string `json:"parentId,omitempty"`
 }
@@ -398,7 +401,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		QueueLen:      s.QueueLen,
 		Backend:       s.Backend,
 		WorkDir:       s.WorkDir,
-		LLM:           s.LLMCfg,
+		LLM:           llm.RedactedPtr(s.LLMCfg),
 		Knowledge:     s.Knowledge,
 		BlockedReason: s.BlockedReason,
 		StartedAt:     s.StartedAt,
@@ -406,7 +409,15 @@ func toAgentView(a *agent.Agent) AgentView {
 		Chars:         s.Chars,
 		Busy:          s.BusyPlace,
 		ParentID:      s.ParentID,
+		SeesImages:    seesModel(s.LLMCfg),
 	}
+}
+
+func seesModel(cfg *llm.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return llm.SeesImages(cfg.Provider, cfg.Model)
 }
 
 // agentViewFromMap 把 emitter 的 map 负载转成前端 AgentView。
@@ -427,15 +438,14 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.ParentID, _ = m["parentId"].(string)
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
-		v.LLM = lc
+		v.LLM = llm.RedactedPtr(lc)
 	case llm.Config:
-		cfg := lc
+		cfg := llm.Redacted(lc)
 		v.LLM = &cfg
 	case map[string]any: // 防御：负载经过一次 JSON 编解码
 		cfg := llm.Config{}
 		cfg.Provider, _ = lc["provider"].(string)
 		cfg.BaseURL, _ = lc["baseUrl"].(string)
-		cfg.APIKey, _ = lc["apiKey"].(string)
 		cfg.Model, _ = lc["model"].(string)
 		v.LLM = &cfg
 	}
@@ -460,6 +470,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 	} else {
 		v.Messages = []llm.Message{}
 	}
+	v.SeesImages = seesModel(v.LLM)
 	return v
 }
 
@@ -631,9 +642,125 @@ func (s *API) ListChannels() []channel.Channel {
 
 // SendToChannel 发消息到频道，并触发相关成员 agent。
 // 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
+func (s *API) repliersBlind(ch channel.Channel, text, fromID string) bool {
+	policy := ch.Policy
+	if policy == "" {
+		policy = channel.PolicyDiscuss
+	}
+	var members []channel.Member
+	for _, id := range ch.Members {
+		if id == fromID {
+			continue
+		}
+		a, ok := s.mgr.Get(id)
+		if !ok {
+			continue
+		}
+		sn := a.Snapshot()
+		members = append(members, channel.Member{ID: sn.ID, Name: sn.Name, Role: sn.Role})
+	}
+	msg := channel.Message{Text: text, FromID: fromID}
+	for _, d := range channel.DecideReplies(policy, msg, members, ch.Speaker) {
+		if !d.Reply {
+			continue
+		}
+		a, ok := s.mgr.Get(d.Member.ID)
+		if !ok {
+			continue
+		}
+		cfg := a.EffectiveLLM(s.mgr)
+		if !llm.SeesImages(cfg.Provider, cfg.Model) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, text string) error {
+	return s.postChannel(ctx, channelId, fromId, fromName, text, nil)
+}
+
+// SendChannelImages 发一条带图的群消息。接话人不能看图时整条不发出。
+func (s *API) SendChannelImages(ctx context.Context, channelId, fromId, fromName, text string, images []llm.ImageIn) error {
+	return s.postChannel(ctx, channelId, fromId, fromName, text, images)
+}
+
+// ImageData 按 id 读一张已经落盘的图。
+func (s *API) ImageData(id string) (llm.ImageFile, error) {
+	return llm.File(s.imageDir, id)
+}
+
+func (s *API) agentSees(id string) bool {
+	if s.mgr == nil {
+		return false
+	}
+	a, ok := s.mgr.Get(id)
+	if !ok {
+		return false
+	}
+	cfg := a.EffectiveLLM(s.mgr)
+	return llm.SeesImages(cfg.Provider, cfg.Model)
+}
+
+func (s *API) runFeishu(ctx context.Context, req feishu.RunRequest) (string, error) {
+	blocks, text, err := s.blocksFrom(req)
+	if err != nil {
+		return "", err
+	}
+	return s.mgr.RunBlocks(ctx, req.AgentID, text, blocks)
+}
+
+func (s *API) showFeishu(_ context.Context, req feishu.RunRequest, reply string) error {
+	blocks, text, err := s.blocksFrom(req)
+	if err != nil {
+		return err
+	}
+	return s.mgr.ShowTurn(req.AgentID, text, blocks, reply)
+}
+
+func (s *API) blocksFrom(req feishu.RunRequest) ([]llm.Block, string, error) {
+	var blocks []llm.Block
+	var lines []string
+	for _, p := range req.Pieces {
+		if len(p.Data) > 0 {
+			mime := p.MIME
+			if mime == "" {
+				mime = "image/png"
+			}
+			id, err := llm.SaveImage(s.imageDir, mime, p.Data)
+			if err != nil {
+				return nil, "", err
+			}
+			blocks = append(blocks, llm.Block{ID: id, MIME: mime, Data: append([]byte(nil), p.Data...)})
+			continue
+		}
+		if strings.TrimSpace(p.Text) == "" {
+			continue
+		}
+		blocks = append(blocks, llm.Block{Text: p.Text})
+		lines = append(lines, p.Text)
+	}
+	return blocks, strings.Join(lines, "\n"), nil
+}
+
+func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text string, images []llm.ImageIn) error {
+	var blocks []llm.Block
+	if len(images) > 0 {
+		ch, ok := s.channels.Get(channelId)
+		if !ok {
+			return fmt.Errorf("channel %s not found", channelId)
+		}
+		if s.repliersBlind(ch, text, fromId) {
+			return fmt.Errorf("%s", llm.BlindModel)
+		}
+		var err error
+		blocks, err = llm.Accept(s.imageDir, images)
+		if err != nil {
+			return err
+		}
+	}
 	// 1. 广播消息到频道（返回副本，不持有内部状态）
-	msg, recipients, err := s.channels.Broadcast(channelId, fromId, fromName, text)
+	msg, recipients, err := s.channels.BroadcastBlocks(channelId, fromId, fromName, text, blocks)
 	if err != nil {
 		return err
 	}
@@ -709,9 +836,10 @@ func (s *API) SendToChannel(ctx context.Context, channelId, fromId, fromName, te
 		err := s.mgr.Prompt(ctx, agent.PromptRequest{
 			AgentID:     agentId,
 			Text:        prompt,
+			Blocks:      blocks,
 			ChannelID:   channelId,
 			ChannelName: ch.Name,
-			Context:     transcript.Render(),
+			Context:     transcript.Render(agentId),
 		})
 		if err != nil {
 			errs = append(errs, err.Error())
@@ -769,12 +897,13 @@ func (s *API) RunShell(ctx context.Context, req ShellRequest) {
 
 // GetLLMConfig 返回当前模型配置。
 func (s *API) GetLLMConfig() LLMConfig {
-	return s.mgr.LLMConfig()
+	return llm.Redacted(s.mgr.LLMConfig())
 }
 
 // SetLLMConfig 切换全局模型配置，并落盘到 config.json。
 // 落盘失败不阻断本次生效，但要记日志 —— 用户下次启动会回到旧配置。
 func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
+	cfg = s.keepAPIKey(cfg)
 	s.mgr.SetLLMConfig(cfg)
 	if s.settings != nil {
 		if err := s.settings.SetLLM(cfg); err != nil {
@@ -784,7 +913,25 @@ func (s *API) SetLLMConfig(cfg LLMConfig) LLMConfig {
 	if cfg.Provider != "" && cfg.Provider != "mock" {
 		s.rememberProvider(cfg)
 	}
-	LLMConfigEvt.Emit(s.win, cfg)
+	pub := llm.Redacted(cfg)
+	LLMConfigEvt.Emit(s.win, pub)
+	return pub
+}
+
+// keepAPIKey 在前端没再带密钥时沿用已保存的。空白表示不修改。
+func (s *API) keepAPIKey(cfg LLMConfig) LLMConfig {
+	if cfg.APIKey != "" {
+		return cfg
+	}
+	prev := s.mgr.LLMConfig()
+	if cfg.Provider == prev.Provider {
+		cfg.APIKey = prev.APIKey
+	}
+	if cfg.APIKey == "" {
+		if saved, ok := s.mgr.SavedProvider(cfg.Provider); ok {
+			cfg.APIKey = saved.APIKey
+		}
+	}
 	return cfg
 }
 
@@ -976,13 +1123,13 @@ func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint
 		if s.settings != nil {
 			_ = s.settings.SetLLM(base)
 		}
-		LLMConfigEvt.Emit(s.win, base)
+		LLMConfigEvt.Emit(s.win, llm.Redacted(base))
 	} else if base.Provider == "" || base.Provider == "mock" {
 		s.mgr.SetLLMConfig(cfg)
 		if s.settings != nil {
 			_ = s.settings.SetLLM(cfg)
 		}
-		LLMConfigEvt.Emit(s.win, cfg)
+		LLMConfigEvt.Emit(s.win, llm.Redacted(cfg))
 	}
 	ep := s.endpointFor(ctx, cfg.Provider, cfg, true)
 	return ep, nil
@@ -1011,7 +1158,7 @@ func (s *API) LoginQoder(ctx context.Context) (ProviderEndpoint, error) {
 		if s.settings != nil {
 			_ = s.settings.SetLLM(next)
 		}
-		LLMConfigEvt.Emit(s.win, next)
+		LLMConfigEvt.Emit(s.win, llm.Redacted(next))
 	}
 	return s.endpointFor(ctx, "qoder", cfg, true), nil
 }
@@ -1194,6 +1341,7 @@ type FeishuView struct {
 	Enabled   bool   `json:"enabled"`
 	AppID     string `json:"appId"`
 	HasSecret bool   `json:"hasSecret"`
+	HasUser   bool   `json:"hasUser"`
 	AgentID   string `json:"agentId"`
 	Status    string `json:"status"`
 	Detail    string `json:"detail,omitempty"`
@@ -1205,6 +1353,14 @@ type FeishuSave struct {
 	AppID     string `json:"appId"`
 	AppSecret string `json:"appSecret"`
 	AgentID   string `json:"agentId"`
+}
+
+// ListFeishuRooms 返回飞书群和私聊的记录。这不是应用里的频道。
+func (s *API) ListFeishuRooms() []feishu.Room {
+	if s.bot == nil {
+		return nil
+	}
+	return s.bot.Rooms()
 }
 
 // GetFeishu 返回飞书机器人配置和长连接状态。
@@ -1223,10 +1379,13 @@ func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
 		cur = s.settings.Get().Feishu
 	}
 	next := config.Feishu{
-		Enabled:   in.Enabled,
-		AppID:     strings.TrimSpace(in.AppID),
-		AppSecret: strings.TrimSpace(in.AppSecret),
-		AgentID:   strings.TrimSpace(in.AgentID),
+		Enabled:     in.Enabled,
+		AppID:       strings.TrimSpace(in.AppID),
+		AppSecret:   strings.TrimSpace(in.AppSecret),
+		AgentID:     strings.TrimSpace(in.AgentID),
+		UserAccess:  cur.UserAccess,
+		UserRefresh: cur.UserRefresh,
+		UserExpire:  cur.UserExpire,
 	}
 	if next.AppSecret == "" {
 		next.AppSecret = cur.AppSecret
@@ -1258,6 +1417,7 @@ func (s *API) feishuView(cfg config.Feishu) FeishuView {
 		Enabled:   cfg.Enabled,
 		AppID:     cfg.AppID,
 		HasSecret: cfg.AppSecret != "",
+		HasUser:   cfg.UserAccess != "",
 		AgentID:   cfg.AgentID,
 		Status:    "stopped",
 	}
@@ -1273,11 +1433,41 @@ func (s *API) feishuView(cfg config.Feishu) FeishuView {
 
 func feishuConfig(cfg config.Feishu) feishu.Config {
 	return feishu.Config{
-		Enabled:   cfg.Enabled,
-		AppID:     cfg.AppID,
-		AppSecret: cfg.AppSecret,
-		AgentID:   cfg.AgentID,
+		Enabled:    cfg.Enabled,
+		AppID:      cfg.AppID,
+		AppSecret:  cfg.AppSecret,
+		AgentID:    cfg.AgentID,
+		UserAccess: cfg.UserAccess,
 	}
+}
+
+// AuthorizeFeishuUser 打开飞书授权页，把用户令牌留在本机配置里。
+func (s *API) AuthorizeFeishuUser(ctx context.Context) (FeishuView, error) {
+	cfg := config.Feishu{}
+	if s.settings != nil {
+		cfg = s.settings.Get().Feishu
+	}
+	if cfg.AppID == "" || cfg.AppSecret == "" {
+		return FeishuView{}, fmt.Errorf("先保存 App ID 和 App Secret")
+	}
+	access, refresh, exp, err := feishu.AuthorizeUser(ctx, cfg.AppID, cfg.AppSecret, func(u string) {
+		_ = mygo.Shell.OpenExternal(u)
+	})
+	if err != nil {
+		return FeishuView{}, err
+	}
+	cfg.UserAccess = access
+	cfg.UserRefresh = refresh
+	cfg.UserExpire = exp.Unix()
+	if s.settings != nil {
+		if err := s.settings.SetFeishu(cfg); err != nil {
+			return FeishuView{}, err
+		}
+	}
+	if s.bot != nil {
+		s.bot.Apply(feishuConfig(cfg))
+	}
+	return s.feishuView(cfg), nil
 }
 
 // SettingsPath 返回配置文件路径。
@@ -1335,7 +1525,7 @@ func (s *API) ClearAgentLLM(agentId string) (AgentView, error) {
 
 // GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。
 func (s *API) GetAgentConfig(agentId string) LLMConfig {
-	return s.mgr.LLMConfigFor(agentId)
+	return llm.Redacted(s.mgr.LLMConfigFor(agentId))
 }
 
 // ListModelsFor 拉取某个会话可用的模型列表。
@@ -2371,7 +2561,11 @@ func main() {
 	channels := channel.NewManager()
 	chMgr = channels
 
+	var img string
 	if err := os.MkdirAll(dataDir, 0755); err == nil {
+		img = filepath.Join(dataDir, "images")
+		_ = os.MkdirAll(img, 0o755)
+		mgr.SetImageDir(img)
 		if err := mgr.SetStore(filepath.Join(dataDir, "agents.json")); err != nil {
 			log.Printf("load agents: %v", err)
 		}
@@ -2392,12 +2586,15 @@ func main() {
 	}
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
 
-	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings}
+	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
 	api.bot = feishu.New(feishu.Hooks{
-		Run:   mgr.RunPrompt,
+		Run:   api.runFeishu,
+		Show:  api.showFeishu,
+		Sees:  api.agentSees,
 		Reply: feishu.ReplyText,
 		Dial:  feishu.Dial,
 	})
+	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.bot.Apply(feishuConfig(effective.Feishu))
 	api.desk = browser.NewDesk()
 	browser.SetDesk(api.desk)

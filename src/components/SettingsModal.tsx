@@ -408,7 +408,7 @@ function FeishuBoard() {
       <div className="c-settings__card-head">
         <div>
           <div className="c-settings__card-title">飞书机器人</div>
-          <div className="c-settings__card-sub">私聊和群聊文本交给一个会话，回复发回原消息</div>
+          <div className="c-settings__card-sub">记下飞书会话；@ 机器人才回答，并回到原来那条消息</div>
         </div>
         <span className={`c-providers__badge ${view?.status === 'connected' ? 'is-ok' : 'is-bad'}`}>
           {statusText(view?.status)}
@@ -469,8 +469,25 @@ function FeishuBoard() {
           </select>
         </label>
         <p className="c-settings__hint">
-          私聊和群聊的文本都会交给这个会话，并回复到原消息。把机器人拉进群。飞书后台要选「使用长连接接收事件」，并订阅 im.message.receive_v1。应用退出后机器人离线。
+          飞书群和应用里的群不是同一个。飞书里的消息会记在侧栏的飞书会话里；没 @ 机器人时只记账，@ 它或回复它才回答，并回到飞书原来那条消息。要记下没 @ 的话，飞书后台要开通「获取群组中所有消息」并发布。图片优先用机器人身份下载；下不来且你已授权时，会先发确认卡片。连不上时再看：订阅方式选长连接，事件订 im.message.receive_v1、im.chat.member.bot.added_v1 和 card.action.trigger。重定向 URL 填 http://127.0.0.1:17321/callback。
         </p>
+        <div className="c-settings__field">
+          <button
+            type="button"
+            className="c-btn c-btn--ghost"
+            disabled={busy || !view?.hasSecret}
+            onClick={() => {
+              setBusy(true)
+              setErr('')
+              API.authorizeFeishuUser()
+                .then((next) => setView(next))
+                .catch((e: unknown) => setErr(errText(e)))
+                .finally(() => setBusy(false))
+            }}
+          >
+            {view?.hasUser ? '已授权，重新授权' : '用我的飞书身份授权'}
+          </button>
+        </div>
         {view?.detail && (
           <p className="c-settings__hint" role="status">
             {view.detail}

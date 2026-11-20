@@ -184,7 +184,6 @@ func actBody(op Op) string {
     target.dispatchEvent(new MouseEvent(type, opts));
   }
   target.click();
-  const bar = document.getElementById("mad-agent-takeover");
   if (bar) bar.textContent = "Agent 已点击";
   return "clicked";`
 	case "type":

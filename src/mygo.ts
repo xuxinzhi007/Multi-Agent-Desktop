@@ -87,8 +87,16 @@ export interface AgentView {
   busy?: string;
   /** Last 是最后一句非 system 内容，截断后给列表用。 */
   last?: string;
+  /** SeesImages 表示这个会话当前的模型能看图。 */
+  seesImages?: boolean;
   /** ParentID 是创建它的会话。空表示用户自己建的。 */
   parentId?: string;
+}
+
+export interface Block {
+  text?: string;
+  id?: string;
+  mime?: string;
 }
 
 export interface Channel {
@@ -108,6 +116,7 @@ export interface ChannelMessage {
   text: string;
   at: number;
   kind?: string;
+  blocks?: Block[];
   deliveries?: Delivery[];
 }
 
@@ -181,9 +190,30 @@ export interface FeishuView {
   enabled: boolean;
   appId: string;
   hasSecret: boolean;
+  hasUser: boolean;
   agentId: string;
   status: string;
   detail?: string;
+}
+
+export interface ImageFile {
+  mime: string;
+  data: string;
+}
+
+export interface ImageIn {
+  mime: string;
+  data: string;
+}
+
+export interface Line {
+  id: string;
+  chatId: string;
+  from: string;
+  fromId?: string;
+  text: string;
+  at: number;
+  self?: boolean;
 }
 
 /** LoopDiag 是某个 agent 的循环检查点状态，用于判断「停在哪一轮、为什么停」。 */
@@ -200,6 +230,7 @@ export interface LoopDiag {
 export interface Message {
   role: string;
   content: string;
+  blocks?: Block[];
   toolCalls?: ToolCall[];
   toolId?: string;
   timestamp?: number;
@@ -303,6 +334,7 @@ export interface PromptRequest {
   text: string;
   channelId?: string;
   channelName?: string;
+  images?: ImageIn[];
 }
 
 /** ProviderEndpoint 是设置里的一条厂商连接：保存过没有、现在是否生效、加载到哪些模型。 */
@@ -341,6 +373,12 @@ export interface Result {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+export interface Room {
+  id: string;
+  name: string;
+  messages: Line[];
 }
 
 /** ScreenHint 是悬浮岛上的一条协助。截图不在这个结构里。 */
@@ -439,6 +477,10 @@ export const API = {
   attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
     return call("API.AttachNoteToAgent", noteId, agentId);
   },
+  /** AuthorizeFeishuUser 打开飞书授权页，把用户令牌留在本机配置里。 */
+  authorizeFeishuUser(): Promise<FeishuView> {
+    return call("API.AuthorizeFeishuUser");
+  },
   /** BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。 */
   blockAgent(id: string, reason: string): Promise<void> {
     return call("API.BlockAgent", id, reason);
@@ -509,6 +551,10 @@ export const API = {
   getWorkDir(): Promise<string> {
     return call("API.GetWorkDir");
   },
+  /** ImageData 按 id 读一张已经落盘的图。 */
+  imageData(id: string): Promise<ImageFile> {
+    return call("API.ImageData", id);
+  },
   /** Info 返回系统信息。 */
   info(): Promise<SystemInfo> {
     return call("API.Info");
@@ -544,6 +590,10 @@ export const API = {
   /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
     return call("API.ListChannels");
+  },
+  /** ListFeishuRooms 返回飞书群和私聊的记录。这不是应用里的频道。 */
+  listFeishuRooms(): Promise<Room[]> {
+    return call("API.ListFeishuRooms");
   },
   /** ListModels 返回指定配置下可用的模型列表。 */
   listModels(cfg: Config): Promise<string[]> {
@@ -640,10 +690,10 @@ export const API = {
   searchNotes(text: string, limit: number): Promise<Note[]> {
     return call("API.SearchNotes", text, limit);
   },
-  /**
-   * SendToChannel 发消息到频道，并触发相关成员 agent。
-   * 「谁该回」的判定全在 channel.DecideReplies，这里只负责投递与回填。
-   */
+  /** SendChannelImages 发一条带图的群消息。接话人不能看图时整条不发出。 */
+  sendChannelImages(channelId: string, fromId: string, fromName: string, text: string, images: ImageIn[]): Promise<void> {
+    return call("API.SendChannelImages", channelId, fromId, fromName, text, images);
+  },
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("API.SendToChannel", channelId, fromId, fromName, text);
   },

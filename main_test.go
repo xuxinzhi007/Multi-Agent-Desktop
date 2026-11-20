@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -53,7 +54,9 @@ func newWiredTestAPI(t *testing.T) *API {
 			mgr.Delete(a.ID)
 		}
 	})
-	return &API{mgr: mgr, channels: chMgr, win: win}
+	dir := t.TempDir()
+	mgr.SetImageDir(dir)
+	return &API{mgr: mgr, channels: chMgr, win: win, imageDir: dir}
 }
 
 // stopAll 停掉所有 agent，避免测试结束时仍有 goroutine 跑 mock 流。
@@ -270,6 +273,31 @@ func TestAPISessionConfig(t *testing.T) {
 	}
 	if got := s.GetAgentConfig(a2.ID); got.Model != "" || got.Provider != "" {
 		t.Errorf("GetAgentConfig(%q) = %+v, want empty", a2.ID, got)
+	}
+
+	keyed := LLMConfig{Provider: "openai", BaseURL: "http://x", APIKey: "sk-live", Model: "agent-m"}
+	if _, err := s.SetAgentLLM(a1.ID, keyed); err != nil {
+		t.Fatalf("SetAgentLLM with key: %v", err)
+	}
+	if got := s.GetAgentConfig(a1.ID); got.APIKey != "" {
+		t.Errorf("GetAgentConfig APIKey = %q, want empty", got.APIKey)
+	}
+	if got := s.mgr.LLMConfigFor(a1.ID); got.APIKey != "sk-live" {
+		t.Errorf("stored APIKey = %q, want sk-live", got.APIKey)
+	}
+	if _, err := s.SetAgentLLM(a1.ID, LLMConfig{Provider: "openai", BaseURL: "http://x", Model: "agent-m"}); err != nil {
+		t.Fatalf("SetAgentLLM blank key: %v", err)
+	}
+	if got := s.mgr.LLMConfigFor(a1.ID); got.APIKey != "sk-live" {
+		t.Errorf("blank save wiped APIKey, got %q", got.APIKey)
+	}
+	s.SetLLMConfig(LLMConfig{Provider: "openai", APIKey: "sk-global", Model: "g"})
+	if got := s.GetLLMConfig(); got.APIKey != "" || got.Model != "g" {
+		t.Errorf("GetLLMConfig = %+v, want model g and no key", got)
+	}
+	s.SetLLMConfig(LLMConfig{Provider: "openai", Model: "g2"})
+	if got := s.mgr.LLMConfig(); got.APIKey != "sk-global" || got.Model != "g2" {
+		t.Errorf("blank global save = %+v, want key kept and model g2", got)
 	}
 
 	// 对不存在的会话必须返回错误，不能 panic。
@@ -1027,5 +1055,81 @@ func TestMiniSkipsTranscript(t *testing.T) {
 	}
 	if status < 2 {
 		t.Fatalf("mini.status count = %d, events %v, want message and status", status, got)
+	}
+}
+
+func TestGroupImageStaysOutOfPrivate(t *testing.T) {
+	s := newWiredTestAPI(t)
+	defer stopAll(t, s)
+	speaker := s.CreateAgent(CreateAgentRequest{Name: "甲", Role: "后端"})
+	other := s.CreateAgent(CreateAgentRequest{Name: "乙", Role: "前端"})
+	for _, id := range []string{speaker.ID, other.ID} {
+		raw, _ := s.mgr.Get(id)
+		raw.Backend = "mock"
+		raw.LLMCfg = &llm.Config{Provider: "mock", Model: "gpt-4o"}
+	}
+	ch := s.CreateChannel("设计群", []string{speaker.ID, other.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, speaker.ID); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1}
+	err := s.SendChannelImages(context.Background(), ch.ID, "user", "你", "看这个报错", []llm.ImageIn{{
+		MIME: "image/png",
+		Data: base64.StdEncoding.EncodeToString(png),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var got channel.Channel
+	for time.Now().Before(deadline) {
+		got, _ = s.channels.Get(ch.ID)
+		if len(got.Messages) >= 2 {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if len(got.Messages) < 2 || len(got.Messages[0].Blocks) == 0 || got.Messages[0].Blocks[0].ID == "" {
+		t.Fatalf("群消息 = %+v", got.Messages)
+	}
+	id := got.Messages[0].Blocks[0].ID
+	raw, _ := s.mgr.Get(speaker.ID)
+	for _, m := range raw.Snapshot().Messages {
+		if strings.Contains(m.Content, id) || strings.Contains(m.Content, "看这个报错") {
+			t.Fatalf("私聊里出现群内容：%q", m.Content)
+		}
+		for _, b := range m.Blocks {
+			if b.ID == id {
+				t.Fatalf("私聊里出现群图 %s", id)
+			}
+		}
+		if m.Role == "user" {
+			t.Fatalf("群这一轮写成了私信：%+v", m)
+		}
+	}
+}
+
+func TestGroupBlindDoesNotPost(t *testing.T) {
+	s := newWiredTestAPI(t)
+	defer stopAll(t, s)
+	speaker := s.CreateAgent(CreateAgentRequest{Name: "甲", Role: "后端"})
+	raw, _ := s.mgr.Get(speaker.ID)
+	raw.Backend = "mock"
+	raw.LLMCfg = &llm.Config{Provider: "qoder", Model: "Qwen3.8-Max"}
+	ch := s.CreateChannel("设计群", []string{speaker.ID}, "")
+	if _, err := s.channels.SetSpeaker(ch.ID, speaker.ID); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1}
+	err := s.SendChannelImages(context.Background(), ch.ID, "user", "你", "看这个报错", []llm.ImageIn{{
+		MIME: "image/png",
+		Data: base64.StdEncoding.EncodeToString(png),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "这个会话还不能看图") {
+		t.Fatalf("err = %v", err)
+	}
+	got, _ := s.channels.Get(ch.ID)
+	if len(got.Messages) != 0 {
+		t.Fatalf("发出了 %d 条", len(got.Messages))
 	}
 }

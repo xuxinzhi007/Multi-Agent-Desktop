@@ -90,6 +90,7 @@ type Manager struct {
 	providers []llm.Config
 	emit      Emitter
 	store     string // 持久化文件路径，空则不持久化
+	imageDir  string // 图片字节目录，与 json 分开
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
 	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
@@ -146,6 +147,19 @@ func (m *Manager) buildSystemPrompt(role string) string {
 // 首条 system 只写角色。已挂到会话上的笔记由当轮循环按 knowledgeIDs 带上。
 func systemPromptFor(role string) string {
 	return "角色：" + role + "。工作在 multi-agent-desktop 里，回答要具体、可执行。"
+}
+
+// SetImageDir 指定图片字节放在哪。空则带图的消息存不下来。
+func (m *Manager) SetImageDir(dir string) {
+	m.mu.Lock()
+	m.imageDir = dir
+	m.mu.Unlock()
+}
+
+func (m *Manager) ImageDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.imageDir
 }
 
 // SetStore 设置持久化文件路径，并尝试加载。
@@ -360,6 +374,9 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 	if cfg.Provider == "" {
 		a.LLMCfg = nil
 	} else {
+		if cfg.APIKey == "" && a.LLMCfg != nil && a.LLMCfg.Provider == cfg.Provider {
+			cfg.APIKey = a.LLMCfg.APIKey
+		}
 		cfg = fillSavedCreds(m, cfg)
 		cfg = llm.ApplyDefaults(cfg)
 		a.LLMCfg = &cfg
@@ -565,6 +582,10 @@ type PromptRequest struct {
 	ChannelName string `json:"channelName,omitempty"`
 	// Context 是这一轮给模型看的群上文。不写入会话记录。
 	Context string `json:"-"`
+	// Images 是这一轮附上的图。发出前会落成 Blocks。
+	Images []llm.ImageIn `json:"images,omitempty"`
+	// Blocks 是已经落盘的图和穿插的字。不进前端请求。
+	Blocks []llm.Block `json:"-"`
 	// Done 在这条消息执行结束后关闭。ask_agent 用它等待对方回复。
 	Done chan struct{} `json:"-"`
 	// outcome 非空时，结束原因写在这里再关闭 Done。只关闭 Done 时，等待方分不清正常回复和异常退出。
@@ -619,11 +640,73 @@ func (m *Manager) RunPrompt(ctx context.Context, agentID, text string) (string, 
 	return out.text, nil
 }
 
+// RunBlocks 入队一条带图的消息并等到结束。图已经在 Blocks 里。
+func (m *Manager) RunBlocks(ctx context.Context, agentID, text string, blocks []llm.Block) (string, error) {
+	out := &promptOutcome{done: make(chan struct{})}
+	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Blocks: blocks, Done: out.done, outcome: out}); err != nil {
+		return "", err
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-out.done:
+	}
+	if out.err != "" {
+		return "", fmt.Errorf("%s", out.err)
+	}
+	return out.text, nil
+}
+
+// ShowTurn 把一条带图的用户消息和一句回复写进会话，不调用模型。
+func (m *Manager) ShowTurn(agentID, text string, blocks []llm.Block, reply string) error {
+	a, ok := m.Get(agentID)
+	if !ok {
+		return fmt.Errorf("agent %s not found", agentID)
+	}
+	now := time.Now().Unix()
+	var user, ans llm.Message
+	var hasUser, hasAns bool
+	a.mu.Lock()
+	if text != "" || len(blocks) > 0 {
+		user = llm.Message{Role: "user", Content: text, Blocks: blocks, Timestamp: now}
+		a.Messages = append(a.Messages, user)
+		hasUser = true
+	}
+	if reply != "" {
+		ans = llm.Message{Role: "assistant", Content: reply, Timestamp: now}
+		a.Messages = append(a.Messages, ans)
+		hasAns = true
+	}
+	a.mu.Unlock()
+	if hasUser {
+		m.emit("agent.message", map[string]any{"id": a.ID, "message": user})
+	}
+	if hasAns {
+		m.emit("agent.message", map[string]any{"id": a.ID, "message": ans})
+	}
+	m.goSave()
+	return nil
+}
+
 // Prompt 给某个 agent 发一条消息。如果 agent 空闲立即执行，否则排队。
 func (m *Manager) Prompt(ctx context.Context, req PromptRequest) error {
 	a, ok := m.Get(req.AgentID)
 	if !ok {
 		return fmt.Errorf("agent %s not found", req.AgentID)
+	}
+	if len(req.Images) > 0 {
+		blocks, err := llm.Accept(m.ImageDir(), req.Images)
+		if err != nil {
+			return err
+		}
+		req.Blocks = append(req.Blocks, blocks...)
+		req.Images = nil
+	}
+	if llm.HasImage(req.Blocks) {
+		cfg := a.EffectiveLLM(m)
+		if !llm.SeesImages(cfg.Provider, cfg.Model) {
+			return fmt.Errorf("%s", llm.BlindModel)
+		}
 	}
 
 	if err := a.enqueue(req); err != nil {
@@ -805,7 +888,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 		a.BusyPlace = req.ChannelName
 	}
 	if !channelTurn {
-		a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Timestamp: time.Now().Unix()})
+		a.Messages = append(a.Messages, llm.Message{Role: "user", Content: req.Text, Blocks: req.Blocks, Timestamp: time.Now().Unix()})
 	}
 	a.Status = StatusRunning
 	a.QueueLen = len(a.queue)
@@ -819,7 +902,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 
 	m.emit("agent.status", a.statusPayload(StatusRunning))
 	if !channelTurn {
-		m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text}})
+		m.emit("agent.message", map[string]any{"id": a.ID, "message": llm.Message{Role: "user", Content: req.Text, Blocks: req.Blocks, Timestamp: time.Now().Unix()}})
 		m.goSave()
 	}
 
@@ -833,9 +916,9 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 
 	switch backend {
 	case "loop":
-		a.executeLoop(m, runCtx, req.Text, req.ChannelID, req.Context)
+		a.executeLoop(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
 	default:
-		a.executeMock(m, runCtx, req.Text, req.ChannelID, req.Context)
+		a.executeMock(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
 	}
 
 	cancel()
@@ -843,7 +926,7 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 }
 
 // executeMock 用内置 mock LLM 执行。
-func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID, contextText string) {
+func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) {
 	// 每轮开始时对配置取一次快照：中途改配置只影响下一轮。
 	cfg := a.EffectiveLLM(m)
 	client := llm.New(cfg)
@@ -854,9 +937,10 @@ func (a *Agent) executeMock(m *Manager, runCtx context.Context, text, channelID,
 		if contextText != "" {
 			history = append(history, llm.Message{Role: "system", Content: contextText})
 		}
-		history = append(history, llm.Message{Role: "user", Content: text, Timestamp: time.Now().Unix()})
+		history = append(history, llm.Message{Role: "user", Content: text, Blocks: blocks, Timestamp: time.Now().Unix()})
 	}
 	a.mu.Unlock()
+	llm.LoadImages(m.ImageDir(), history)
 
 	stream, err := client.Stream(runCtx, history)
 	if err != nil {
@@ -1000,6 +1084,8 @@ func (a *Agent) setIdleOrQueued(m *Manager) {
 }
 
 func (m *Manager) finish(a *Agent, st Status, msg string) {
+	var note llm.Message
+	writeNote := false
 	a.mu.Lock()
 	a.BusyPlace = ""
 	a.Status = st
@@ -1008,12 +1094,24 @@ func (m *Manager) finish(a *Agent, st Status, msg string) {
 		a.LastError = msg
 		a.turnKind = "error"
 		a.turnReason = msg
+		// 失败原文要留在会话里。只打状态的话，下一句「这个错误是什么」看不见它。
+		if strings.TrimSpace(msg) != "" {
+			n := len(a.Messages)
+			if n == 0 || a.Messages[n-1].Role != "assistant" || a.Messages[n-1].Content != msg {
+				note = llm.Message{Role: "assistant", Content: msg, Timestamp: time.Now().Unix()}
+				a.Messages = append(a.Messages, note)
+				writeNote = true
+			}
+		}
 	} else {
 		a.LastError = ""
 	}
 	a.mu.Unlock()
 
 	m.emit("agent.status", a.statusPayload(st))
+	if writeNote {
+		m.emit("agent.message", map[string]any{"id": a.ID, "message": note})
+	}
 	if msg != "" {
 		m.emit("agent.error", map[string]any{"id": a.ID, "error": msg})
 	}
@@ -1162,7 +1260,7 @@ func (a *Agent) viewMap() map[string]any {
 		"backend":       a.Backend,
 		"workDir":       a.WorkDir,
 		"parentId":      a.ParentID,
-		"llmCfg":        a.LLMCfg, // nil 表示这个会话还没选模型
+		"llmCfg":        llm.RedactedPtr(a.LLMCfg), // nil 表示这个会话还没选模型
 		"knowledge":     append([]string(nil), a.Knowledge...),
 		"blockedReason": a.BlockedReason,
 	}

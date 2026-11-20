@@ -70,7 +70,7 @@ type wireFunction struct {
 
 type wireMessage struct {
 	Role             string         `json:"role"`
-	Content          string         `json:"content,omitempty"`
+	Content          any            `json:"content,omitempty"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"`
 	ToolCalls        []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
@@ -369,7 +369,7 @@ func applyThinking(req map[string]any, cfg Config) {
 func toWire(msgs []Message, echoReasoning bool) []wireMessage {
 	out := make([]wireMessage, 0, len(msgs))
 	for _, m := range msgs {
-		w := wireMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolID}
+		w := wireMessage{Role: m.Role, Content: wireContent(m), ToolCallID: m.ToolID}
 		if echoReasoning {
 			w.ReasoningContent = m.Reasoning
 		}
@@ -382,6 +382,45 @@ func toWire(msgs []Message, echoReasoning bool) []wireMessage {
 		out = append(out, w)
 	}
 	return out
+}
+
+func wireContent(m Message) any {
+	var textIn bool
+	var pixels int
+	for _, b := range m.Blocks {
+		if b.Text != "" {
+			textIn = true
+		}
+		if len(b.Data) > 0 {
+			pixels++
+		}
+	}
+	if pixels == 0 {
+		return m.Content
+	}
+	var parts []map[string]any
+	if !textIn && strings.TrimSpace(m.Content) != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": m.Content})
+	}
+	n := 0
+	for _, b := range m.Blocks {
+		if b.Text != "" {
+			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
+		}
+		if len(b.Data) == 0 {
+			continue
+		}
+		n++
+		parts = append(parts, map[string]any{"type": "text", "text": fmt.Sprintf("图%d", n)})
+		parts = append(parts, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]string{"url": dataURL(b)},
+		})
+	}
+	if len(parts) == 0 {
+		return m.Content
+	}
+	return parts
 }
 
 func truncateForError(b []byte) string {

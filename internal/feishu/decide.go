@@ -8,16 +8,46 @@ type Turn struct {
 	ChatType  string
 	MsgType   string
 	Text      string
+	Images    []string
+	Parts     []Part
+	MessageID string
+	// ParentID 是被回复的那条消息。飞书事件里只有 id，正文要再取一次。
+	ParentID string
+	ChatID   string
+	ChatName string
+	Sender   string
+	SenderID string
+	At       int64
+	Mentions []Who
+	// Joined 为真时，这是机器人进群，不是一条聊天消息。
+	Joined bool
+	// Action 非空时这是卡片按钮，不是一条新消息。
+	Action   string
+	ActionID string
+}
+
+// Who 是这条消息里被 @ 的人。
+type Who struct {
+	OpenID string
+	Name   string
+	Bot    bool
+}
+
+// Part 是飞书消息里的一段字或一张图，顺序跟飞书里一样。
+type Part struct {
+	Text      string
+	Key       string
 	MessageID string
 }
 
-// Decision 是这条消息要做的事。两个字段都空表示丢掉。
+// Decision 是这条消息要做的事。Pass 为假且 Reply 为空表示丢掉。
 type Decision struct {
 	Prompt string
 	Reply  string
+	Pass   bool
 }
 
-const onlyText = "目前只接收文本"
+const onlyText = "目前只接收文本、富文本和图片"
 
 // Gate 记下见过的 event_id，避免飞书超时重推把同一条消息再跑一遍。
 type Gate struct {
@@ -44,12 +74,12 @@ func (g *Gate) Decide(t Turn) Decision {
 	if t.ChatType != "p2p" && t.ChatType != "group" {
 		return Decision{}
 	}
-	if t.MsgType != "text" {
+	if t.MsgType != "text" && t.MsgType != "" && t.MsgType != "image" && t.MsgType != "post" && t.MsgType != "merge_forward" {
 		return Decision{Reply: onlyText}
 	}
 	text := strings.TrimSpace(t.Text)
-	if text == "" {
+	if text == "" && len(t.Images) == 0 && len(t.Parts) == 0 && t.MsgType != "merge_forward" {
 		return Decision{}
 	}
-	return Decision{Prompt: text}
+	return Decision{Prompt: text, Pass: true}
 }

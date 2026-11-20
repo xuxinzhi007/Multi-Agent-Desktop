@@ -1,6 +1,7 @@
 import { Fragment, cloneElement, isValidElement, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
+import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
 import ModelPicker from './ModelPicker'
 import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
@@ -28,7 +29,7 @@ type Props = {
   error?: SessionError
   workDir: string
   tokenUsage?: { in: number; out: number; lastIn?: number }
-  onPrompt: (text: string) => void
+  onPrompt: (text: string, images?: { mime: string; data: string }[]) => void | Promise<unknown>
   onStop: () => void
   onShell: (command: string) => void
   /** 本会话执行过的命令，直接渲染在对话流里 */
@@ -53,6 +54,8 @@ type Props = {
   onOpenFile?: (path: string, line: number) => void
   /** 知识库沉淀胶囊：打开检查器的知识库 */
   onOpenKnowledge?: () => void
+  /** 上一句还在回答时发出的话，排在当前回答后面。 */
+  queued?: string[]
   /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
   connection?: { provider: string; baseUrl: string; apiKey: string; model: string }
 }
@@ -223,6 +226,8 @@ function Thinking({ steps, reasoning }: { steps: NonNullable<Props['steps']>; re
 
 export default function AgentView(p: Props) {
   const [input, setInput] = useState('')
+  const [images, setImages] = useState<DraftImage[]>([])
+  const [imageNote, setImageNote] = useState('')
   const [mode, setMode] = useState<'chat' | 'shell'>('chat')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; msg: Message } | null>(null)
   const [toolGrants, setToolGrants] = useState<{ always: string[]; done: string[] }>({ always: [], done: [] })
@@ -230,6 +235,8 @@ export default function AgentView(p: Props) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottom = useRef(true)
   const programmaticScroll = useRef(false)
+  const gesturing = useRef(false)
+  const gestureTimer = useRef(0)
 
   // 右键菜单 handler
   const handleContextMenu = (e: React.MouseEvent, msg: Message) => {
@@ -260,7 +267,16 @@ export default function AgentView(p: Props) {
     closeContextMenu()
   }
 
+  const markGesture = () => {
+    gesturing.current = true
+    window.clearTimeout(gestureTimer.current)
+    gestureTimer.current = window.setTimeout(() => {
+      gesturing.current = false
+    }, 180)
+  }
+
   // 只有用户自己把滚动条拉开，才停止跟随。程序把视口推到底时不算。
+  // 手指还按在滚动上时不改 scrollTop，否则和回弹抢位置，底部会抖。
   const handleScroll = () => {
     if (programmaticScroll.current) return
     const el = scrollRef.current
@@ -270,7 +286,9 @@ export default function AgentView(p: Props) {
 
   const followBottom = () => {
     const el = scrollRef.current
-    if (!el || !stickToBottom.current) return
+    if (!el || !stickToBottom.current || gesturing.current) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (gap <= 1) return
     programmaticScroll.current = true
     el.scrollTop = el.scrollHeight
     requestAnimationFrame(() => {
@@ -393,12 +411,22 @@ export default function AgentView(p: Props) {
     return { targets, message }
   }
 
+  const addImages = async (files: File[]) => {
+    const got = await readImageFiles(files)
+    if (got.error) setImageNote(got.error)
+    if (got.images.length === 0) return
+    setImages((prev) => [...prev, ...got.images].slice(0, 8))
+  }
+
+  const blind = mode === 'chat' && images.length > 0 && !p.agent?.seesImages
   const submit = () => {
     const text = input.trim()
-    if (!text) return
     if (mode === 'shell') {
+      if (!text) return
       p.onShell(text)
     } else {
+      if (!text && images.length === 0) return
+      if (blind) return
       const { targets, message } = parseMentions(text)
       // 单聊模式：禁用 @ 路由，直接作为普通消息发送
       if (!p.disableRoute && targets.length > 0 && p.onRoute && p.agents) {
@@ -410,10 +438,23 @@ export default function AgentView(p: Props) {
           }
         })
       } else {
-        p.onPrompt(text)
+        const sent = p.onPrompt(text, images.map((img) => ({ mime: img.mime, data: img.data })))
+        Promise.resolve(sent)
+          .then(() => {
+            setInput('')
+            setImages([])
+            setImageNote('')
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err)
+            setImageNote(msg || blindSentence)
+          })
+        return
       }
     }
     setInput('')
+    setImages([])
+    setImageNote('')
   }
 
   // 输入时检测 @ 弹出补全
@@ -444,7 +485,7 @@ export default function AgentView(p: Props) {
   const agent = p.agent
   const running = agent.status === 'running'
   const turnLive = running || agent.status === 'queued' || agent.status === 'blocked' || !!p.streaming
-  const hasDraft = !!input.trim()
+  const hasDraft = !!input.trim() || (mode === 'chat' && images.length > 0)
   const rawMessages = p.agent.messages ?? []
   const visible = presentTranscript(rawMessages)
   // 错误记的是出错时的原始条数。按同一套折叠规则数出可见气泡，红条跟在那一截后面。
@@ -563,7 +604,15 @@ export default function AgentView(p: Props) {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-2)' }}
+        onWheel={markGesture}
+        onTouchStart={markGesture}
+        onPointerDown={markGesture}
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          overscrollBehavior: 'none',
+          padding: 'var(--space-4) var(--space-6) var(--space-2)',
+        }}
       >
         <div className="c-transcript">
         {visible.length === 0 && !p.streaming && (
@@ -579,7 +628,6 @@ export default function AgentView(p: Props) {
 
         <VirtualList
           items={transcriptRows(visible, errorAt, p.error?.text)}
-          scrollRef={scrollRef}
           resetKey={agent.id}
           render={(row) =>
             row.kind === 'err' ? (
@@ -617,6 +665,19 @@ export default function AgentView(p: Props) {
         {running && !p.agent.busy && !p.streaming && <Thinking steps={p.steps ?? []} reasoning={p.reasoning} />}
         {!!p.streaming && !p.agent.busy && (p.steps?.length ?? 0) > 0 && <Thinking steps={p.steps ?? []} />}
 
+        {(p.queued ?? []).map((text, i) => (
+          <div key={`q-${i}`} className="c-msg c-msg--user" style={{ marginBottom: 'var(--space-4)', opacity: 0.72 }}>
+            <div className="c-user-bubble">
+              <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {text}
+              </div>
+              <time style={{ display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                排队中
+              </time>
+            </div>
+          </div>
+        ))}
+
         {pendingTools.map((s, i) => (
           <ApprovalCard
             key={`${s.tool}-${i}`}
@@ -638,6 +699,12 @@ export default function AgentView(p: Props) {
         }}
       >
         <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault()
+            if (mode !== 'chat') return
+            void addImages(Array.from(e.dataTransfer.files))
+          }}
           style={{
             position: 'relative',
             background: 'var(--bg-surface)',
@@ -649,10 +716,22 @@ export default function AgentView(p: Props) {
             transition: 'border-color var(--dur-fast) var(--ease)',
           }}
         >
+          {mode === 'chat' && (
+            <ImageStrip
+              images={images}
+              onRemove={(i) => setImages((prev) => prev.filter((_, at) => at !== i))}
+            />
+          )}
           <TextareaAutosize
             ref={taRef}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files)
+              if (files.length === 0 || mode !== 'chat') return
+              e.preventDefault()
+              void addImages(files)
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -702,6 +781,20 @@ export default function AgentView(p: Props) {
               flexWrap: 'nowrap',
             }}
           >
+            {mode === 'chat' && (
+              <label className="c-icon-btn" title="选择图片" style={{ cursor: 'pointer' }}>
+                图
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  hidden
+                  onChange={(e) => {
+                    void addImages(Array.from(e.target.files ?? []))
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+            )}
             <ModeBtn active={mode === 'chat'} onClick={() => setMode('chat')}>
               对话
             </ModeBtn>
@@ -773,7 +866,7 @@ export default function AgentView(p: Props) {
             <button
               className="c-btn c-btn--primary c-btn--sm"
               onClick={submit}
-              disabled={!hasDraft}
+              disabled={!hasDraft || blind}
             >
               {mode === 'shell' ? '执行' : turnLive ? '排队' : '发送'}
             </button>
@@ -792,9 +885,13 @@ export default function AgentView(p: Props) {
           }}
         >
           <span>
-            {turnLive
-              ? '这一轮还在进行。停止会打断它，并清掉还没开始的排队；写好再点排队，会等这一轮结束。'
-              : 'Enter 发送 · Shift+Enter 换行'}
+            {blind
+              ? blindSentence
+              : imageNote
+                ? imageNote
+                : turnLive
+                  ? '这一轮还在进行。停止会打断它，并清掉还没开始的排队；写好再点排队，会等这一轮结束。'
+                  : 'Enter 发送 · Shift+Enter 换行'}
           </span>
           <ContextMeter
             messages={rawMessages}
@@ -1287,6 +1384,7 @@ const Bubble = memo(
   (a, b) =>
     a.m.role === b.m.role &&
     a.m.content === b.m.content &&
+    a.m.blocks === b.m.blocks &&
     a.m.reasoning === b.m.reasoning &&
     a.m.timestamp === b.m.timestamp &&
     a.tone === b.tone &&
@@ -1364,9 +1462,13 @@ function BubbleImpl({
         onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
       >
         <div className="c-user-bubble">
-          <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-            <MentionText text={displayContent} agents={agents} selfColor={`var(--agent-${tone})`} />
-          </div>
+          {(m.blocks?.length ?? 0) > 0 ? (
+            <MessageShots blocks={m.blocks} content={displayContent} />
+          ) : (
+            <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+              <MentionText text={displayContent} agents={agents} selfColor={`var(--agent-${tone})`} />
+            </div>
+          )}
           {clock && (
             <time style={{ display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
               {clock}

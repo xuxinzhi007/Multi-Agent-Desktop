@@ -496,3 +496,20 @@ func TestDecideRepliesEmptyMembers(t *testing.T) {
 		t.Errorf("DecideReplies(nil) = %v, want empty", got)
 	}
 }
+
+func TestRenderMarksOwnSpeech(t *testing.T) {
+	tr := BuildTranscript([]Message{
+		{FromID: "a1", FromName: "甲", Text: "我先说方案"},
+		{FromID: "a2", FromName: "乙", Text: "我补充一句"},
+	}, 2000)
+	got := tr.Render("a1")
+	if !strings.Contains(got, "你: 我先说方案") {
+		t.Fatalf("own line not marked: %q", got)
+	}
+	if strings.Contains(got, "甲: 我先说方案") {
+		t.Fatalf("own line still uses the name: %q", got)
+	}
+	if !strings.Contains(got, "乙: 我补充一句") {
+		t.Fatalf("other line missing: %q", got)
+	}
+}

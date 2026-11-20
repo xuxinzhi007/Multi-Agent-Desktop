@@ -20,6 +20,7 @@ type scriptedModel struct {
 	turns []llm.Turn
 	err   error
 	calls atomic.Int32
+	seen  []llm.Message
 	// block 为 true 时会阻塞直到 ctx 取消，用于测试停止
 	block bool
 }
@@ -34,6 +35,7 @@ func (m *scriptedModel) Turn(ctx context.Context, msgs []llm.Message, tools []to
 		return llm.Turn{}, m.err
 	}
 	m.mu.Lock()
+	m.seen = append([]llm.Message(nil), msgs...)
 	defer m.mu.Unlock()
 	if len(m.turns) == 0 {
 		return llm.Turn{Text: "done"}, nil
@@ -45,6 +47,36 @@ func (m *scriptedModel) Turn(ctx context.Context, msgs []llm.Message, tools []to
 		return m.turns[len(m.turns)-1], nil
 	}
 	return m.turns[n], nil
+}
+
+func TestCompactsBeforePromptBudget(t *testing.T) {
+	m := &scriptedModel{turns: []llm.Turn{{Text: "ok"}}}
+	r, _ := newRunner(m, nil)
+	b := DefaultBudget()
+	b.MaxPromptTokens = 400
+	var history []llm.Message
+	for i := 0; i < 30; i++ {
+		history = append(history,
+			llm.Message{Role: "user", Content: strings.Repeat("问", 200)},
+			llm.Message{Role: "assistant", Content: strings.Repeat("答", 200)},
+		)
+	}
+	st := r.Run(context.Background(), &State{ID: "tok", Messages: history, Budget: b})
+	if st.Phase != PhaseDone {
+		t.Fatalf("phase = %q reason %q", st.Phase, st.StopReason)
+	}
+	if st.Budget.UsedPromptTokens > st.Budget.MaxPromptTokens {
+		t.Fatalf("sent %d tokens, budget %d", st.Budget.UsedPromptTokens, st.Budget.MaxPromptTokens)
+	}
+	m.mu.Lock()
+	got := llm.EstMessages(m.seen)
+	m.mu.Unlock()
+	if got > 400 {
+		t.Fatalf("model saw %d tokens, want <= 400", got)
+	}
+	if got == 0 {
+		t.Fatal("model saw empty prompt")
+	}
 }
 
 type memStore struct {

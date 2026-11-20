@@ -16,6 +16,7 @@ import (
 type Message struct {
 	Role      string     `json:"role"` // system | user | assistant | tool
 	Content   string     `json:"content"`
+	Blocks    []Block    `json:"blocks,omitempty"`    // 图和旁边的字，按原顺序。空则这条只有 Content
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // role=assistant 时模型发起的调用
 	ToolID    string     `json:"toolId,omitempty"`    // role=tool 时对应哪个调用
 	Timestamp int64      `json:"timestamp,omitempty"` // Unix 秒
@@ -80,6 +81,21 @@ const DefaultLlamaCppBaseURL = "http://127.0.0.1:8080"
 // 两边不一致时，用户点「Ollama」选完模型什么也不需要填，
 // 但发出去的请求会打到空 baseUrl 上。
 const DefaultOllamaBaseURL = "http://127.0.0.1:11434"
+
+// Redacted 返回一份去掉 API Key 的副本。磁盘上的配置不动，只用于交给窗口。
+func Redacted(cfg Config) Config {
+	cfg.APIKey = ""
+	return cfg
+}
+
+// RedactedPtr 同上。cfg 为 nil 时保持 nil，表示这个会话还没选模型。
+func RedactedPtr(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	c := Redacted(*cfg)
+	return &c
+}
 
 // IsLocalProvider 表示服务跑在本机、不需要 API Key。
 // 鉴权检查靠它短路，否则本地服务会被误判成「Key 未填写」而直接拒绝。

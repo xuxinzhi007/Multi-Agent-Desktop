@@ -20,7 +20,7 @@ import (
 // 与 executeMock 的区别不是「换个客户端」，
 // 而是控制点回到了进程内：每一轮之间我们都能检查停止、预算、
 // 重复调用，并把这些状态如实推给界面。
-func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID, contextText string) {
+func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) {
 	cfg := a.EffectiveLLM(m)
 	if cfg.Provider == "mock" || cfg.Provider == "" || cfg.Model == "" {
 		m.finish(a, StatusError, "这个会话还没有模型")
@@ -55,14 +55,15 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		if contextText != "" {
 			history = append(history, llm.Message{Role: "system", Content: contextText})
 		}
-		history = append(history, llm.Message{Role: "user", Content: text, Timestamp: time.Now().Unix()})
+		history = append(history, llm.Message{Role: "user", Content: text, Blocks: blocks, Timestamp: time.Now().Unix()})
 	}
 	knowledgeIDs := append([]string(nil), a.Knowledge...)
 	a.mu.Unlock()
+	llm.LoadImages(m.ImageDir(), history)
 
 	system := loopSystemPrompt(workDir)
 	if m.knowledge != nil && len(knowledgeIDs) > 0 {
-		if block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 0); block != "" {
+		if block, _ := m.knowledge.View(a.ID, a.Role, knowledgeIDs, text, 1600); block != "" {
 			system = block + "\n\n" + system
 		}
 	}
@@ -151,7 +152,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		if channelID == "" && m.NoteBook() != nil && strings.TrimSpace(out.FinalText) != "" {
 			msgs := append([]llm.Message(nil), out.Messages...)
 			text := out.FinalText
-			go distillKnowledge(m, cfg, msgs, text)
+			go distillKnowledge(m, a.ID, cfg, msgs, text)
 		}
 	case loop.PhaseStopped:
 		m.emit("agent.stopped", map[string]any{
@@ -314,6 +315,9 @@ func loopSystemPrompt(workDir string) string {
 		"- save_note：把结论写进应用正在用的知识库，页面会马上更新。参数 title、body，可选 tags。",
 		"- web：操作应用内置浏览器，用来跑页面和自动化测试。参数 op（read、open、click、type、press）。页面在应用自己的窗口里打开，登录留在那里。点击和输入用页面上看得见的文字，不要写脚本。",
 		"这些能力已经接在工具里。不要回答自己无法创建 agent 或无法和其他 agent 对话；需要协作时直接调用上面的工具。",
+		"飞书机器人已经接入：长连接收文本、富文本和图片。图片会给出本机路径。@ 会换成对方的名字。回复用消息卡片，不是 webhook。不要说项目没有飞书集成。",
+		"群聊会把别人的发言和你已经说过的话一起放进上下文。标成「你」的是你自己的历史发言，不要再复述。",
+		"没有用工具查过这个工作目录之前，不要说某项能力、接口或集成不存在。",
 		"沉淀知识必须调用 save_note。不要直接修改 knowledge.jsonl，那样只改了磁盘，打开着的页面不会变。",
 	}
 	lines = append(lines,

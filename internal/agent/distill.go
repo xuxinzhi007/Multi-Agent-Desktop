@@ -16,23 +16,25 @@ type chatter interface {
 
 // distillKnowledge 在一轮做完后看这段结论要不要写进知识库。
 // 判断失败或模型说不用记，就什么都不写。不把这一步的失败算进本轮结果。
-func distillKnowledge(m *Manager, cfg llm.Config, messages []llm.Message, answer string) {
+func distillKnowledge(m *Manager, agentID string, cfg llm.Config, messages []llm.Message, answer string) {
 	kb := m.NoteBook()
 	if kb == nil {
 		return
 	}
-	distillKnowledgeWith(kb, m.Emit, llm.NewChatModel(cfg), messages, answer)
+	distillKnowledgeWith(kb, m.Emit, llm.NewChatModel(cfg), messages, answer, func(id string) {
+		_ = m.AttachNote(agentID, id)
+	})
 }
 
-func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, messages []llm.Message, answer string) {
+func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, messages []llm.Message, answer string, pin func(id string)) {
 	if kb == nil || model == nil {
 		return
 	}
 	answer = strings.TrimSpace(answer)
-	if len([]rune(answer)) < 40 {
+	user := lastUserText(messages)
+	if len([]rune(answer)) < 8 && len([]rune(user)) < 8 {
 		return
 	}
-	user := lastUserText(messages)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	turn, err := model.Turn(ctx, []llm.Message{
@@ -58,9 +60,14 @@ func distillKnowledgeWith(kb NoteBook, emit func(string, any), model chatter, me
 	if emit != nil {
 		emit("knowledge.changed", saved)
 	}
+	if pin != nil {
+		if id, _ := saved["id"].(string); id != "" {
+			pin(id)
+		}
+	}
 }
 
-const distillSystem = "你是知识库编辑。只根据给定的这一轮对话，判断有没有值得长期记住的结论：bug 根因、约定、架构事实、可复用的修法。寒暄、操作流水、没证实的猜测不要记。只输出一个 JSON 对象，不要加别的文字。"
+const distillSystem = "你是知识库编辑。只根据给定的这一轮对话，判断有没有值得长期记住的内容：bug 根因、约定、架构事实、可复用的修法，以及用户习惯（篇幅、格式、称呼、回复渠道）。寒暄、操作流水、没证实的猜测不要记。只输出一个 JSON 对象，不要加别的文字。"
 
 func distillAsk(user, answer string) string {
 	return "用户：\n" + clipRunes(user, 800) + "\n\n回答：\n" + clipRunes(answer, 800) +

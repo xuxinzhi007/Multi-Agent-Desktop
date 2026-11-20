@@ -115,6 +115,14 @@ func session(ctx context.Context, appID, secret string, on func(Turn), mark func
 			payload = all
 		}
 		ack(conn, writeMu, f)
+		if turn, ok := actionFromPayload(payload); ok {
+			on(turn)
+			continue
+		}
+		if turn, ok := joinedFromPayload(payload); ok {
+			on(turn)
+			continue
+		}
 		if turn, ok := turnFromPayload(payload); ok {
 			on(turn)
 		}
@@ -203,11 +211,21 @@ func turnFromPayload(raw []byte) (Turn, bool) {
 			EventType string `json:"event_type"`
 		} `json:"header"`
 		Event struct {
+			Sender struct {
+				SenderType string `json:"sender_type"`
+				SenderID   struct {
+					OpenID string `json:"open_id"`
+				} `json:"sender_id"`
+			} `json:"sender"`
 			Message struct {
-				MessageID   string `json:"message_id"`
-				ChatType    string `json:"chat_type"`
-				MessageType string `json:"message_type"`
-				Content     string `json:"content"`
+				MessageID   string    `json:"message_id"`
+				ParentID    string    `json:"parent_id"`
+				CreateTime  string    `json:"create_time"`
+				ChatID      string    `json:"chat_id"`
+				ChatType    string    `json:"chat_type"`
+				MessageType string    `json:"message_type"`
+				Content     string    `json:"content"`
+				Mentions    []mention `json:"mentions"`
 			} `json:"message"`
 		} `json:"event"`
 	}
@@ -221,12 +239,198 @@ func turnFromPayload(raw []byte) (Turn, bool) {
 	if msg.MessageID == "" && msg.Content == "" {
 		return Turn{}, false
 	}
+	parts := readParts(msg.MessageType, msg.Content, msg.Mentions)
+	text, keys := partsText(parts)
+	at, _ := strconv.ParseInt(msg.CreateTime, 10, 64)
+	if at > 1_000_000_000_000 {
+		at /= 1000
+	}
+	var who []Who
+	for _, m := range msg.Mentions {
+		who = append(who, Who{OpenID: m.ID.OpenID, Name: m.Name, Bot: m.Type == "bot"})
+	}
 	return Turn{
 		EventID:   body.Header.EventID,
 		ChatType:  msg.ChatType,
+		ChatID:    msg.ChatID,
 		MsgType:   msg.MessageType,
-		Text:      textOf(msg.Content),
+		Text:      text,
+		Images:    keys,
+		Parts:     parts,
 		MessageID: msg.MessageID,
+		ParentID:  msg.ParentID,
+		Sender:    body.Event.Sender.SenderID.OpenID,
+		SenderID:  body.Event.Sender.SenderID.OpenID,
+		At:        at,
+		Mentions:  who,
+	}, true
+}
+
+func joinedFromPayload(raw []byte) (Turn, bool) {
+	var body struct {
+		Header struct {
+			EventType string `json:"event_type"`
+		} `json:"header"`
+		Event struct {
+			ChatID string `json:"chat_id"`
+			Name   string `json:"name"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return Turn{}, false
+	}
+	if body.Header.EventType != "im.chat.member.bot.added_v1" || body.Event.ChatID == "" {
+		return Turn{}, false
+	}
+	return Turn{Joined: true, ChatID: body.Event.ChatID, ChatName: body.Event.Name, ChatType: "group"}, true
+}
+
+type mention struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+	Type string `json:"mentioned_type"`
+	ID   struct {
+		OpenID string `json:"open_id"`
+	} `json:"id"`
+}
+
+func readContent(kind, content string, mentions []mention) (string, []string) {
+	return partsText(readParts(kind, content, mentions))
+}
+
+func partsText(parts []Part) (string, []string) {
+	var lines []string
+	var keys []string
+	for _, p := range parts {
+		if p.Key != "" {
+			keys = append(keys, p.Key)
+			continue
+		}
+		if p.Text != "" {
+			lines = append(lines, p.Text)
+		}
+	}
+	return strings.Join(lines, "\n"), keys
+}
+
+func readParts(kind, content string, mentions []mention) []Part {
+	switch kind {
+	case "image":
+		var body struct {
+			ImageKey string `json:"image_key"`
+		}
+		_ = json.Unmarshal([]byte(content), &body)
+		if body.ImageKey == "" {
+			return nil
+		}
+		return []Part{{Key: body.ImageKey}}
+	case "post":
+		return readPostParts(content)
+	case "merge_forward":
+		return nil
+	default:
+		text := applyMentions(textOf(content), mentions)
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return []Part{{Text: text}}
+	}
+}
+
+func applyMentions(text string, mentions []mention) string {
+	for _, m := range mentions {
+		if m.Key != "" && m.Name != "" {
+			text = strings.ReplaceAll(text, m.Key, "@"+m.Name)
+		}
+	}
+	return text
+}
+
+func readPostParts(content string) []Part {
+	var body struct {
+		Title   string `json:"title"`
+		Content [][]struct {
+			Tag      string `json:"tag"`
+			Text     string `json:"text"`
+			ImageKey string `json:"image_key"`
+			UserName string `json:"user_name"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &body); err != nil {
+		text := textOf(content)
+		if text == "" {
+			return nil
+		}
+		return []Part{{Text: text}}
+	}
+	var out []Part
+	if title := strings.TrimSpace(body.Title); title != "" {
+		out = append(out, Part{Text: title})
+	}
+	for _, row := range body.Content {
+		var text strings.Builder
+		flush := func() {
+			if text.Len() == 0 {
+				return
+			}
+			out = append(out, Part{Text: text.String()})
+			text.Reset()
+		}
+		for _, el := range row {
+			switch el.Tag {
+			case "img":
+				flush()
+				if el.ImageKey != "" {
+					out = append(out, Part{Key: el.ImageKey})
+				}
+			case "at":
+				if el.UserName != "" {
+					text.WriteString("@" + el.UserName)
+				}
+			default:
+				text.WriteString(el.Text)
+			}
+		}
+		flush()
+	}
+	return out
+}
+
+func actionFromPayload(raw []byte) (Turn, bool) {
+	var body struct {
+		Header struct {
+			EventID   string `json:"event_id"`
+			EventType string `json:"event_type"`
+		} `json:"header"`
+		Event struct {
+			Action struct {
+				Value json.RawMessage `json:"value"`
+			} `json:"action"`
+			Context struct {
+				OpenMessageID string `json:"open_message_id"`
+			} `json:"context"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return Turn{}, false
+	}
+	if body.Header.EventType != "card.action.trigger" {
+		return Turn{}, false
+	}
+	var v struct {
+		Act string `json:"act"`
+		ID  string `json:"id"`
+	}
+	_ = json.Unmarshal(body.Event.Action.Value, &v)
+	if v.Act == "" || v.ID == "" {
+		return Turn{}, false
+	}
+	return Turn{
+		EventID:   body.Header.EventID,
+		MsgType:   "card.action",
+		Action:    v.Act,
+		ActionID:  v.ID,
+		MessageID: body.Event.Context.OpenMessageID,
 	}, true
 }
 
@@ -247,47 +451,384 @@ var (
 	tokenExpire time.Time
 )
 
-func ReplyText(ctx context.Context, appID, secret, messageID, text string) error {
+func ReplyText(ctx context.Context, appID, secret, messageID, text string) (string, error) {
 	token, err := tenantToken(ctx, appID, secret)
 	if err != nil {
-		return err
+		return "", err
 	}
-	content, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
+	body, err := replyCard(text)
 	if err != nil {
-		return fmt.Errorf("feishu text: %w", err)
-	}
-	body, err := json.Marshal(struct {
-		MsgType string `json:"msg_type"`
-		Content string `json:"content"`
-	}{MsgType: "text", Content: string(content)})
-	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, feishuHost+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reply", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("feishu reply %s: %w", messageID, err)
+		return "", fmt.Errorf("feishu reply %s: %w", messageID, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var out struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return fmt.Errorf("feishu reply %s: %s", messageID, strings.TrimSpace(string(raw)))
+		return "", fmt.Errorf("feishu reply %s: %s", messageID, strings.TrimSpace(string(raw)))
 	}
 	if out.Code != 0 {
-		return fmt.Errorf("feishu reply %s: %s", messageID, out.Msg)
+		return "", fmt.Errorf("feishu reply %s: %s", messageID, out.Msg)
 	}
-	return nil
+	return out.Data.MessageID, nil
+}
+
+// BotOpenID 读取这个机器人自己的 open_id，用来判断群里 @ 的是不是它。
+func BotOpenID(ctx context.Context, appID, secret string) (string, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feishuHost+"/open-apis/bot/v3/info", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("feishu bot: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("feishu bot: %s", strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 || out.Bot.OpenID == "" {
+		if out.Msg == "" {
+			out.Msg = "没有 open_id"
+		}
+		return "", fmt.Errorf("feishu bot: %s", out.Msg)
+	}
+	return out.Bot.OpenID, nil
+}
+
+// History 拉取一个会话里 since 之后的消息。since 为 0 时取最近一页。
+func History(ctx context.Context, appID, secret, chatID string, since int64) ([]Line, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("container_id_type", "chat")
+	q.Set("container_id", chatID)
+	q.Set("page_size", "50")
+	q.Set("sort_type", "ByCreateTimeDesc")
+	if since > 0 {
+		q.Set("start_time", strconv.FormatInt(since+1, 10))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feishuHost+"/open-apis/im/v1/messages?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu history %s: %w", chatID, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				MessageID  string `json:"message_id"`
+				MsgType    string `json:"msg_type"`
+				CreateTime string `json:"create_time"`
+				Sender     struct {
+					ID         string `json:"id"`
+					SenderType string `json:"sender_type"`
+				} `json:"sender"`
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("feishu history %s: %s", chatID, strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return nil, fmt.Errorf("feishu history %s: %s", chatID, out.Msg)
+	}
+	lines := make([]Line, 0, len(out.Data.Items))
+	for i := len(out.Data.Items) - 1; i >= 0; i-- {
+		it := out.Data.Items[i]
+		text, _ := readContent(it.MsgType, it.Body.Content, nil)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		at, _ := strconv.ParseInt(it.CreateTime, 10, 64)
+		if at > 1_000_000_000_000 {
+			at /= 1000
+		}
+		self := it.Sender.SenderType == "app" || it.Sender.SenderType == "bot"
+		from := "有人"
+		if self {
+			from = "机器人"
+		}
+		lines = append(lines, Line{
+			ID:     it.MessageID,
+			ChatID: chatID,
+			From:   from,
+			FromID: it.Sender.ID,
+			Text:   text,
+			At:     at,
+			Self:   self,
+		})
+	}
+	return lines, nil
+}
+
+// replyCard 把回复装成飞书消息卡片。卡片里的 markdown 会排版，纯文本会把 ** 原样显示。
+func replyCard(text string) ([]byte, error) {
+	rs := []rune(strings.TrimSpace(text))
+	if len(rs) > 4000 {
+		text = string(rs[:4000]) + "…"
+	} else {
+		text = string(rs)
+	}
+	card, err := json.Marshal(struct {
+		Config struct {
+			WideScreenMode bool `json:"wide_screen_mode"`
+		} `json:"config"`
+		Elements []struct {
+			Tag     string `json:"tag"`
+			Content string `json:"content"`
+		} `json:"elements"`
+	}{
+		Config: struct {
+			WideScreenMode bool `json:"wide_screen_mode"`
+		}{WideScreenMode: true},
+		Elements: []struct {
+			Tag     string `json:"tag"`
+			Content string `json:"content"`
+		}{{Tag: "markdown", Content: text}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("feishu card: %w", err)
+	}
+	return json.Marshal(struct {
+		MsgType string `json:"msg_type"`
+		Content string `json:"content"`
+	}{MsgType: "interactive", Content: string(card)})
+}
+
+// FetchMessage 读取被回复的那条消息正文。机器人自己发过的、以及会话里它能看见的，都走这里。
+func FetchMessage(ctx context.Context, appID, secret, messageID string) (string, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return "", err
+	}
+	u := feishuHost + "/open-apis/im/v1/messages/" + url.PathEscape(messageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("feishu message %s: %w", messageID, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				MsgType string `json:"msg_type"`
+				Body    struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("feishu message %s: %s", messageID, strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return "", fmt.Errorf("feishu message %s: %s", messageID, out.Msg)
+	}
+	if len(out.Data.Items) == 0 {
+		return "", fmt.Errorf("feishu message %s: empty", messageID)
+	}
+	item := out.Data.Items[0]
+	return messageText(item.MsgType, item.Body.Content), nil
+}
+
+// messageText 从飞书消息体里抽出能读的字。卡片、文本、富文本都走这里。
+func messageText(kind, content string) string {
+	switch kind {
+	case "interactive":
+		return cardText(content)
+	default:
+		text, _ := readContent(kind, content, nil)
+		if text != "" {
+			return text
+		}
+		return cardText(content)
+	}
+}
+
+func cardText(content string) string {
+	var body struct {
+		Elements []struct {
+			Tag     string `json:"tag"`
+			Content string `json:"content"`
+			Text    struct {
+				Content string `json:"content"`
+			} `json:"text"`
+		} `json:"elements"`
+	}
+	if err := json.Unmarshal([]byte(content), &body); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, el := range body.Elements {
+		line := strings.TrimSpace(el.Content)
+		if line == "" {
+			line = strings.TrimSpace(el.Text.Content)
+		}
+		if line == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// Item 是获取消息接口返回的一条。
+type Item struct {
+	ID   string
+	Kind string
+	Body string
+}
+
+// FetchItems 读取一条消息。合并转发时这里应是它夹着的子消息。
+func FetchItems(ctx context.Context, appID, secret, messageID string) ([]Item, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return nil, err
+	}
+	u := feishuHost + "/open-apis/im/v1/messages/" + url.PathEscape(messageID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu message %s: %w", messageID, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	return itemsFromBody(messageID, raw)
+}
+
+func itemsFromBody(messageID string, raw []byte) ([]Item, error) {
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				MessageID string `json:"message_id"`
+				MsgType   string `json:"msg_type"`
+				Body      struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("feishu message %s: %s", messageID, strings.TrimSpace(string(raw)))
+	}
+	if out.Code != 0 {
+		return nil, fmt.Errorf("feishu message %s: %s", messageID, out.Msg)
+	}
+	if len(out.Data.Items) == 0 {
+		return nil, fmt.Errorf("feishu message %s: empty", messageID)
+	}
+	items := make([]Item, 0, len(out.Data.Items))
+	for _, it := range out.Data.Items {
+		items = append(items, Item{ID: it.MessageID, Kind: it.MsgType, Body: it.Body.Content})
+	}
+	return items, nil
+}
+
+// FetchImage 用机器人身份下载图片，返回像素和 mime。
+func FetchImage(ctx context.Context, appID, secret, messageID, key string) ([]byte, string, error) {
+	token, err := tenantToken(ctx, appID, secret)
+	if err != nil {
+		return nil, "", err
+	}
+	return fetchImageToken(ctx, token, messageID, key)
+}
+
+// FetchImageToken 用调用方给出的令牌下载图片。
+func FetchImageToken(ctx context.Context, token, messageID, key string) ([]byte, string, error) {
+	return fetchImageToken(ctx, token, messageID, key)
+}
+
+func fetchImageToken(ctx context.Context, token, messageID, key string) ([]byte, string, error) {
+	u := feishuHost + "/open-apis/im/v1/messages/" + url.PathEscape(messageID) + "/resources/" + url.PathEscape(key) + "?type=image"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("feishu image %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("feishu image %s: %s", key, strings.TrimSpace(string(raw)))
+	}
+	mime := resp.Header.Get("Content-Type")
+	if i := strings.Index(mime, ";"); i >= 0 {
+		mime = mime[:i]
+	}
+	mime = strings.TrimSpace(mime)
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	return raw, mime, nil
 }
 
 func tenantToken(ctx context.Context, appID, secret string) (string, error) {

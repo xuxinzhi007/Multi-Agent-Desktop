@@ -7,17 +7,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"multi-agent-desktop/internal/llm"
 )
 
 // Message 是频道里的一条消息。
 type Message struct {
-	ID        string `json:"id"`
-	ChannelID string `json:"channelId"`
-	FromID    string `json:"fromId"` // agent ID 或 "user"
-	FromName  string `json:"fromName"`
-	Text      string `json:"text"`
-	At        int64  `json:"at"`
-	Kind      string `json:"kind,omitempty"` // user / agent / system
+	ID        string      `json:"id"`
+	ChannelID string      `json:"channelId"`
+	FromID    string      `json:"fromId"` // agent ID 或 "user"
+	FromName  string      `json:"fromName"`
+	Text      string      `json:"text"`
+	At        int64       `json:"at"`
+	Kind      string      `json:"kind,omitempty"` // user / agent / system
+	Blocks    []llm.Block `json:"blocks,omitempty"`
 
 	// Deliveries 记录投递结果：谁收到了、谁跳过了
 	Deliveries []Delivery `json:"deliveries,omitempty"`
@@ -295,6 +298,10 @@ func (m *Manager) RemoveMember(agentId string) {
 
 // AddMessage 添加消息到频道，返回创建的消息副本。
 func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (Message, error) {
+	return m.addMessage(channelId, fromId, fromName, text, nil)
+}
+
+func (m *Manager) addMessage(channelId, fromId, fromName, text string, blocks []llm.Block) (Message, error) {
 	m.mu.Lock()
 
 	ch, ok := m.channels[channelId]
@@ -310,6 +317,7 @@ func (m *Manager) AddMessage(channelId, fromId, fromName, text string) (Message,
 		FromName:  fromName,
 		Text:      text,
 		At:        time.Now().Unix(),
+		Blocks:    blocks,
 	}
 	ch.Messages = append(ch.Messages, msg)
 	m.mu.Unlock()
@@ -345,7 +353,12 @@ func (m *Manager) SetDeliveries(channelId, msgID string, deliveries []Delivery) 
 // Broadcast 发消息到频道，返回创建的消息副本与所有成员 agent ID。
 // 消息总会被记录，即使用户是唯一发送者；接收者排除发送者自身。
 func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (Message, []string, error) {
-	msg, err := m.AddMessage(channelId, fromId, fromName, text)
+	return m.BroadcastBlocks(channelId, fromId, fromName, text, nil)
+}
+
+// BroadcastBlocks 发一条带图的群消息。blocks 只含图的 id，字节不在这里。
+func (m *Manager) BroadcastBlocks(channelId, fromId, fromName, text string, blocks []llm.Block) (Message, []string, error) {
+	msg, err := m.addMessage(channelId, fromId, fromName, text, blocks)
 	if err != nil {
 		return Message{}, nil, err
 	}
@@ -394,14 +407,23 @@ func BuildTranscript(messages []Message, budget int) Transcript {
 }
 
 // Render 把 transcript 渲染成 prompt 段。
-func (t Transcript) Render() string {
+// selfID 是正在读这段上下文的会话。它自己说过的话标成「你」，
+// 避免和别人的发言用同一格式，模型会把旧话再讲一遍。
+func (t Transcript) Render(selfID string) string {
 	if len(t.Messages) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## 群聊上下文\n")
+	b.WriteString("别人的发言照录。标成「你」的是你已经说过的话，不要再复述。\n")
 	for _, m := range t.Messages {
-		b.WriteString(m.FromName)
+		if selfID != "" && m.FromID == selfID {
+			b.WriteString("你")
+		} else if m.FromName != "" {
+			b.WriteString(m.FromName)
+		} else {
+			b.WriteString(m.FromID)
+		}
 		b.WriteString(": ")
 		b.WriteString(m.Text)
 		b.WriteString("\n")

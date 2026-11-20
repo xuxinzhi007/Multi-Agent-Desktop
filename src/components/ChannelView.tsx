@@ -3,6 +3,7 @@ import TextareaAutosize from 'react-textarea-autosize'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
+import { ImageStrip, MessageShots, blindSentence, readImageFiles, type DraftImage } from './ImageDraft'
 
 type Props = {
   channel: Channel | null
@@ -10,7 +11,7 @@ type Props = {
   /** 各 agent 的流式增量，key 是 agent ID */
   streaming?: Record<string, string>
   /** text 已含 @名字；mentions 是结构化的被点名成员名列表 */
-  onSend: (text: string, mentions: string[]) => void
+  onSend: (text: string, mentions: string[], images?: { mime: string; data: string }[]) => Promise<void> | void
   onSetSpeaker?: (agentId: string) => void
   onDelete?: () => void
 }
@@ -21,6 +22,8 @@ type Props = {
  */
 export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete }: Props) {
   const [input, setInput] = useState('')
+  const [images, setImages] = useState<DraftImage[]>([])
+  const [imageNote, setImageNote] = useState('')
   const [showMentions, setShowMentions] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   // 被 @ 的成员：结构化选择，不是从文本里解析
@@ -67,19 +70,43 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
   ]
   const memberById = (id: string) => agents.find((a) => a.id === id)
 
+  const repliers = (() => {
+    if (mentioned.includes('所有人')) return members
+    if (mentioned.length > 0) return members.filter((m) => mentioned.includes(m.name))
+    if (channel.speaker) return members.filter((m) => m.id === channel.speaker)
+    return []
+  })()
+  const blind = images.length > 0 && repliers.some((m) => !m.seesImages)
+
+  const addImages = async (files: File[]) => {
+    const got = await readImageFiles(files)
+    if (got.error) setImageNote(got.error)
+    if (got.images.length === 0) return
+    setImages((prev) => [...prev, ...got.images].slice(0, 8))
+  }
+
   const submit = () => {
     const text = input.trim()
-    if (!text && mentioned.length === 0) return
+    if ((!text && mentioned.length === 0 && images.length === 0) || blind) return
     // 把被 @ 的成员名附在文本末尾，后端 ParseMentions 能读到；
     // 同时传结构化 mentions，避免名字里含空格时解析失败。
     const textWithMentions =
       mentioned.length > 0
         ? `${mentioned.map((n) => `@${n}`).join(' ')} ${text}`.trim()
         : text
-    onSend(textWithMentions, mentioned)
-    setInput('')
-    setMentioned([])
-    setShowMentions(false)
+    const shots = images.map((img) => ({ mime: img.mime, data: img.data }))
+    Promise.resolve(onSend(textWithMentions, mentioned, shots.length ? shots : undefined))
+      .then(() => {
+        setInput('')
+        setImages([])
+        setImageNote('')
+        setMentioned([])
+        setShowMentions(false)
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        setImageNote(msg || blindSentence)
+      })
   }
 
   const toggleMention = (name: string) => {
@@ -297,6 +324,11 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
 
       <div style={{ padding: 'var(--space-3) var(--space-6) var(--space-5)', flexShrink: 0 }}>
         <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault()
+            void addImages(Array.from(e.dataTransfer.files))
+          }}
           style={{
             position: 'relative',
             background: 'var(--bg-surface)',
@@ -304,10 +336,17 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             borderRadius: 'var(--radius-lg)',
           }}
         >
+          <ImageStrip images={images} onRemove={(i) => setImages((prev) => prev.filter((_, at) => at !== i))} />
           <TextareaAutosize
             ref={taRef}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files)
+              if (files.length === 0) return
+              e.preventDefault()
+              void addImages(files)
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
@@ -338,6 +377,18 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           />
 
           <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px 7px' }}>
+            <label className="c-icon-btn" title="选择图片" style={{ cursor: 'pointer', marginRight: 8 }}>
+              图
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                hidden
+                onChange={(e) => {
+                  void addImages(Array.from(e.target.files ?? []))
+                  e.target.value = ''
+                }}
+              />
+            </label>
             <span
               style={{
                 fontSize: 'var(--text-xs)',
@@ -349,7 +400,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               }}
             >
               {mentioned.length === 0 ? (
-                <>未点名 → 自动选 1 个最相关的成员</>
+                <>没 @ 人时，由默认接话人回答</>
               ) : (
                 <>
                   点名：
@@ -376,7 +427,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               className="c-btn c-btn--primary c-btn--sm"
               style={{ marginLeft: 'auto' }}
               onClick={submit}
-              disabled={!input.trim() && mentioned.length === 0}
+              disabled={blind || (!input.trim() && mentioned.length === 0 && images.length === 0)}
             >
               发送
             </button>
@@ -389,7 +440,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             color: 'var(--text-disabled)',
           }}
         >
-          Enter 发送 · Shift+Enter 换行
+          {blind ? blindSentence : imageNote || 'Enter 发送 · Shift+Enter 换行'}
         </div>
       </div>
     </div>
@@ -460,7 +511,11 @@ function ChannelBubble({
             whiteSpace: 'pre-wrap',
           }}
         >
-          <MentionText text={msg.text} agents={mentionTargets} selfColor={color} />
+          {(msg.blocks?.length ?? 0) > 0 ? (
+            <MessageShots blocks={msg.blocks} content={msg.text} />
+          ) : (
+            <MentionText text={msg.text} agents={mentionTargets} selfColor={color} />
+          )}
         </div>
         <DeliveryRow msg={msg} />
       </div>

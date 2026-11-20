@@ -7,6 +7,7 @@ import {
   type ChannelMessage,
   type Config,
   type Note,
+  type Room,
   type ShellEvent,
   type ShellResultEvent,
 } from '../mygo'
@@ -33,6 +34,7 @@ type State = {
   llm: LLMConfig
   agents: Agent[]
   channels: Channel[]
+  feishuRooms: Room[]
   notes: Note[]
   streaming: Record<string, string>
   /** 群里正在生成的回复。不进私聊。 */
@@ -53,6 +55,8 @@ type State = {
   opened: string
   /** 已经乐观插入消息、但后端还没回执的 agent */
   pending: Record<string, boolean>
+  /** 上一句还没答完时先排在回答后面，不插进正文。 */
+  outbox: Record<string, string[]>
   /** 最近一次停止的原因与进度。「为什么停」必须能说清，不能只显示「已停止」。 */
   stops: Record<string, { reason: string; iter: number; used: number; at: number }>
 }
@@ -64,6 +68,7 @@ const EMPTY: State = {
   llm: { provider: '', baseUrl: '', apiKey: '', model: '' },
   agents: [],
   channels: [],
+  feishuRooms: [],
   notes: [],
   streaming: {},
   channelStreaming: {},
@@ -78,6 +83,7 @@ const EMPTY: State = {
   focusAgentId: null,
   opened: '',
   pending: {},
+  outbox: {},
   stops: {},
 }
 
@@ -241,6 +247,7 @@ export function useBackend() {
         agents: s.agents.filter((a) => a.id !== id),
         streaming: omit(s.streaming, id),
         channelStreaming: omit(s.channelStreaming, id),
+        outbox: omit(s.outbox, id),
       })),
     )
     // token 级流式片段：累积到 streaming[agentId]，assistant 完整消息到达时清掉。
@@ -286,8 +293,12 @@ export function useBackend() {
             lastIn: tokensIn ? tokensIn : existing.lastIn,
           }
         }
+        const box = s.outbox[id] ?? []
+        const at = message.role === 'user' ? box.indexOf(message.content) : -1
+        const outbox = at < 0 ? s.outbox : { ...s.outbox, [id]: box.filter((_, i) => i !== at) }
         return {
           ...s,
+          outbox,
           agents: s.agents.map((a) => {
             if (a.id !== id) return a
             const list = a.messages ?? []
@@ -295,7 +306,7 @@ export function useBackend() {
             // 工具回合已经把流式文本收成消息时，结束事件再带同一段也不再追加。
             const last = list[list.length - 1]
             if (message.role === 'user' && last?.role === 'user' && last.content === message.content) {
-              return a
+              return { ...a, messages: [...list.slice(0, -1), { ...last, ...message }] }
             }
             const spoken = clipSentence(message.content) || a.last
             if (s.opened !== id) return { ...a, messages: [], last: spoken }
@@ -320,12 +331,30 @@ export function useBackend() {
       dropDeltas(id)
       dropReason(id)
       setState((s) => {
+        const queued = s.outbox[id] ?? []
+        const stamp = Math.floor(Date.now() / 1000)
         return {
           ...s,
           errors: rememberError(s, id, error),
           streaming: omit(s.streaming, id),
-        channelStreaming: omit(s.channelStreaming, id),
+          channelStreaming: omit(s.channelStreaming, id),
           reasoning: omit(s.reasoning, id),
+          pending: omit(s.pending, id),
+          outbox: omit(s.outbox, id),
+          agents:
+            queued.length === 0
+              ? s.agents
+              : s.agents.map((a) =>
+                  a.id === id
+                    ? {
+                        ...a,
+                        messages: [
+                          ...(a.messages ?? []),
+                          ...queued.map((content) => ({ role: 'user' as const, content, timestamp: stamp })),
+                        ],
+                      }
+                    : a,
+                ),
         }
       })
     })
@@ -526,32 +555,6 @@ export function useBackend() {
     }
   }, [])
 
-  /** send 返回按 action 变化的类型；用泛型让调用处拿到精确结果。 */
-  /**
-   * 乐观插入用户消息。
-   *
-   * 之前消息完全依赖后端的 agent.message 事件回推 —— 后端一慢、一卡、
-   * 或者事件丢了，用户敲完字屏幕上什么都不出现，看起来就是「发出去没反应」。
-   * 现在先在本地插入，让用户立刻看到自己的话；后端回推时按内容去重。
-   */
-  const optimisticMessage = useCallback(
-    (agentId: string, text: string, role: 'user' | 'assistant' = 'user') => {
-      const msg = { role, content: text, timestamp: Math.floor(Date.now() / 1000) }
-      setState((s) => ({
-        ...s,
-        agents: s.agents.map((a) =>
-          a.id === agentId ? { ...a, messages: [...(a.messages ?? []), msg] } : a,
-        ),
-        // 立刻进入「处理中」，否则用户不知道有没有发出去
-        pending: { ...s.pending, [agentId]: true },
-        // 新一轮开始：上一轮的红条和思考步骤不再跟到这句下面
-        errors: omit(s.errors, agentId),
-        tools: s.tools.filter((t) => t.id !== agentId),
-      }))
-    },
-    [],
-  )
-
   const sendImpl = useCallback((action: string, data?: unknown): Promise<unknown> => {
     switch (action) {
       case 'agent.create':
@@ -567,11 +570,58 @@ export function useBackend() {
       case 'agent.stop':
         return API.stopAgent((data as { id: string }).id)
       case 'agent.prompt': {
-        const { agentId, text } = data as { agentId: string; text: string }
-        optimisticMessage(agentId, text)
-        return API.promptAgent({ agentId, text }).catch((e) => {
-          // 失败要把乐观插入的消息标出来，不能假装成功
-          setState((s) => ({ ...s, pending: omit(s.pending, agentId) }))
+        const { agentId, text, images } = data as {
+          agentId: string
+          text: string
+          images?: { mime: string; data: string }[]
+        }
+        setState((s) => {
+          const agent = s.agents.find((a) => a.id === agentId)
+          const busy =
+            agent?.status === 'running' ||
+            agent?.status === 'queued' ||
+            !!s.streaming[agentId] ||
+            !!s.pending[agentId]
+          if (busy) {
+            return {
+              ...s,
+              outbox: { ...s.outbox, [agentId]: [...(s.outbox[agentId] ?? []), text] },
+              pending: { ...s.pending, [agentId]: true },
+            }
+          }
+          const msg = {
+            role: 'user' as const,
+            content: text,
+            timestamp: Math.floor(Date.now() / 1000),
+            blocks: images?.map((img) => ({ mime: img.mime, data: img.data })),
+          }
+          return {
+            ...s,
+            agents: s.agents.map((a) =>
+              a.id === agentId ? { ...a, messages: [...(a.messages ?? []), msg] } : a,
+            ),
+            pending: { ...s.pending, [agentId]: true },
+            errors: omit(s.errors, agentId),
+            tools: s.tools.filter((t) => t.id !== agentId),
+          }
+        })
+        return API.promptAgent({ agentId, text, images }).catch((e) => {
+          setState((s) => ({
+            ...s,
+            pending: omit(s.pending, agentId),
+            errors: rememberError(s, agentId, e instanceof Error ? e.message : String(e)),
+            outbox: {
+              ...s.outbox,
+              [agentId]: (s.outbox[agentId] ?? []).filter((line) => line !== text),
+            },
+            agents: s.agents.map((a) => {
+              if (a.id !== agentId) return a
+              const list = a.messages ?? []
+              const last = list[list.length - 1]
+              if (last?.role === 'user' && last.content === text) return { ...a, messages: list.slice(0, -1) }
+              return a
+            }),
+          }))
           throw e
         })
       }
@@ -637,15 +687,19 @@ export function useBackend() {
         })
       }
       case 'channel.send': {
-        const { channelId, fromId, fromName, text } = data as {
+        const { channelId, fromId, fromName, text, images } = data as {
           channelId: string
           fromId: string
           fromName: string
           text: string
+          images?: { mime: string; data: string }[]
         }
-        return API.sendToChannel(channelId, fromId, fromName, text).catch((e) => {
+        const sent = images?.length
+          ? API.sendChannelImages(channelId, fromId, fromName, text, images)
+          : API.sendToChannel(channelId, fromId, fromName, text)
+        return sent.catch((e) => {
           console.error('sendToChannel failed', e)
-          return null
+          throw e
         })
       }
       case 'note.upsert':
@@ -735,6 +789,23 @@ export function useBackend() {
     API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 })
       .then((notes) => setState((s) => ({ ...s, notes: notes ?? [] })))
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    let stop = false
+    const pull = () => {
+      API.listFeishuRooms()
+        .then((rooms) => {
+          if (!stop) setState((s) => ({ ...s, feishuRooms: rooms ?? [] }))
+        })
+        .catch(() => {})
+    }
+    pull()
+    const timer = window.setInterval(pull, 4000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {

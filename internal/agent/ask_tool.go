@@ -82,6 +82,9 @@ func (t *askAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 	case <-out.done:
 	}
 	if out.err != "" {
+		if llm.IsContextOverflow(out.err) {
+			return tool.Fail("%s 的上下文装不下这一轮，已经试过压缩。请缩短任务后再问，不要把原始报错转给别的会话。", in.Name)
+		}
 		if strings.TrimSpace(out.text) != "" {
 			return tool.Fail("%s 异常结束：%s\n已有内容：\n%s", in.Name, out.err, out.text)
 		}

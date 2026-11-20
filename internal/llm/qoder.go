@@ -327,7 +327,14 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 func qoderRequestBody(model qoderModel, thinking bool, msgs []Message, tools []tool.Spec) ([]byte, error) {
 	wire := make([]map[string]any, 0, len(msgs))
 	lastUser := ""
+	var imageURLs []string
 	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if len(b.Data) == 0 {
+				continue
+			}
+			imageURLs = append(imageURLs, dataURL(b))
+		}
 		item := map[string]any{"role": m.Role, "content": m.Content}
 		if m.Role == "user" && m.Content != "" {
 			lastUser = m.Content
@@ -392,7 +399,7 @@ func qoderRequestBody(model qoderModel, thinking bool, msgs []Message, tools []t
 		"task_id":          "common",
 		"code_language":    "",
 		"chat_prompt":      "",
-		"image_urls":       nil,
+		"image_urls":       imageURLs,
 		"aliyun_user_type": "",
 		"system":           "",
 		"messages":         wire,
@@ -400,7 +407,7 @@ func qoderRequestBody(model qoderModel, thinking bool, msgs []Message, tools []t
 		"parameters":       params,
 		"chat_context": map[string]any{
 			"chatPrompt": "",
-			"imageUrls":  nil,
+			"imageUrls":  imageURLs,
 			"extra": map[string]any{
 				"context": []any{},
 				"modelConfig": map[string]any{

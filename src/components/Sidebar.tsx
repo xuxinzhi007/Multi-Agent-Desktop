@@ -1,17 +1,18 @@
 import { useState } from 'react'
-import { API, type AgentView as Agent, type Channel } from '../mygo'
+import { API, type AgentView as Agent, type Channel, type Room } from '../mygo'
 import CreateAgentModal from './CreateAgentModal'
 
 type Props = {
   agents: Agent[]
   channels: Channel[]
+  feishuRooms: Room[]
   /** 当前选中：agent id / channel id / null */
   activeId: string | null
-  activeKind: 'agent' | 'channel' | null
+  activeKind: 'agent' | 'channel' | 'feishu' | null
   connected: boolean
   version: string
   provider: string
-  onSelect: (kind: 'agent' | 'channel', id: string) => void
+  onSelect: (kind: 'agent' | 'channel' | 'feishu', id: string) => void
   onCreate: (name: string, role: string, backend: string, workDir?: string) => void
   onDelete: (id: string) => void
   onCreateChannel: (name: string, members: string[]) => void
@@ -257,6 +258,57 @@ export default function Sidebar(p: Props) {
                 </div>
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
                   {(ch.members ?? []).length} 成员 · {(ch.messages ?? []).length} 消息
+                </div>
+              </div>
+            </div>
+          )
+        })}
+
+        {p.feishuRooms.length > 0 && (
+          <div
+            style={{
+              padding: '10px 2px 5px',
+              fontSize: 'var(--text-xs)',
+              color: 'var(--text-disabled)',
+              fontWeight: 500,
+              letterSpacing: '0.04em',
+            }}
+          >
+            飞书
+          </div>
+        )}
+        {p.feishuRooms.map((room) => {
+          const active = p.activeKind === 'feishu' && room.id === p.activeId
+          const last = room.messages?.[room.messages.length - 1]
+          return (
+            <div
+              key={room.id}
+              onClick={() => p.onSelect('feishu', room.id)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: '6px 10px',
+                borderRadius: 'var(--radius-md)',
+                cursor: 'pointer',
+                marginBottom: 1,
+                background: active ? 'var(--bg-surface-active)' : 'transparent',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                >
+                  {room.name || '飞书会话'}
+                </div>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                  {last ? last.text : '还没有消息'}
                 </div>
               </div>
             </div>

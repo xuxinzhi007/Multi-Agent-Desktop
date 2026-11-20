@@ -2,6 +2,8 @@ package feishu
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -26,5 +28,25 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(out.Payload, in.Payload) {
 		t.Fatalf("payload = %s", out.Payload)
+	}
+}
+
+func TestReplyCardUsesMarkdown(t *testing.T) {
+	raw, err := replyCard("**已经接入**\n飞书走长连接")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		MsgType string `json:"msg_type"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.MsgType != "interactive" {
+		t.Fatalf("msg_type=%s", body.MsgType)
+	}
+	if !strings.Contains(body.Content, `"tag":"markdown"`) || !strings.Contains(body.Content, "已经接入") {
+		t.Fatalf("content=%s", body.Content)
 	}
 }

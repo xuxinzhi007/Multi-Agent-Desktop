@@ -30,6 +30,9 @@ func TestPageJSDoesNotTakeRawScript(t *testing.T) {
 	if !contains(js, "mousedown") || !contains(js, "target.click()") {
 		t.Fatal("click script should press and activate the control")
 	}
+	if contains(js, "const bar") {
+		t.Fatal("click script redeclares bar")
+	}
 	if _, err := PageJS(Op{Op: "open", URL: "javascript:alert(1)"}); err == nil {
 		t.Fatal("javascript url accepted")
 	}
