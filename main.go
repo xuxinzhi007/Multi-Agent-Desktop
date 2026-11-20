@@ -2694,8 +2694,12 @@ func main() {
 		var mini *mygo.Window
 		if api != nil {
 			mini = api.currentMini()
-			if event == "agent.tool" && api.bot != nil {
-				api.bot.NoteTool(data)
+			if api.bot != nil && (event == "agent.tool" || event == "agent.delta") {
+				if event == "agent.tool" {
+					api.bot.NoteTool(data)
+				} else {
+					api.bot.NoteDelta(data)
+				}
 			}
 		}
 		emitToWindow(win, mini, mgr, chMgr, event, data)

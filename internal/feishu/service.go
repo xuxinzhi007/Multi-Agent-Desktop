@@ -69,6 +69,8 @@ type Service struct {
 	runKey    string
 	cardID    string
 	closed    bool
+	lines     []string
+	say       string
 }
 
 // Config 是当前生效的机器人配置。
@@ -299,6 +301,8 @@ func (s *Service) dispatch(t Turn) {
 	s.runKey = t.MessageID
 	s.runCancel = cancel
 	s.runAgent = agentID
+	s.lines = nil
+	s.say = ""
 	s.mu.Unlock()
 	reply, err := s.hooks.Run(ctx, RunRequest{AgentID: agentID, Text: text, Pieces: pieces})
 	final := reply
@@ -343,9 +347,79 @@ func (s *Service) halt(id string) {
 	}
 }
 
-// Progress 把当前工具收成一句，写进正在处理的那张卡片。
+// Progress 把当前工具收成一句，追加到正在处理的那张卡片。
 func (s *Service) Progress(agentID, tool string) {
+	s.addLine(agentID, toolLine(tool))
+}
+
+// NoteDelta 把模型已经说出的句子写进卡片，不等整轮结束。
+func (s *Service) NoteDelta(data any) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return
+	}
+	id, _ := m["id"].(string)
+	text, _ := m["delta"].(string)
+	if id == "" || text == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.closed || s.runAgent != id || s.cardID == "" {
+		s.mu.Unlock()
+		return
+	}
+	s.say += text
+	var ready []string
+	for {
+		i := strings.IndexAny(s.say, "\n。")
+		if i < 0 {
+			break
+		}
+		ready = append(ready, s.say[:i+1])
+		s.say = s.say[i+1:]
+	}
+	s.mu.Unlock()
+	for _, line := range ready {
+		s.addLine(id, line)
+	}
+}
+
+// NoteTool 接收会话的工具事件。开始时写正在做什么，结束时把这一步的结果写上。
+func (s *Service) NoteTool(data any) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return
+	}
+	id, _ := m["id"].(string)
+	tool, _ := m["tool"].(string)
+	if m["phase"] == "start" {
+		s.flushSay(id)
+		s.Progress(id, tool)
+		return
+	}
+	if m["phase"] != "end" {
+		return
+	}
+	content, _ := m["content"].(string)
+	s.addLine(id, resultLine(tool, content))
+}
+
+func (s *Service) flushSay(agentID string) {
+	s.mu.Lock()
+	text := strings.TrimSpace(s.say)
+	s.say = ""
+	s.mu.Unlock()
+	if text != "" {
+		s.addLine(agentID, text)
+	}
+}
+
+func (s *Service) addLine(agentID, line string) {
 	if s == nil || agentID == "" {
+		return
+	}
+	line = clipLine(line)
+	if line == "" {
 		return
 	}
 	s.mu.Lock()
@@ -353,22 +427,42 @@ func (s *Service) Progress(agentID, tool string) {
 		s.mu.Unlock()
 		return
 	}
+	s.lines = append(s.lines, line)
+	if len(s.lines) > 8 {
+		s.lines = s.lines[len(s.lines)-8:]
+	}
+	text := strings.Join(s.lines, "\n")
 	cfg := s.cfg
 	card := s.cardID
 	key := s.runKey
 	s.mu.Unlock()
-	s.paint(cfg, card, toolLine(tool), key)
+	s.paint(cfg, card, text, key)
 }
 
-// NoteTool 接收会话的工具事件。只在开始时更新卡片。
-func (s *Service) NoteTool(data any) {
-	m, ok := data.(map[string]any)
-	if !ok || m["phase"] != "start" {
-		return
+func clipLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > 80 {
+		return string(r[:80]) + "…"
 	}
-	id, _ := m["id"].(string)
-	tool, _ := m["tool"].(string)
-	s.Progress(id, tool)
+	return s
+}
+
+func resultLine(tool, content string) string {
+	content = clipLine(content)
+	if content == "" {
+		return ""
+	}
+	switch tool {
+	case "bash":
+		return "命令结果 " + content
+	case "read_file":
+		return "读到 " + content
+	case "web":
+		return "页面 " + content
+	default:
+		return content
+	}
 }
 
 func toolLine(name string) string {

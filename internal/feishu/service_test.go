@@ -374,7 +374,7 @@ func TestProgressIsOneLineOnTheSameCard(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch did not finish")
 	}
-	if len(lines) < 3 || lines[0] != "正在读文件" || lines[1] != "正在跑命令" || lines[len(lines)-1] != "做完了" {
+	if len(lines) < 3 || !strings.Contains(lines[0], "正在读文件") || !strings.Contains(lines[1], "正在跑命令") || lines[len(lines)-1] != "做完了" {
 		t.Fatalf("lines=%v", lines)
 	}
 	if lastStop != "" {

@@ -430,6 +430,7 @@ export function useBackend() {
         dropDeltas(e.id)
         reasonGap.add(e.id)
       }
+      const detail = e.phase === 'end' ? oneLine(e.content) : ''
       setState((s) => {
         if (e.phase === 'start') {
           const text = s.opened === e.id ? (s.streaming[e.id] ?? '') + folded : ''
@@ -450,6 +451,7 @@ export function useBackend() {
             ...s,
             agents,
             streaming: omit(s.streaming, e.id),
+            pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
             tools: [
               ...s.tools,
               { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
@@ -459,7 +461,7 @@ export function useBackend() {
         const tools = s.tools.slice()
         for (let i = tools.length - 1; i >= 0; i--) {
           if (tools[i].id === e.id && tools[i].tool === e.tool && (tools[i].status === 'running' || tools[i].status === 'waiting')) {
-            tools[i] = { ...tools[i], status }
+            tools[i] = { ...tools[i], status, detail: detail || tools[i].detail }
             break
           }
         }
@@ -883,6 +885,12 @@ export function useBackend() {
   }, [refreshNotes])
 
   return { ...state, send, clearFocus, refreshNotes, openAgent, parkAgents }
+}
+
+function oneLine(text?: string) {
+  const line = (text ?? '').replace(/\s+/g, ' ').trim()
+  if (!line) return ''
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
 }
 
 function rememberError(s: State, id: string, text: string): Record<string, SessionError> {

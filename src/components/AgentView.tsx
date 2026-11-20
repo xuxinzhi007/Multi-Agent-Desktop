@@ -36,7 +36,7 @@ type Props = {
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
   /** 这一轮已经发生的工具步骤。思考中靠它显示在读什么、跑了什么。 */
-  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' }[]
+  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting'; detail?: string }[]
   /** 模型这一轮的思考文本，还没写进消息时先显示在这里。 */
   reasoning?: string
   /** 这一轮请求的等待计时。first 是到首个推理或正文的毫秒。 */
@@ -341,8 +341,8 @@ function Thinking({
   pace?: Props['pace']
 }) {
   const current = [...steps].reverse().find((s) => s.status === 'running')
+  const latest = [...steps].reverse().find((s) => s.status !== 'running' && s.detail)
   const thinking = !current && pace?.heard === 'reason'
-  const waiting = !current && !thinking
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!pace) return
@@ -352,14 +352,17 @@ function Thinking({
   const waited = pace ? Math.max(0, Math.round((now - pace.since) / 1000)) : 0
   const label = current
     ? stepText(current.tool, current.target)
-    : thinking
-      ? '思考中'
-      : waited >= 20
-        ? '模型还没有返回'
-        : '在等模型'
+    : latest?.detail
+      ? latest.detail
+      : thinking
+        ? '思考中'
+        : waited >= 20
+          ? '模型还没有返回'
+          : '在等模型'
   const parts = [label]
-  if (pace) parts.push(`已等 ${formatWait(waited)}`)
-  if (pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
+  const showingResult = !current && !!latest?.detail
+  if (!showingResult && pace) parts.push(`已等 ${formatWait(waited)}`)
+  if (!showingResult && pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
   return (
     <ThinkRail live title={parts.join(' · ')} tone={current ? 'tool' : thinking ? 'think' : 'wait'}>
       {reasoning || undefined}
