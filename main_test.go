@@ -46,7 +46,7 @@ func newWiredTestAPI(t *testing.T) *API {
 	var mgr *agent.Manager
 	win := &mygo.Window{}
 	mgr = agent.NewManager(llm.Config{Provider: "mock"}, func(ev string, data any) {
-		emitToWindow(win, nil, mgr, chMgr, ev, data)
+		emitToWindow(win, mgr, chMgr, ev, data)
 	})
 	t.Cleanup(func() {
 		for _, a := range mgr.List() {
@@ -1025,36 +1025,6 @@ func TestLastSentenceTruncates(t *testing.T) {
 	})
 	if n := len([]rune(got)); n != 49 {
 		t.Fatalf("last = %q (%d runes), want 49", got, n)
-	}
-}
-
-func TestMiniSkipsTranscript(t *testing.T) {
-	var got []string
-	miniEmitHook = func(ev string) { got = append(got, ev) }
-	t.Cleanup(func() { miniEmitHook = nil })
-	mgr := agent.NewManager(llm.Config{}, func(string, any) {})
-	win := &mygo.Window{}
-	mini := &mygo.Window{}
-	emitToWindow(win, mini, mgr, nil, "agent.delta", map[string]any{"id": "a", "delta": "逐字"})
-	emitToWindow(win, mini, mgr, nil, "agent.reasoning", map[string]any{"id": "a", "reasoning": "想"})
-	emitToWindow(win, mini, mgr, nil, "agent.message", map[string]any{
-		"id":      "a",
-		"message": llm.Message{Role: "assistant", Content: strings.Repeat("文", 80)},
-	})
-	emitToWindow(win, mini, mgr, nil, "agent.status", map[string]any{"id": "a", "status": "running"})
-	for _, ev := range got {
-		if ev == "agent.delta" || ev == "agent.reasoning" || ev == "agent.message" {
-			t.Fatalf("island mirrored %s: %v", ev, got)
-		}
-	}
-	var status int
-	for _, ev := range got {
-		if ev == "mini.status" {
-			status++
-		}
-	}
-	if status < 2 {
-		t.Fatalf("mini.status count = %d, events %v, want message and status", status, got)
 	}
 }
 

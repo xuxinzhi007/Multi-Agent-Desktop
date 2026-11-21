@@ -278,22 +278,6 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* 悬浮岛入口：透明窗口，尺寸由内容决定（配合 Go 侧 FitContent）。
-   index.css 是主窗和悬浮岛共用的，这里必须覆盖掉上面的深色背景和 height:100%，
-   否则整个窗口会被填成 --bg-base 的色块，且内容不参与撑高。 */
-html[data-surface='island'],
-html[data-surface='island'] body,
-html[data-surface='island'] #root {
-  height: auto;
-  min-height: 0;
-  overflow: visible;
-  background: transparent;
-}
-
-html[data-surface='island'] body {
-  background: transparent;
-}
-
 button {
   font-family: inherit;
   font-size: inherit;
@@ -388,20 +372,6 @@ textarea::placeholder {
     opacity: 1;
     transform: translateX(0);
   }
-}
-
-/* 悬浮岛：叠在桌面上而非 app 背景上，需要半透明一套 token */
-:root[data-theme='dark'],
-:root {
-  --island-bg: rgba(15, 17, 26, 0.92);
-  --island-border: rgba(255, 255, 255, 0.1);
-  --island-border-subtle: rgba(255, 255, 255, 0.06);
-}
-
-:root[data-theme='light'] {
-  --island-bg: rgba(250, 251, 253, 0.94);
-  --island-border: rgba(0, 0, 0, 0.08);
-  --island-border-subtle: rgba(0, 0, 0, 0.05);
 }
 
 @keyframes shimmer {

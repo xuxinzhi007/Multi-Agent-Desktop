@@ -1,17 +1,20 @@
 # 设计文档：multi-agent-desktop
 
-> 版本：0.3.0
-> 最后更新：2026-11-16
+> 版本：0.4.0
+> 最后更新：2026-11-21
+
+这一份写的是**代码里已经落地的行为**。`docs/reviews/` 里的评审和方案是历史提案，不代表现在能用。
 
 ---
 
 ## 1. 产品定位
 
-跨平台（macOS / Windows）的多 Agent 开发工具桌面程序。
-N 个 AI agent 并行工作，各自独立会话，用户可实时观察、干预、审批。
+跨平台（macOS / Windows / Linux）的多 Agent 开发工具桌面程序。
+N 个 AI agent 并行工作，各自独立会话。用户可以看舰队和对话、中途插话、停止、改这个会话的模型和工作目录。
 
-**当前形态**：多 agent 聊天 + shell 执行 + 检查器面板（演示数据）
-**目标形态**：agent 能读写代码、自动拆解任务、git worktree 隔离
+**当前形态**：多 agent 会话 + 进程内工具循环（读写文件、shell、内置浏览器、会话之间派活）+ 频道 + 知识库 + 飞书多机器人。
+
+**还没做**：git worktree 隔离、Supervisor 自动拆任务、工具审批、检查器里的改动/任务数据、shell 流式输出和手动命令的超时、API Key 进钥匙串、历史改 SQLite、agent id 改 ULID。
 
 ---
 
@@ -32,15 +35,22 @@ Grok Bot（Electron）好看是因为 1553 个设计变量，不是 Chromium 的
 
 ```
 MyGo 主进程（Go）
-├── agent.Manager     —— N 个 agent 会话，每个一个 goroutine
-├── llm.Client        —— mock / ollama / openai 兼容
-├── pty.Runner        —— shell 执行
-└── mygo.Bind()       —— 暴露 API 给前端
+├── agent.Manager      —— N 个会话，每个一个 worker
+├── loop.Runner        —— 进程内循环（停止、预算、检查点）
+├── tool.Registry      —— 文件、bash、web、会话与笔记工具
+├── llm.Client         —— mock / llama.cpp / ollama / openai 兼容 / qoder
+├── channel.Manager    —— 频道与回合
+├── feishu.Hub         —— 每个机器人一条长连接
+├── browser.Desk       —— 内置浏览器，单独窗口
+├── pty.Runner         —— 界面上手动执行的 shell
+└── mygo.Bind()        —— 暴露 API 给前端
 
 React 19 前端（Vite 构建）
-├── mygo-runtime      —— typed IPC client（自动生成）
-└── events.*.on()     —— 订阅 Go 端事件
+├── mygo-runtime       —— typed IPC client（自动生成）
+└── events.*.on()      —— 订阅 Go 端事件
 ```
+
+主窗口和内置浏览器各是一块 WebView。浏览器页面不可信，不并进主 WebView。本地模型继续在进程外（`llama-server` 或 Ollama），不拉进应用进程。
 
 **优势**：
 - 无跨进程通信（之前 Tauri 要 WebSocket + 端口）
@@ -119,13 +129,15 @@ events.agentCreated.on((agent) => { ... })
 - **禁止硬编码色值**：一律 `var(--token)`
 - **内联样式**：仅用于动态值（如 `agent.color`），静态样式走 CSS 类
 
+界面细则、亮色陷阱和已有护栏见 `docs/skills/ui-design.md`。
+
 ---
 
 ## 4. 数据流
 
 ### 4.1 单一状态源
 
-`useBackend.ts` 是唯一状态管理：
+`useBackend.ts` 是主窗口的状态管理：
 - 订阅 MyGo events → 更新 React state
 - 暴露 `send(action, data)` → 调 Mygo 方法
 
@@ -135,18 +147,30 @@ Go Event → useBackend reducer → React state → 组件渲染
          用户操作 → send() → Go 方法
 ```
 
+非当前会话在 React state 里只留 id、名字、状态、最后一句。点进某个会话，再向 Go 要最近一页（默认 40 条，上限 80）。`agents.json` 仍是完整记录。每个 delta 不写盘；检查点在 loop 里，跟发起模型请求的节奏走，不按 token 落盘。
+
 ### 4.2 事件命名
 
 | 事件 | 方向 | 含义 |
 |---|---|---|
-| `agent.created` | Go → 前端 | 新会话 |
-| `agent.deleted` | Go → 前端 | 删除会话 |
-| `agent.status` | Go → 前端 | 状态变化（idle/running/done/error） |
-| `agent.delta` | Go → 前端 | 流式片段 |
-| `agent.message` | Go → 前端 | 完整消息落定 |
+| `agent.created` / `agent.deleted` | Go → 前端 | 新建 / 删除会话 |
+| `agent.profile` | Go → 前端 | 名字、简介、学习摘要进度 |
+| `agent.status` | Go → 前端 | `idle` / `queued` / `running` / `error` / `blocked` |
+| `agent.delta` | Go → 主窗口 | 流式正文 |
+| `agent.reasoning` | Go → 主窗口 | 流式推理 |
+| `agent.message` | Go → 主窗口 | 完整消息落定 |
 | `agent.error` | Go → 前端 | 错误 |
-| `shell.start` / `shell.result` | Go → 前端 | 命令执行 |
-| `llm.config` / `workdir` | Go → 前端 | 配置变更 |
+| `agent.tool` | Go → 主窗口 | 工具开始 / 结束 |
+| `agent.loop` | Go → 主窗口 | 循环阶段、预算、上下文占用 |
+| `agent.stopped` | Go → 主窗口 | 停止原因 |
+| `agent.config` | Go → 前端 | 会话级模型或目录变更，带完整 `AgentView` |
+| `tool.start` | Go → 主窗口 | 旧的工具开始事件 |
+| `shell.start` / `shell.result` | Go → 主窗口 | 手动执行的命令，整段结果 |
+| `llm.config` / `workdir` | Go → 前端 | 全局配置 |
+| `channel.created` / `channel.deleted` / `channel.message` | Go → 前端 | 频道 |
+| `knowledge.changed` / `knowledge.deleted` | Go → 前端 | 笔记 |
+
+`agent.Manager` 持 `Emitter`，不直接依赖 MyGo。`emitToWindow` 把字符串事件转成强类型 payload。channel / knowledge 也可以在 API 层直接 `Event.Emit`。
 
 ---
 
@@ -154,149 +178,139 @@ Go Event → useBackend reducer → React state → 组件渲染
 
 ### 5.1 实现：Queue + Worker（已落地）
 
+每个 agent 一个带缓冲的队列（32）和一个 worker goroutine。队列满时 `Prompt` 返回错误。
 
-**每个 agent 一个消息队列**：
-
-```go
-type Agent struct {
-    // ... 现有字段 ...
-    queue   chan PromptRequest  // 待处理消息
-    worker  *Worker             // 消费 goroutine
-    status  Status              // idle / running / queued
-}
-
-type Worker struct {
-    agent   *Agent
-    current context.CancelFunc  // 当前任务的取消函数
-}
-
-func (w *Worker) Run() {
-    for req := range w.agent.queue {
-        w.execute(req)  // 阻塞执行，完成后取下一个
-    }
-}
+**状态**：
+```
+idle --入队--> queued --worker 取到--> running --结束--> idle
+                                              |
+                                              +--> error
+running / queued --BlockAgent--> blocked
 ```
 
-**状态机**：
-```
-idle --Prompt--> running --完成--> idle
-  ↑                                  |
-  |-------- Prompt（排队）--------> queued
-```
+一轮正常结束调用 `setIdleOrQueued`：队列空则 `idle`，还有消息则 `queued`。`done` 留在类型里，当前收尾路径不把它当成停留状态。
 
 **用户操作**：
-- **发送**：入队，如果 idle 立即执行，否则 queued
-- **停止**：取消当前 running，清空 queue
-- **跳过**：取消当前，取 queue 下一个
+- **发送**：空闲则马上跑；正在跑时，本会话的新消息在下一步模型调用前插进当前轮（`foldIntoTurn`）。频道消息留到这轮结束再入队
+- **停止**：取消当前执行，并清空还没跑的队列。飞书侧若这条会话正在答，一并停掉
+- 界面把排队中的句子标出来。没有「跳过当前、执行下一条」，也没有把排队项提前或删掉的操作
 
-### 5.2 Agent 间协作（已落地）
+### 5.2 进程内循环（已落地）
 
-**现状**：`Manager.Route(from, to, text)` 已实现，消息带 `[from X]` / `[to X]` 前缀，UI 里显示为路由气泡。
+默认 backend 是 `loop`。`executeLoop` 在工作目录里装配工具，交给 `loop.Runner`：
 
-**能力矩阵**：
+| 工具 | 作用 |
+|---|---|
+| `read_file` / `write_file` / `edit_file` | 只碰工作目录里面的文件 |
+| `bash` | 不读登录脚本。默认 60 秒，超时杀进程组，输出有上限，整段返回 |
+| `web` | 操作内置浏览器。先看控件，再用编号或页面上的文字。`steps` 最多 12 步，中间步骤不把页面交回 |
+| `list_agents` / `ask_agent` / `create_agent` / `delete_agent` | 看会话、等对方答完、建子会话、删自己或自己建的子会话 |
+| `list_notes` / `save_note` | 读知识库、写一条并挂到当前会话 |
+| `set_profile` | 改自己的名字、简介或工作目录 |
 
-| 能力 | 说明 | 实现 |
-|---|---|---|
-| **发现** | 知道有哪些 agent | `Manager.List()` 注入 |
-| **寻址** | @某个 agent | `Message.toAgentId` |
-| **发送** | 主动推消息 | `Manager.Route(from, to, msg)` |
-| **触发** | 让另一个 agent 工作 | `Manager.Prompt(toId, text)` |
+`mock` backend 仍走 `executeMock`，不调用这些工具。loop 配上 mock 或空模型，会直接报「这个会话还没有模型」。没有工作目录，或目录是主目录、盘符根、桌面、文稿、下载、图片、影片、音乐本身，这一轮报错。
 
-**架构**：
-```go
-// Agent 增加协作能力
-type Agent struct {
-    // ... 现有字段 ...
-    manager *Manager  // 反向引用，用于寻址其他 agent
-}
+预算默认 24 轮、64 次工具、10 分钟墙钟。上下文超过窗口时先压缩，保留系统提示和最近大约 8000 token。同一会话的检查点在 `<dataDir>/loop/runs`，本会话消息能接上时可以续跑；频道里的这一轮不续跑。
 
-// Manager 增加路由
-func (m *Manager) Route(fromId, toId, text string) error {
-    msg := Message{
-        From: fromId,
-        To:   toId,
-        Text: text,
-    }
-    // 推给目标 agent 的 queue
-    return m.Prompt(toId, PromptRequest{Text: text})
-}
-```
+工具注册表的 `Approver` 在正式路径上是空的。写操作直接执行。`StatusDenied` 和检查器里的「待批准」样式没有产品入口。
 
-**使用场景**：
-```
-用户: "@Supervisor 实现登录功能"
-Supervisor: "拆解任务：@前端 写UI，@后端 写API"
-  → Manager.Route("supervisor", "frontend", "写登录页面")
-  → Manager.Route("supervisor", "backend", "写登录接口")
-前端: "完成，代码在 login.tsx"
-  → Manager.Route("frontend", "supervisor", "已完成")
-```
+### 5.3 Agent 间协作与父子（已落地）
 
-### 5.3 群聊 vs 私聊（已落地）
+两条路并存：
 
-**两层并存**：
+- `Manager.Route(from, to, text)`：显式把一条消息放进对方队列。界面上是路由气泡
+- 模型工具：`ask_agent` 按名字把任务交给已有会话并等待回复；`create_agent` 新建助手，带 `task` 时会等它做完
 
-```
-频道（Channel）          私聊（DM）
-  #general               @前端 ↔ 用户
-  #frontend              @前端 ↔ @后端
-```
+`ParentID` 记在 `Agent` 上，并进 `Save` / `Load` / `snapshot` / `viewMap`。侧栏按它嵌套。三种子会话都会带上父 id：
 
-**Channel 实现**（`internal/channel/channel.go`）：
-```go
-type Channel struct {
-    ID       string    `json:"id"`
-    Name     string    `json:"name"`
-    Members  []string  `json:"members"`  // agent IDs
-    Messages []Message `json:"messages"` // 共享历史
-}
+- 模型调用 `create_agent`
+- 飞书主会话忙时认领或新建的「…的协助」，同一父会话最多 3 个
+- 学习摘要在还没有子会话、人数也没到 8 时建的「…的学习」。摘要本身是一次单独的模型调用，不进那个子会话的队列。有空闲子会话就用它的名字和模型；已经有子会话但都不空闲，或人数满了，就用本会话的模型
 
-// 发消息到频道：返回创建的消息 + 除发送者外的成员 ID
-// 即使 0 个成员也会记录消息（用户能看到自己发的）
-func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message, []string, error)
-```
-持久化：`<dataDir>/channels.json`；`DeleteAgent` 会调用 `RemoveMember` 清理残留成员。
+会话总数上限 8。`delete_agent` 只能删自己，或自己创建的子会话。互相 `ask_agent` 等待会被拦住。
 
-**前端 UI**：
-- 侧栏加「频道」分组（类似 Slack）
-- 频道视图显示所有成员消息
-- @提及高亮，点击可跳转私聊
+没有 Supervisor。不会读到一句用户消息就自动拆成前端/后端任务。
 
----
+### 5.4 群聊（已落地）
 
-### 5.4 事件广播
+频道在 `internal/channel`。持久化 `<dataDir>/channels.json`。`DeleteAgent` 会 `RemoveMember`。
+
+回合策略：
+
+| 策略 | 谁回 |
+|---|---|
+| `discuss` | 被 @ 的回。没人被 @ 时，只由当前 speaker 接；speaker 空着或不是成员，就没人接 |
+| `direct` | 成员都回 |
+| `roundrobin` | 成员都回 |
+
+`DecideReplies` 是唯一判定。绑定层只投递。领域结论（知识蒸馏命中某一块专业）会发到同名频道，下一轮的系统提示里带上别人在这块记下的几条。
+
+飞书房间不是这里的频道。见 5.7。
+
+### 5.5 事件广播
 
 `agent.Manager` 持 `Emitter` 函数，把事件转成 MyGo `Event.Emit`：
 - 解耦：agent 包不依赖 MyGo
 - 可测试：单测时换成 channel 收集事件
-- `emitToWindow` 只做「字符串事件 → 强类型 payload → Emit」的转发，每个 `toXxx(data)` 是纯函数，`win == nil` 时可单测
-- **新子系统不走 `map[string]any` 协议**：channel / knowledge 事件直接在 API 层用 typed `Event.Emit`
+- `emitToWindow` 只做「字符串事件 → 强类型 payload → Emit」的转发
 
-### 5.5 会话级配置（单一事实源）
-
-配置的作用域是**会话**，不是全局：
+### 5.6 会话级配置（单一事实源）
 
 | 字段 | 作用域 | 回落 |
 |---|---|---|
-| `Agent.WorkDir` | 单会话的 CLI / shell 目录 | 空则用 `Manager.workDir`（全局默认） |
-| `Agent.LLMCfg` | 单会话的模型提供方 / 模型 | `nil` 则用 `Manager.llmCfg`（设置里的默认） |
+| `Agent.WorkDir` | 单会话的工具与 shell 目录 | 空则用 `Manager.workDir` |
+| `Agent.LLMCfg` | 单会话的提供方、模型、推理强度 | `nil` 则用 `Manager.llmCfg` |
 
-前端在 AgentView 头部用两个 chip（📁 / ✦）就地编辑，走 `agent.workDir` / `agent.llm` 协议，
-后端回 `agent.config` 事件（携带完整 `AgentView`）。设置弹窗只保留**外观**与**全局默认提供方**。
+前端在输入栏用 `ModelPicker` 选已经保存的连接，走 `SetAgentLLM`。能思考的模型，强度浮在那一行旁边。设置弹窗管外观、全局默认，以及各 provider 的凭据。凭据不在会话弹层里重填。
 
-> **持久化白名单**：`Agent` 新增字段必须同步 4 处 —— `Save` / `Load` / `snapshot` / `viewMap`，
+> **持久化白名单**：`Agent` 新增字段必须同步 `Save` / `Load` / `snapshot` / `viewMap`，
 > 否则会静默丢字段。`internal/agent/manager_test.go` 的 round-trip 测试守住这个不变量。
 
-### 5.6 知识库
+### 5.7 飞书（已落地）
 
-`internal/knowledge` 提供人类编写的短笔记（约定 / 术语 / 偏好）：
+`internal/feishu.Hub` 让每个机器人各走一条长连接，房间记录共用一份。配置在 `config.json` 的 `feishuBots`（旧的单机器人字段读入后迁过来）。Secret 不回传给设置页。
 
-- 存储：`<dataDir>/knowledge.jsonl`（追加 O(1) 且崩溃安全，删除时整体重写）
-- 注入：`Manager.SetKnowledge(KnowledgeProvider)` —— **接口**注入，`agent` 包零新增依赖
-- 时机：`Create` 时把 top-8 全局笔记前置到 system prompt
-- 运行时：`AttachNoteToAgent` 把单条笔记追加为 system message
+- 启用的机器人必须有 App ID、App Secret 和一个本机会话，否则状态是 error
+- 群可以 `MentionOnly`：只有被 @ 或被回复才回答。私聊照常接
+- 文本、富文本、图片、合并转发会进会话。其它类型回一句「目前只接收文本、富文本和图片」
+- 同一条 `message_id` 重推会被丢掉
+- 权限检查对照：发消息/读历史/标表情、接收单聊、接收群消息、查看所在群。缺了可以打开飞书开通页
+- 用户授权后的令牌留在本机配置里
+- 主会话忙时 `Assist` 挑一个空闲助手；没有就新建，沿用主会话的模型和工作目录。助手满了返回 busy，等这一轮结束再派
+- 模型已经说出的句子和工具行写回飞书卡片
+- `FeishuRoomView` 只展示 `feishu-rooms.json` 里的记录。`SetFeishuRoomAgent` 从下一条起改由另一个本机会话回答
 
----
+### 5.8 内置浏览器（已落地）
+
+`browser.Desk` 用名为 workbench 的 `mygo.Session`，单独窗口。`OpenWorkbench` 和 `web` 工具都走它。地址只接受 `http` / `https` / `about`。登录 cookie 留在这个窗口，不使用用户的 Chrome。页面状态记在 `browser-page.json`。窗口关掉后不再留着，下次打开再创建。
+
+### 5.9 学习摘要（已落地）
+
+一轮结束后 `studyHistory` 在后台跑，不挡住已经显示的回复。最近 8 条留在窗口里，更早的按最多 3 步、每步 20 条或大约 3000 token，用一次单独的模型调用收成摘要。有空闲子会话时记它的名字；否则在没有子会话且人数未满时先建「…的学习」。已经有子会话但都不空闲，或人数满了，就用本会话的模型。摘要里出现、原文里没有的路径会被整句丢掉。结果放在下一轮系统提示的开头，并标出覆盖了前多少条。`LearnBusy` 期间界面能看到还在写。
+
+### 5.10 知识库（已落地）
+
+`internal/knowledge` 用 `<dataDir>/knowledge.jsonl`（追加写，删除时整体重写）。
+
+- 创建会话时**不**注入笔记。首条 system 只说明自己在这个应用里工作
+- 挂到会话上的 id 存在 `Agent.Knowledge`。loop 开始时 `View` 按这些 id 拼进系统提示，预算大约 1600 字
+- 界面按引用人数排序，能挂、能摘
+- `save_note` 和一轮结束后的蒸馏都会写笔记。蒸馏只在模型判断值得长期记住时落盘
+- 最近几轮明显集中在前端 / 后端 / 审查 / 测试时，简介会收成这块。名字里还写着另一块时会改名，并在对话里告诉用户
+
+### 5.11 模型与诊断（已落地）
+
+| Provider | 接入 |
+|---|---|
+| `mock` | 本地规则，假回复 |
+| `llamacpp` | 本机 `llama-server`，默认 `http://127.0.0.1:8080`，不要 API Key |
+| `ollama` | 本机，默认 `http://127.0.0.1:11434` |
+| `openai` / `deepseek` / `claude` | OpenAI 兼容。Claude 需要网关，不是原生接口 |
+| `qoder` | 自己的对话协议。浏览器授权，或 `pt-` Personal Access Token / 访问令牌。默认模型 `DeepSeek-V4-Pro` |
+
+`ListAllModels` 把已保存的连接摊成一份列表。Qoder 用账号拉到的目录，没有目录时用内置表，能思考的模型带推理档位。
+
+`StaleBuild` 只在当前目录像一份源码树（有 `go.mod`，且不是 `/` 或用户主目录）时，把非测试 `.go` 的修改时间和本进程的可执行文件比一下。诊断面板在源码更新、进程还是旧的时提示重启。打包后的进程不做这次扫描，避免碰到桌面和文稿。
 
 ---
 
@@ -312,84 +326,67 @@ func (m *Manager) Broadcast(channelId, fromId, fromName, text string) (*Message,
 - 不在底部：保持当前位置，不强制跳转
 - 用户回到底部：恢复自动跟随
 
-**代码**：
-```tsx
-const pinnedToBottom = useRef(true)
-
-const handleScroll = () => {
-  const el = scrollRef.current
-  if (!el) return
-  const threshold = 40
-  pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
-}
-
-useEffect(() => {
-  if (pinnedToBottom.current) {
-    el.scrollTop = el.scrollHeight
-  }
-}, [streaming])
-```
+主窗口用 `agent.delta` 做流式。
 
 ### 6.2 连续对话
 
-**状态展示**：
-```
-[运行中] 帮我看看 A...        ← 当前执行
-[排队中] 还有 B               ← 等待
-[排队中] 一起总结一下          ← 等待
-```
+正在跑的时候再发，本会话的句子会在下一步模型调用前插进当前轮，输入框会说明这一点。这条用户消息还没落进历史时，界面先标「排队中」。
 
-**操作**：
-- **点击排队项**：可删除或提前
-- **停止按钮**：取消当前 + 清空队列
-- **跳过按钮**：取消当前，执行下一个
+- **停止**：取消当前，并清掉还没插进去、还在队列里的消息
+- 没有单独的「跳过」按钮
 
 ### 6.3 Agent 状态可视化
 
 **侧栏状态点**：
-- 灰色：空闲
-- 橙色闪烁：执行中
-- 蓝色：有排队消息
-- 绿色：完成
-- 红色：出错
+- 灰：空闲
+- 橙、闪：执行中
+- 强调色、闪：排队
+- 红：出错
+- 红、闪：`blocked`，在等人。文案用 `blockedReason`，没有就写「等你处理」
 
-**检查器联动**：
-- 点击 agent → 右侧显示该 agent 的改动/任务/工具
-- 多个 agent 同时运行 → 检查器可切换查看
+正常结束回到灰色空闲，不留一颗绿色的「完成」点。
 
-### 6.4 打断与恢复
+**检查器**：工具、知识两个页。工具行来自 `agent.tool`。没有改动页，也没有任务页。
 
-**用户打断**：
-- 点击「停止」→ 取消当前 stream，agent 状态回 idle
-- 已生成的内容保留（作为 assistant 消息入历史）
-- 未开始的消息仍在队列
+**舰队**：并排看状态、当前任务摘要、最近输出和产出量，不展开完整对话。
 
-**Agent 被打断**（被其他 agent @）：
-- 如果正在执行，新消息排队
-- 如果空闲，立即执行
-- 优先级：用户直接消息 > 其他 agent 消息
+### 6.4 打断
+
+- 点击「停止」取消当前 stream，已生成的内容留在历史里，队列被清空
+- 飞书正在用这个会话写卡片时，停止也会停掉那一轮
+- 用户消息和其它 agent 的消息走同一条队列，没有单独的优先级
 
 ---
 
-## 7. 已知限制 & 下一步
+## 7. 已知限制
 
-| 限制 | 状态 | 位置 |
+| 限制 | 状态 | 说明 |
 |---|---|---|
-| 连续对话会乱序（无队列） | ✅ 完成 | `internal/agent/manager.go` `workerLoop` |
-| agent 不能互相通信 | ✅ 完成 | `Manager.Route` |
-| 会话不持久化 | ✅ 完成 | `Manager.SetStore` / `agents.json` |
-| 无群聊/频道 | ✅ 完成 | `internal/channel` + `ChannelView.tsx` |
-| 配置只能全局设置 | ✅ 完成 | `Agent.WorkDir` / `Agent.LLMCfg` + 会话头部 chip |
-| 无知识库 | ✅ 完成 | `internal/knowledge` + `KnowledgePanel.tsx` |
-| 检查器面板是演示数据 | 🟡 中 | 接 CLI agent 产生真实数据 |
-| agent 不能读写代码 | 🟡 中 | 加 tools 包 |
-| 无 git worktree 隔离 | 🟡 中 | 未开始，需新建包 |
-| LLMCfg 的 API Key 明文落盘 | 🟡 中 | 迁移到 `mygo.Secrets`（`// TODO(secrets)`） |
-| 频道是广播触发，非讨论收敛 | 🟡 中 | 语义保持为「广播」，不做多轮收敛编排 |
+| 每个会话一条队列，连发不乱序 | ✅ 已落地 | `workerLoop`。跑的过程中本会话新消息会插进下一步 |
+| agent 可以互相派活 | ✅ 已落地 | `Route`、`ask_agent`、`create_agent`。没有自动拆任务 |
+| 会话持久化 | ✅ 已落地 | `agents.json`。不是 SQLite |
+| 群聊 | ✅ 已落地 | `discuss` / `direct` / `roundrobin` |
+| 会话级模型与目录 | ✅ 已落地 | 输入栏选择，凭据在设置里 |
+| 知识库 | ✅ 已落地 | 挂上的笔记下一轮注入。创建时不塞全局 top-8 |
+| 读写代码与 shell | ✅ 已落地 | 工作目录内。bash 有 60 秒上限，不流式 |
+| 内置浏览器 | ✅ 已落地 | `web` 工具 + 单独窗口 |
+| 飞书多机器人 | ✅ 已落地 | 长连接、权限、助手认领、房间只读 |
+| 学习摘要 | ✅ 已落地 | 子会话或本会话自己写，不挡当前回复 |
+| 父子会话 | ✅ 已落地 | `ParentID`，侧栏嵌套，总数 8 |
+| Qoder、StaleBuild、模型选择 | ✅ 已落地 | 见 5.11 |
+| 检查器的改动 / 任务 | ❌ 未做 | 页已经拿掉，没有结构化数据 |
+| 工具审批 | ❌ 未做 | `Approver` 未接入正式注册表 |
+| git worktree | ❌ 未做 | 多会话改同一份代码会冲突 |
+| Supervisor 自动拆任务 | ❌ 未做 | 要人分，或由模型自己调用工具 |
+| shell 流式输出；手动命令的超时 | ❌ 未做 | 手动执行只在取消时杀进程组 |
+| API Key / 飞书 Secret 明文 | 🟡 未做迁移 | `config.json` 权限 600；会话 Key 在 `agents.json`。见 `TODO(secrets)` |
+| 历史改 SQLite | ❌ 未做 | 仍是整份 JSON |
+| agent id 改 ULID | ❌ 未做 | `agent-<时间戳>` |
+| 未签名 | 🟡 | Gatekeeper / SmartScreen 会拦 |
 
 ---
 
 ## 8. 参考
 
 - MyGo: https://github.com/egoist/mygo
-- 架构评审历史：`docs/reviews/`
+- 架构评审历史：`docs/reviews/`（提案，不是当前行为）

@@ -59,17 +59,6 @@ export default function App() {
     else s.parkAgents()
   }, [view, active?.kind, active?.id, s.openAgent, s.parkAgents])
 
-  // 悬浮窗点了某个 agent：切过去并清掉请求（否则会反复抢焦点）
-  useEffect(() => {
-    const id = s.focusAgentId
-    if (!id) return
-    if (s.agents.some((a) => a.id === id)) {
-      setActive({ kind: 'agent', id })
-      setView('chat')
-    }
-    s.clearFocus()
-  }, [s.focusAgentId, s.agents, s.clearFocus])
-
   const activeAgent = useMemo(
     () => (active?.kind === 'agent' ? (s.agents.find((a) => a.id === active.id) ?? null) : null),
     [s.agents, active],

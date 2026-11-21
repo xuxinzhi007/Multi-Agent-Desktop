@@ -51,8 +51,6 @@ type State = {
   /** 这一轮模型请求：since 是发出时刻，first 是到首个推理或正文的毫秒，heard 表示先到的是哪一种。 */
   pace: Record<string, { since: number; first?: number; heard?: 'reason' | 'text' }>
   tokenUsage: Record<string, { in: number; out: number; lastIn?: number }>
-  /** 悬浮窗点击 agent 后请求主窗切换到的 agent id；消费方读完应调 clearFocus 清空 */
-  focusAgentId: string | null
   /** 正在看的会话。其它会话不留全文。 */
   opened: string
   /** 已经乐观插入消息、但后端还没回执的 agent */
@@ -81,7 +79,6 @@ const EMPTY: State = {
   reasoning: {},
   pace: {},
   tokenUsage: {},
-  focusAgentId: null,
   opened: '',
   pending: {},
   outbox: {},
@@ -279,7 +276,6 @@ export function useBackend() {
       })),
     )
     // token 级流式片段：累积到 streaming[agentId]，assistant 完整消息到达时清掉。
-    sub(events.agentFocused, ({ agentId }) => setState((s) => ({ ...s, focusAgentId: agentId })))
     sub(events.agentDelta, ({ id, delta, channelId }) => {
       if (!delta || !id) return
       if (channelId) {
@@ -770,11 +766,6 @@ export function useBackend() {
 
   const send = sendImpl as <T = unknown>(action: string, data?: unknown) => Promise<T>
 
-  const clearFocus = useCallback(
-    () => setState((s) => (s.focusAgentId === null ? s : { ...s, focusAgentId: null })),
-    [],
-  )
-
   const openAgent = useCallback((id: string) => {
     if (!id) return
     const ticket = ++pageGen.current
@@ -860,7 +851,7 @@ export function useBackend() {
     }
   }, [refreshNotes])
 
-  return { ...state, send, clearFocus, refreshNotes, openAgent, parkAgents }
+  return { ...state, send, refreshNotes, openAgent, parkAgents }
 }
 
 function oneLine(text?: string) {

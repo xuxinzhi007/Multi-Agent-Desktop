@@ -41,7 +41,7 @@ func TestRealLlamaCppEndToEnd(t *testing.T) {
 	win := &mygo.Window{}
 	var mgr *agent.Manager
 	mgr = agent.NewManager(llm.Config{Provider: "llamacpp", Model: "local"},
-		func(ev string, data any) { emitToWindow(win, nil, mgr, chMgr, ev, data) })
+		func(ev string, data any) { emitToWindow(win, mgr, chMgr, ev, data) })
 	t.Cleanup(func() {
 		for _, a := range mgr.List() {
 			mgr.Stop(a.ID)

@@ -62,7 +62,7 @@ type Agent struct {
 	QueuedAt   int64  `json:"-"` // 进入排队的 Unix 秒，0 表示当前没在排队
 	LastTool   string `json:"-"` // 最近一次工具调用名
 	Chars      int    `json:"-"` // 本轮已生成字符数
-	LastError  string `json:"-"` // 最近一次错误内容（供悬浮岛显示真实原因）
+	LastError  string `json:"-"` // 最近一次错误内容
 	turnKind   string `json:"-"` // ok / error / stopped，本轮结束原因，给等待方读
 	turnReason string `json:"-"`
 	workerGone bool   `json:"-"`
@@ -542,7 +542,7 @@ func (m *Manager) GetKnowledge(agentId string) []string {
 }
 
 // SetBlocked 把 agent 标记为「在等人」（工具审批、需要输入等）。
-// reason 会随事件推给前端，悬浮条据此显示「2 个在等你」。
+// reason 会随状态事件推给前端。
 func (m *Manager) SetBlocked(id, reason string) error {
 	a, ok := m.Get(id)
 	if !ok {

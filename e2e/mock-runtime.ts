@@ -143,11 +143,6 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
           models: ['from-vendor'],
         }
       },
-      'API.IslandResize': () => true,
-      'API.SetScreenAssist': (on) => ({ on: !!on }),
-      'API.LayoutMini': () => undefined,
-      'API.AcceptScreenHint': () => undefined,
-      'API.DismissScreenHint': () => undefined,
       'API.PauseAll': () => 2,
       'API.ResumeAll': () => 0,
       'API.StopAllAgents': () => 2,

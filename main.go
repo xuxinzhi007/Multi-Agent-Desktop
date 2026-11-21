@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,27 +26,23 @@ import (
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/privacy"
 	"multi-agent-desktop/internal/pty"
-	"multi-agent-desktop/internal/screen"
 	"multi-agent-desktop/internal/workdir"
 )
 
 // API 是暴露给前端的全部能力。`mygo generate` 据此生成 typed TS client。
 // 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
 type API struct {
-	mgr        *agent.Manager
-	runner     *pty.Runner
-	channels   *channel.Manager
-	kb         knowledge.Store
-	settings   *config.Store
-	bot        *feishu.Hub
-	win        *mygo.Window
-	islands    *islandSwitch
-	desk       *browser.Desk
-	screen     *screen.Loop
-	screenOnce sync.Once
-	imageDir   string
-	shellMu    sync.Mutex
-	shellBusy  map[string]bool
+	mgr       *agent.Manager
+	runner    *pty.Runner
+	channels  *channel.Manager
+	kb        knowledge.Store
+	settings  *config.Store
+	bot       *feishu.Hub
+	win       *mygo.Window
+	desk      *browser.Desk
+	imageDir  string
+	shellMu   sync.Mutex
+	shellBusy map[string]bool
 }
 
 // Agent 是前端可见的会话视图。
@@ -191,168 +186,6 @@ type ShellResultEvent struct {
 // WorkDirEvent 是工作目录变更。
 type WorkDirEvent struct {
 	Dir string `json:"dir"`
-}
-
-// MiniLogEntry 是灵动岛时间线里的一条日志。
-type MiniLogEntry struct {
-	At     int64  `json:"at"`               // Unix 秒
-	Kind   string `json:"kind"`             // tool / status / error
-	Text   string `json:"text"`             // 已格式化，等宽显示
-	Detail string `json:"detail,omitempty"` // 可选细节（工具参数等）
-}
-
-// MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。
-type MiniAgentStatus struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Role          string `json:"role"`
-	Color         string `json:"color"`
-	Status        string `json:"status"`
-	Task          string `json:"task,omitempty"`          // 当前任务摘要
-	StartedAt     int64  `json:"startedAt,omitempty"`     // 本轮开始时间（Unix 秒）
-	QueuedAt      int64  `json:"queuedAt,omitempty"`      // 进入排队的时刻，0 表示没在排队
-	LastTool      string `json:"lastTool,omitempty"`      // 最近一次工具调用
-	Chars         int    `json:"chars,omitempty"`         // 本轮已生成字符数
-	Progress      int    `json:"progress"`                // 0-100，由状态与产出推算
-	BlockedReason string `json:"blockedReason,omitempty"` // 在等人的原因
-	ErrMsg        string `json:"errMsg,omitempty"`        // 真实错误内容
-	// Dep 是上游依赖的 agent 名字。等待中的 agent 借此说明「在等谁」。
-	Dep  string         `json:"dep,omitempty"`
-	Logs []MiniLogEntry `json:"logs,omitempty"`
-}
-
-// MiniStatus 是迷你窗的完整状态。
-type MiniStatus struct {
-	Agents []MiniAgentStatus `json:"agents"`
-	// Paused 表示全局已被用户暂停（不再自动推进任务）
-	Paused bool `json:"paused"`
-}
-
-// MiniStatusEvent 事件，推给悬浮窗。
-var MiniStatusEvent = mygo.NewEvent[MiniStatus]("mini.status")
-
-// buildMiniStatus 从 Manager 构建迷你窗状态。
-func buildMiniStatus(mgr *agent.Manager) MiniStatus {
-	list := mgr.List()
-	out := make([]MiniAgentStatus, 0, len(list))
-	for _, a := range list {
-		// Snapshot 在 agent 锁内拷贝，避免与 worker 竞争
-		sn := a.Snapshot()
-		st := string(sn.Status)
-		out = append(out, MiniAgentStatus{
-			ID:            sn.ID,
-			Name:          sn.Name,
-			Role:          sn.Role,
-			Color:         sn.Color,
-			Status:        st,
-			Task:          extractTask(sn),
-			StartedAt:     sn.StartedAt,
-			QueuedAt:      sn.QueuedAt,
-			LastTool:      sn.LastTool,
-			Chars:         sn.Chars,
-			Progress:      miniProgress(st, sn.Chars, sn.QueueLen),
-			BlockedReason: sn.BlockedReason,
-			ErrMsg:        sn.LastError,
-			Logs:          miniLogs(sn),
-		})
-	}
-	// 等待中的 agent 标出它在等谁：找它前面那个还在跑的同伴。
-	// 没有显式依赖图时，用「同轮更早开始的 agent」作为上游，可读性远好于空白。
-	for i := range out {
-		if out[i].Status != string(agent.StatusQueued) && out[i].Status != string(agent.StatusBlocked) {
-			continue
-		}
-		for j := range out {
-			if j == i {
-				continue
-			}
-			if out[j].Status == string(agent.StatusRunning) && out[j].StartedAt <= out[i].StartedAt {
-				out[i].Dep = out[j].Name
-				break
-			}
-		}
-	}
-	return MiniStatus{Agents: out, Paused: miniPaused.Load()}
-}
-
-// miniPaused 记录用户是否点了「全部暂停」。
-var miniPaused atomic.Bool
-
-// miniProgress 把状态与产出折算成 0-100，供进度环显示。
-// 没有真实的总量信息，所以只表达「大概走到哪了」，不承诺精确。
-func miniProgress(status string, chars, queueLen int) int {
-	_ = queueLen
-	if status == string(agent.StatusDone) {
-		return 100
-	}
-	if chars <= 0 {
-		return 0
-	}
-	p := chars * 100 / 800
-	if p > 95 {
-		p = 95
-	}
-	if p < 1 {
-		p = 1
-	}
-	return p
-}
-
-// miniLogs 从 agent 历史里抽最近几条作为时间线。
-// 只取 assistant/tool 相关，system 与过长内容不展示。
-func miniLogs(sn *agent.Agent) []MiniLogEntry {
-	const limit = 8
-	var out []MiniLogEntry
-	msgs := sn.Messages
-	for i := len(msgs) - 1; i >= 0 && len(out) < limit; i-- {
-		m := msgs[i]
-		if m.Role == "system" {
-			continue
-		}
-		switch m.Role {
-		case "user":
-			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "status", Text: "› " + firstLine(m.Content)})
-		case "assistant", "tool":
-			out = append(out, MiniLogEntry{At: m.Timestamp, Kind: "tool", Text: firstLine(m.Content)})
-		}
-	}
-	if sn.LastTool != "" {
-		out = append([]MiniLogEntry{{At: time.Now().Unix(), Kind: "tool", Text: sn.LastTool + "(…)"}}, out...)
-	}
-	if sn.LastError != "" {
-		out = append([]MiniLogEntry{{At: time.Now().Unix(), Kind: "error", Text: sn.LastError}}, out...)
-	}
-	return out
-}
-
-// firstLine 取首行并截断，日志里不需要整段正文。
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	s = strings.TrimSpace(s)
-	if len(s) > 72 {
-		return s[:72] + "…"
-	}
-	return s
-}
-
-// extractTask 提取 agent 当前任务摘要。
-func extractTask(a *agent.Agent) string {
-	if a.Status != agent.StatusRunning && a.Status != agent.StatusQueued && a.Status != agent.StatusBlocked {
-		return ""
-	}
-	// 从最后一条 user 消息提取
-	for i := len(a.Messages) - 1; i >= 0; i-- {
-		if a.Messages[i].Role == "user" {
-			text := a.Messages[i].Content
-			if len(text) > 40 {
-				return text[:40] + "…"
-			}
-			return text
-		}
-	}
-	return ""
 }
 
 // ListAgents 返回所有会话。
@@ -620,7 +453,6 @@ func (s *API) DeleteAgent(id string) bool {
 	ok := s.mgr.Delete(id)
 	if ok {
 		s.channels.RemoveMember(id)
-		s.pushMini()
 	}
 	return ok
 }
@@ -636,7 +468,6 @@ func (s *API) StopAgent(id string) bool {
 // PauseAll 暂停所有正在跑/排队的 agent：停止当前执行并清空队列。
 // 返回被暂停的数量，供前端 toast 使用。
 func (s *API) PauseAll() int {
-	miniPaused.Store(true)
 	n := 0
 	for _, a := range s.mgr.List() {
 		sn := a.Snapshot()
@@ -648,21 +479,16 @@ func (s *API) PauseAll() int {
 			n++
 		}
 	}
-	s.pushMini()
 	return n
 }
 
-// ResumeAll 恢复：清掉暂停标记。已停止的 agent 不会自动重跑
-// （那需要重放任务，属于编排层的事），这里只解除全局暂停状态。
+// ResumeAll 不重跑已经停掉的 agent。停掉的那一轮不会自己再开始。
 func (s *API) ResumeAll() int {
-	miniPaused.Store(false)
-	s.pushMini()
 	return 0
 }
 
 // StopAllAgents 停止所有未完成的 agent。
 func (s *API) StopAllAgents() int {
-	miniPaused.Store(false)
 	n := 0
 	for _, a := range s.mgr.List() {
 		sn := a.Snapshot()
@@ -672,19 +498,10 @@ func (s *API) StopAllAgents() int {
 		s.mgr.Stop(sn.ID)
 		n++
 	}
-	s.pushMini()
 	return n
 }
 
-// pushMini 主动推一次迷你窗状态，让全局操作立刻反映到折叠态。
-func (s *API) pushMini() {
-	w := s.currentMini()
-	if w != nil && !w.IsDestroyed() {
-		MiniStatusEvent.Emit(w, buildMiniStatus(s.mgr))
-	}
-}
-
-// BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。
+// BlockAgent 把 agent 标记为「在等人」（工具审批等）。
 func (s *API) BlockAgent(id, reason string) error {
 	return s.mgr.SetBlocked(id, reason)
 }
@@ -823,8 +640,8 @@ func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text
 		return err
 	}
 
-	// 2. 推消息到前端。悬浮岛也要收到，才能把投递画成胶囊里的信封。
-	emitChannelMessage(msg, s.win, s.currentMini())
+	// 2. 推消息到前端。
+	emitChannelMessage(msg, s.win)
 
 	// 3. 取频道快照
 	ch, ok := s.channels.Get(channelId)
@@ -913,7 +730,7 @@ func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text
 		log.Printf("set deliveries: %v", err)
 	} else {
 		// 重发同一 ID 的事件；前端按 ID 去重并覆盖旧记录
-		emitChannelMessage(msg, s.win, s.currentMini())
+		emitChannelMessage(msg, s.win)
 	}
 
 	if len(errs) > 0 {
@@ -2327,95 +2144,6 @@ func (s *API) PickDirectory() string {
 	return paths[0]
 }
 
-// ToggleMiniWindow 在主窗与悬浮岛之间切换。
-//
-// 岛用时才创建。回到主窗口时先让主窗口可见并聚焦，再销毁岛。
-// 创建失败时主窗口保持可见。
-func (s *API) ToggleMiniWindow(show bool) bool {
-	if s.islands == nil {
-		if s.win != nil && !s.win.IsDestroyed() {
-			s.win.Show()
-			s.win.Focus()
-		}
-		return false
-	}
-	ok := s.islands.toggle(show)
-	if ok {
-		s.pushMini()
-	}
-	return ok
-}
-
-func (s *API) currentMini() *mygo.Window {
-	if s == nil || s.islands == nil {
-		return nil
-	}
-	w, _ := s.islands.current().(*mygo.Window)
-	return w
-}
-
-func (s *API) openMini() (surface, error) {
-	var w *mygo.Window
-	err := func() (err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("悬浮岛: %v", r)
-			}
-		}()
-		w = mygo.NewWindow(mygo.WindowOptions{
-			Title:           "Agent 舰队",
-			Width:           islandW,
-			Height:          islandH,
-			MinWidth:        islandW,
-			MaxWidth:        islandW,
-			MinHeight:       islandH,
-			MaxHeight:       islandH,
-			FitContent:      false,
-			Panel:           true,
-			Frameless:       true,
-			AlwaysOnTop:     true,
-			SkipTaskbar:     true,
-			Transparent:     true,
-			BackgroundColor: "#00000000",
-			DisableMove:     false,
-			StateKey:        "mini",
-			URL:             "/mini.html",
-		})
-		return nil
-	}()
-	if err != nil || w == nil {
-		return nil, err
-	}
-	denyPagePermissions(w)
-	w.OnClose(func(*mygo.CloseEvent) {
-		s.islands.showMain()
-	})
-	w.OnClosed(func() {
-		s.islands.clear(w)
-	})
-	s.applyMiniTo(w)
-	return w, nil
-}
-
-// 灵动岛只有胶囊一种尺寸。宽度变化发生在窗口内部，窗口本身不再展开成面板。
-const (
-	islandW = 320
-	islandH = 116
-	hintW   = 340
-	hintH   = 210
-)
-
-// IslandResize 保持悬浮窗为胶囊窗口。
-// 历史版本会在这里把窗口拉到 392×468 的面板；那个形态已经去掉。
-func (s *API) IslandResize(_ bool) bool {
-	w := s.currentMini()
-	if w == nil || w.IsDestroyed() {
-		return false
-	}
-	s.applyMini()
-	return true
-}
-
 // channelFeed 把已经证实的结论发到同名领域频道，并让下一轮读到别人的结论。
 type channelFeed struct {
 	ch  *channel.Manager
@@ -2438,7 +2166,7 @@ func (f *channelFeed) Publish(fromID, fromName, domain, dir, title, body string)
 	if err != nil || f.api == nil {
 		return
 	}
-	emitChannelMessage(msg, f.api.win, f.api.currentMini())
+	emitChannelMessage(msg, f.api.win)
 }
 
 func (f *channelFeed) Recent(domain, exceptID string, limit int) []string {
@@ -2448,8 +2176,7 @@ func (f *channelFeed) Recent(domain, exceptID string, limit int) []string {
 	return f.ch.RecentPosts(domain, exceptID, limit)
 }
 
-// emitChannelMessage 把频道消息同时送给主窗和悬浮岛。
-// 岛上的信封只认这个事件，不在前端编造通信。
+// emitChannelMessage 把频道消息送给主窗口。
 func emitChannelMessage(msg channel.Message, wins ...*mygo.Window) {
 	sent := make([]*mygo.Window, 0, len(wins))
 	for _, w := range wins {
@@ -2470,22 +2197,6 @@ func emitChannelMessage(msg channel.Message, wins ...*mygo.Window) {
 		ChannelMessage.Emit(w, msg)
 	}
 }
-
-// FocusAgent 聚焦主窗口并切换到指定 agent。
-func (s *API) FocusAgent(agentId string) {
-	s.ToggleMiniWindow(false)
-	if s.win != nil && !s.win.IsDestroyed() {
-		AgentFocused.Emit(s.win, AgentFocusedEvent{AgentID: agentId})
-	}
-}
-
-// AgentFocusedEvent 是聚焦 agent 事件。
-type AgentFocusedEvent struct {
-	AgentID string `json:"agentId"`
-}
-
-// AgentFocused 事件。
-var AgentFocused = mygo.NewEvent[AgentFocusedEvent]("agent.focused")
 
 // getStr 从 map 安全取 string。
 func getStr(m map[string]any, key string) string {
@@ -2744,8 +2455,8 @@ func setEmitSpyHook(fn func(event string, data any)) {
 	emitSpyMu.Unlock()
 }
 
-// emitToWindow 把 agent 事件派发到主窗口/迷你窗；win 为 nil 时只做负载解析（便于测试）。
-func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, event string, data any) {
+// emitToWindow 把 agent 事件派发到主窗口；win 为 nil 时只做负载解析（便于测试）。
+func emitToWindow(win *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, event string, data any) {
 	emitSpyMu.RLock()
 	hook := emitSpyHook
 	emitSpyMu.RUnlock()
@@ -2810,10 +2521,6 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 		case "agent.tool":
 			if v, ok := toAgentTool(data); ok {
 				AgentTool.Emit(win, v)
-				if miniWin != nil && !miniWin.IsDestroyed() {
-					AgentTool.Emit(miniWin, v)
-					tellMini("agent.tool")
-				}
 			}
 		case "agent.reasoning":
 			if v, ok := toAgentReasoning(data); ok {
@@ -2836,28 +2543,11 @@ func emitToWindow(win, miniWin *mygo.Window, mgr *agent.Manager, chMgr *channel.
 				// 把 agent 回复写入频道历史
 				if chMgr != nil {
 					if msg, err := chMgr.AddMessage(v.ChannelID, v.AgentID, v.AgentName, v.Text); err == nil {
-						emitChannelMessage(msg, win, miniWin)
+						emitChannelMessage(msg, win)
 					}
 				}
 			}
 		}
-	}
-
-	if miniWin != nil && !miniWin.IsDestroyed() && mgr != nil {
-		switch event {
-		case "agent.created", "agent.deleted", "agent.status", "agent.tool", "agent.loop", "agent.message", "agent.error":
-			MiniStatusEvent.Emit(miniWin, buildMiniStatus(mgr))
-			tellMini("mini.status")
-		}
-	}
-}
-
-// tellMini 只给测试看岛实际收到了哪类事件。
-var miniEmitHook func(string)
-
-func tellMini(event string) {
-	if miniEmitHook != nil {
-		miniEmitHook(event)
 	}
 }
 
@@ -2870,18 +2560,14 @@ func main() {
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	var chMgr *channel.Manager
 	emit := func(event string, data any) {
-		var mini *mygo.Window
-		if api != nil {
-			mini = api.currentMini()
-			if api.bot != nil && (event == "agent.tool" || event == "agent.delta") {
-				if event == "agent.tool" {
-					api.bot.NoteTool(data)
-				} else {
-					api.bot.NoteDelta(data)
-				}
+		if api != nil && api.bot != nil && (event == "agent.tool" || event == "agent.delta") {
+			if event == "agent.tool" {
+				api.bot.NoteTool(data)
+			} else {
+				api.bot.NoteDelta(data)
 			}
 		}
-		emitToWindow(win, mini, mgr, chMgr, event, data)
+		emitToWindow(win, mgr, chMgr, event, data)
 	}
 
 	// 持久化到用户数据目录
@@ -3000,10 +2686,6 @@ func main() {
 			URL:             "/",
 		})
 		api.win = win
-		api.islands = &islandSwitch{
-			main: win,
-			open: api.openMini,
-		}
 
 		// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
 		// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。

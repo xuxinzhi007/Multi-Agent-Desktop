@@ -15,11 +15,6 @@ export interface AgentDiag {
   lastError?: string;
 }
 
-/** AgentFocusedEvent 是聚焦 agent 事件。 */
-export interface AgentFocusedEvent {
-  agentId: string;
-}
-
 /** AgentLoopEvent 是循环的一次结局（done / failed）。 */
 export interface AgentLoopEvent {
   id: string;
@@ -269,53 +264,6 @@ export interface MessageEvent {
   tokensOut?: number;
 }
 
-/** MiniAgentStatus 是迷你悬浮窗显示的 agent 状态。 */
-export interface MiniAgentStatus {
-  id: string;
-  name: string;
-  role: string;
-  color: string;
-  status: string;
-  /** 当前任务摘要 */
-  task?: string;
-  /** 本轮开始时间（Unix 秒） */
-  startedAt?: number;
-  /** 进入排队的时刻，0 表示没在排队 */
-  queuedAt?: number;
-  /** 最近一次工具调用 */
-  lastTool?: string;
-  /** 本轮已生成字符数 */
-  chars?: number;
-  /** 0-100，由状态与产出推算 */
-  progress: number;
-  /** 在等人的原因 */
-  blockedReason?: string;
-  /** 真实错误内容 */
-  errMsg?: string;
-  /** Dep 是上游依赖的 agent 名字。等待中的 agent 借此说明「在等谁」。 */
-  dep?: string;
-  logs?: MiniLogEntry[];
-}
-
-/** MiniLogEntry 是灵动岛时间线里的一条日志。 */
-export interface MiniLogEntry {
-  /** Unix 秒 */
-  at: number;
-  /** tool / status / error */
-  kind: string;
-  /** 已格式化，等宽显示 */
-  text: string;
-  /** 可选细节（工具参数等） */
-  detail?: string;
-}
-
-/** MiniStatus 是迷你窗的完整状态。 */
-export interface MiniStatus {
-  agents: MiniAgentStatus[];
-  /** Paused 表示全局已被用户暂停（不再自动推进任务） */
-  paused: boolean;
-}
-
 /**
  * ModelChoice 是模型列表里的一项。
  *
@@ -415,17 +363,6 @@ export interface Room {
   messages: Line[];
 }
 
-/** ScreenHint 是悬浮岛上的一条协助。截图不在这个结构里。 */
-export interface ScreenHint {
-  on: boolean;
-  text?: string;
-  action?: string;
-  app?: string;
-  seen?: string;
-  busy?: string;
-  err?: string;
-}
-
 /** ShellEvent 是命令开始。 */
 export interface ShellEvent {
   agentId: string;
@@ -496,10 +433,6 @@ export interface WorkDirEvent {
  * 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
  */
 export const API = {
-  /** AcceptScreenHint 把当前这一条交给已有会话去执行。 */
-  acceptScreenHint(): Promise<void> {
-    return call("API.AcceptScreenHint");
-  },
   /** AgentMessages 返回这个会话最近的一页。磁盘上的历史不在这里截断。 */
   agentMessages(id: string, limit: number): Promise<Message[]> {
     return call("API.AgentMessages", id, limit);
@@ -515,7 +448,7 @@ export const API = {
   authorizeFeishuUser(id: string): Promise<FeishuView> {
     return call("API.AuthorizeFeishuUser", id);
   },
-  /** BlockAgent 把 agent 标记为「在等人」（工具审批等），悬浮条会显示红色提示。 */
+  /** BlockAgent 把 agent 标记为「在等人」（工具审批等）。 */
   blockAgent(id: string, reason: string): Promise<void> {
     return call("API.BlockAgent", id, reason);
   },
@@ -569,14 +502,6 @@ export const API = {
   diagnose(): Promise<Diagnostics> {
     return call("API.Diagnose");
   },
-  /** DismissScreenHint 关掉当前这一条，同一画面不会马上再出。 */
-  dismissScreenHint(): Promise<void> {
-    return call("API.DismissScreenHint");
-  },
-  /** FocusAgent 聚焦主窗口并切换到指定 agent。 */
-  focusAgent(agentId: string): Promise<void> {
-    return call("API.FocusAgent", agentId);
-  },
   /** GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。 */
   getAgentConfig(agentId: string): Promise<Config> {
     return call("API.GetAgentConfig", agentId);
@@ -604,17 +529,6 @@ export const API = {
   /** IsAlwaysOnTop 返回窗口是否置顶。 */
   isAlwaysOnTop(): Promise<boolean> {
     return call("API.IsAlwaysOnTop");
-  },
-  /**
-   * IslandResize 保持悬浮窗为胶囊窗口。
-   * 历史版本会在这里把窗口拉到 392×468 的面板；那个形态已经去掉。
-   */
-  islandResize(arg0: boolean): Promise<boolean> {
-    return call("API.IslandResize", arg0);
-  },
-  /** LayoutMini 在胶囊高度上再加一块，用来放气泡和「正在看哪里」。 */
-  layoutMini(extra: number): Promise<void> {
-    return call("API.LayoutMini", extra);
   },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");
@@ -713,10 +627,7 @@ export const API = {
   queryNotes(q: Query): Promise<Note[]> {
     return call("API.QueryNotes", q);
   },
-  /**
-   * ResumeAll 恢复：清掉暂停标记。已停止的 agent 不会自动重跑
-   * （那需要重放任务，属于编排层的事），这里只解除全局暂停状态。
-   */
+  /** ResumeAll 不重跑已经停掉的 agent。停掉的那一轮不会自己再开始。 */
   resumeAll(): Promise<number> {
     return call("API.ResumeAll");
   },
@@ -788,10 +699,6 @@ export const API = {
   setLLMConfig(cfg: Config): Promise<Config> {
     return call("API.SetLLMConfig", cfg);
   },
-  /** SetScreenAssist 打开或关掉看屏幕。没打开时不截屏。 */
-  setScreenAssist(on: boolean): Promise<ScreenHint> {
-    return call("API.SetScreenAssist", on);
-  },
   /** SetWorkDir 切换全局 shell 工作目录（新建会话的默认值），并落盘。 */
   setWorkDir(dir: string): Promise<string> {
     return call("API.SetWorkDir", dir);
@@ -807,15 +714,6 @@ export const API = {
   /** StopAllAgents 停止所有未完成的 agent。 */
   stopAllAgents(): Promise<number> {
     return call("API.StopAllAgents");
-  },
-  /**
-   * ToggleMiniWindow 在主窗与悬浮岛之间切换。
-   *
-   * 岛用时才创建。回到主窗口时先让主窗口可见并聚焦，再销毁岛。
-   * 创建失败时主窗口保持可见。
-   */
-  toggleMiniWindow(show: boolean): Promise<boolean> {
-    return call("API.ToggleMiniWindow", show);
   },
   /** UnblockAgent 解除「在等人」状态。 */
   unblockAgent(id: string): Promise<void> {
@@ -860,10 +758,4 @@ export const events = {
   /** 知识库事件。 */
   knowledgeChanged: event<Note>("knowledge.changed"),
   knowledgeDeleted: event<string>("knowledge.deleted"),
-  /** MiniStatusEvent 事件，推给悬浮窗。 */
-  miniStatus: event<MiniStatus>("mini.status"),
-  /** AgentFocused 事件。 */
-  agentFocused: event<AgentFocusedEvent>("agent.focused"),
-  /** ScreenHintEvent 推给悬浮岛。 */
-  screenHint: event<ScreenHint>("screen.hint"),
 } as const;

@@ -646,13 +646,6 @@ export default function Sidebar(p: Props) {
         >
           <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
         </button>
-        <button
-          className="c-btn c-btn--ghost c-btn--full"
-          onClick={() => API.toggleMiniWindow(true)}
-          title="缩小到悬浮条"
-        >
-          ─ 缩小到悬浮条
-        </button>
       </div>
 
       {/* 新建 Agent 弹窗 */}
