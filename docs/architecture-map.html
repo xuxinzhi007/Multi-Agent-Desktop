@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multi-agent-desktop · 架构与链路可视化</title>
+<style>
+:root{
+  --bg:#080b10;
+  --bg-2:#0c1118;
+  --panel:#101823;
+  --panel-2:#0d141d;
+  --line:#1d2a39;
+  --line-2:#27384b;
+  --text:#e8f0f8;
+  --text-2:#9db0c4;
+  --text-3:#63788f;
+  --teal:#3ee0b6;
+  --cyan:#5ec8ff;
+  --amber:#ffb95e;
+  --rose:#ff7a8a;
+  --violet:#a99bff;
+  --mono:"JetBrains Mono","SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --r:14px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:var(--sans);font-size:15px;line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(900px 500px at 12% -8%,rgba(62,224,182,.10),transparent 60%),
+    radial-gradient(800px 420px at 92% 0%,rgba(94,200,255,.09),transparent 62%),
+    linear-gradient(180deg,#080b10 0%,#080b10 100%);
+  background-attachment:fixed;
+}
+::selection{background:rgba(62,224,182,.25)}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1200px;margin:0 auto;padding:0 28px 96px}
+/* ---------- 顶栏 ---------- */
+.topbar{
+  position:sticky;top:0;z-index:40;
+  backdrop-filter:blur(14px);
+  background:rgba(8,11,16,.82);
+  border-bottom:1px solid var(--line);
+}
+.topbar-in{max-width:1200px;margin:0 auto;padding:0 28px;display:flex;align-items:center;gap:22px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;flex:none}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px var(--teal)}
+.brand b{font-size:14px;letter-spacing:.02em;font-weight:600}
+.brand span{font-size:11px;color:var(--text-3);font-family:var(--mono)}
+.nav{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;flex:1}
+.nav::-webkit-scrollbar{display:none}
+.nav a{
+  padding:7px 11px;border-radius:8px;font-size:12.5px;color:var(--text-2);
+  white-space:nowrap;transition:.18s;flex:none;
+}
+.nav a:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.nav a.on{color:var(--teal);background:rgba(62,224,182,.10)}
+/* ---------- Hero ---------- */
+.hero{padding:64px 0 34px}
+.kicker{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--teal);
+  border:1px solid rgba(62,224,182,.28);background:rgba(62,224,182,.07);
+  padding:5px 11px;border-radius:999px}
+.hero h1{
+  font-size:clamp(30px,4.6vw,50px);line-height:1.18;margin:20px 0 14px;font-weight:700;
+  letter-spacing:-.02em;
+}
+.hero h1 em{
+  font-style:normal;
+  background:linear-gradient(96deg,#3ee0b6 0%,#5ec8ff 55%,#a99bff 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero p.lead{max-width:760px;color:var(--text-2);font-size:16.5px;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.chip{
+  font-family:var(--mono);font-size:11.5px;color:var(--text-2);
+  border:1px solid var(--line);background:rgba(255,255,255,.025);
+  padding:4px 10px;border-radius:7px;
+}
+.chip b{color:var(--text);font-weight:600}
+/* ---------- 统计卡 ---------- */
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-top:34px}
+.stat{
+  border:1px solid var(--line);border-radius:12px;padding:16px 16px 14px;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));
+  transition:.2s;
+}
+.stat:hover{border-color:var(--line-2);transform:translateY(-2px)}
+.stat .n{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1.2;
+  background:linear-gradient(100deg,#3ee0b6,#5ec8ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat .l{font-size:11.5px;color:var(--text-3);margin-top:5px;letter-spacing:.02em}
+/* ---------- Section ---------- */
+section{scroll-margin-top:80px;padding-top:54px}
+.sec-head{display:flex;align-items:flex-end;gap:16px;margin-bottom:8px}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--teal);letter-spacing:.1em;padding-bottom:6px}
+.sec-head h2{font-size:clamp(21px,2.6vw,27px);margin:0;font-weight:650;letter-spacing:-.01em}
+.sec-sub{color:var(--text-3);font-size:13.5px;margin:0 0 26px;max-width:820px}
+h3{font-size:15px;font-weight:600;margin:0 0 12px;letter-spacing:.01em}
+.card{
+  border:1px solid var(--line);border-radius:var(--r);
+  background:linear-gradient(180deg,#101823,#0c131b);
+  padding:20px 22px;
+}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.mono{font-family:var(--mono)}
+.muted{color:var(--text-3)}
+.small{font-size:12.5px}
+/* ---------- 分层 ---------- */
+.layers{display:flex;flex-direction:column;gap:8px}
+.layer{
+  position:relative;display:grid;grid-template-columns:168px 1fr;gap:20px;
+  border:1px solid var(--line);border-radius:12px;padding:16px 20px 16px 24px;
+  background:linear-gradient(90deg,rgba(255,255,255,.035),rgba(255,255,255,.008));
+  transition:.2s;
+}
+.layer::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;background:var(--c,var(--teal))}
+.layer:hover{border-color:var(--line-2);background:linear-gradient(90deg,rgba(255,255,255,.055),rgba(255,255,255,.012))}
+.layer .lname{font-size:13px;font-weight:600;color:var(--text)}
+.layer .lname small{display:block;font-family:var(--mono);font-size:10.5px;color:var(--text-3);font-weight:400;margin-top:3px}
+.layer .lbody{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.tag{
+  font-family:var(--mono);font-size:11.5px;padding:3px 9px;border-radius:6px;
+  border:1px solid var(--line);color:var(--text-2);background:rgba(0,0,0,.24);
+}
+.tag.hl{color:var(--text);border-color:var(--line-2);background:rgba(255,255,255,.04)}
+.lnote{width:100%;color:var(--text-3);font-size:12.5px;margin-top:2px}
+/* ---------- 进程图 ---------- */
+.proc{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-top:16px}
+.subsys{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.sys{border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:rgba(255,255,255,.02)}
+.sys b{display:block;font-family:var(--mono);font-size:11.5px;color:var(--text)}
+.sys span{font-size:11px;color:var(--text-3)}
+/* ---------- 依赖图 ---------- */
+.graph{
+  position:relative;border:1px solid var(--line);border-radius:var(--r);
+  background:
+    radial-gradient(600px 300px at 50% 0%,rgba(94,200,255,.06),transparent 70%),
+    linear-gradient(180deg,#0d141d,#0a1017);
+  padding:26px 22px 30px;overflow:hidden;
+}
+#edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.grow{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px 8px;position:relative;z-index:2;max-width:1000px;margin:0 auto}
+.gnode{
+  border:1px solid var(--line);border-radius:10px;padding:9px 10px;
+  background:rgba(16,24,35,.92);cursor:default;transition:.16s;
+  grid-column:span 1;
+}
+.gnode:hover,.gnode.lit{border-color:var(--teal);box-shadow:0 0 0 1px rgba(62,224,182,.25),0 6px 20px rgba(0,0,0,.35)}
+.gnode .gn{font-family:var(--mono);font-size:12px;color:var(--text);font-weight:600}
+.gnode .gd{font-size:10.5px;color:var(--text-3);line-height:1.45;margin-top:2px}
+.gnode.root{border-color:rgba(94,200,255,.4);background:rgba(20,32,46,.95)}
+.gnode.root .gn{color:var(--cyan)}
+.gnode.ext{border-style:dashed;background:rgba(12,18,26,.85);opacity:.85}
+.gnode.ext .gn{color:#b9d7ef}
+.gspan2{grid-column:span 2}
+.gcenter{display:flex;justify-content:center}
+.glegend{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;font-size:11.5px;color:var(--text-3)}
+.glegend i{display:inline-block;width:18px;height:0;border-top:1px solid var(--line-2);vertical-align:middle;margin-right:6px}
+/* ---------- 链路步进器 ---------- */
+.stepper{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+.step{
+  font-family:var(--mono);font-size:11.5px;padding:7px 12px;border-radius:8px;
+  border:1px solid var(--line);color:var(--text-2);background:rgba(255,255,255,.022);
+  cursor:pointer;transition:.16s;display:flex;align-items:center;gap:7px;
+}
+.step i{font-style:normal;color:var(--text-3);font-size:10px}
+.step:hover{border-color:var(--line-2);color:var(--text)}
+.step.on{color:#06110e;background:linear-gradient(100deg,#3ee0b6,#5ec8ff);border-color:transparent;font-weight:600}
+.step.on i{color:rgba(6,17,14,.6)}
+.flow-body{display:grid;grid-template-columns:1fr 340px;gap:14px;align-items:start}
+.flow-detail{min-height:320px}
+.fd-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.fd-head h3{margin:0;font-size:16px}
+.badge{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--text-3)}
+.badge.go{color:var(--cyan);border-color:rgba(94,200,255,.3);background:rgba(94,200,255,.08)}
+.badge.ui{color:var(--amber);border-color:rgba(255,185,94,.3);background:rgba(255,185,94,.08)}
+.fd-path{font-family:var(--mono);font-size:11.5px;color:var(--text-3);margin:2px 0 14px;word-break:break-all}
+.fd-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.fd-list li{position:relative;padding-left:18px;font-size:13.5px;color:var(--text-2);line-height:1.65}
+.fd-list li::before{content:"";position:absolute;left:0;top:8px;width:6px;height:6px;border-radius:2px;background:var(--teal);opacity:.65}
+.fd-list li b{color:var(--text);font-weight:600}
+.fd-list li code{
+  font-family:var(--mono);font-size:12px;color:#b9e8ff;background:rgba(94,200,255,.09);
+  padding:1px 5px;border-radius:4px;
+}
+.fd-out{margin-top:16px;border-top:1px dashed var(--line);padding-top:13px;font-size:12.5px;color:var(--text-3)}
+.fd-out b{color:var(--text-2)}
+.fd-note{margin-top:18px;padding:12px 14px;border:1px dashed var(--line);border-radius:9px;background:rgba(255,255,255,.018);font-size:12px;color:var(--text-3);line-height:1.75}
+.fd-note b{color:var(--text-2)}
+.fd-note code{font-family:var(--mono);font-size:11.5px;color:#b9e8ff}
+.rail{display:flex;flex-direction:column;gap:6px}
+.rail-item{
+  display:grid;grid-template-columns:26px 1fr;gap:10px;align-items:start;
+  padding:6px 8px;border-radius:7px;cursor:pointer;transition:.15s;
+  border:1px solid transparent;
+}
+.rail-item:hover{background:rgba(255,255,255,.03)}
+.rail-item.on{background:rgba(62,224,182,.07);border-color:rgba(62,224,182,.2)}
+.rail-item .rn{font-family:var(--mono);font-size:10.5px;color:var(--text-3);padding-top:3px}
+.rail-item.on .rn{color:var(--teal)}
+.rail-item .rt{font-size:12.5px;color:var(--text-2);line-height:1.5}
+.rail-item.on .rt{color:var(--text)}
+.playbar{display:flex;gap:8px;margin-top:14px}
+.btn{
+  font-family:var(--mono);font-size:11.5px;padding:7px 12px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--text-2);transition:.16s;
+}
+.btn:hover{color:var(--text);border-color:var(--line-2);background:rgba(255,255,255,.06)}
+.btn.pri{color:var(--teal);border-color:rgba(62,224,182,.3);background:rgba(62,224,182,.08)}
+/* ---------- 循环 ---------- */
+.loopgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.lcard{border:1px solid var(--line);border-radius:11px;padding:15px 17px;background:rgba(255,255,255,.02);position:relative}
+.lcard .ln{
+  font-family:var(--mono);font-size:10.5px;color:var(--teal);letter-spacing:.06em;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.lcard .ln span{color:var(--text-3);letter-spacing:0}
+.lcard b{display:block;font-size:13.5px;margin:6px 0 5px}
+.lcard p{margin:0;font-size:12.5px;color:var(--text-3);line-height:1.62}
+.lcard code{font-family:var(--mono);font-size:11.5px;color:#b9e8ff;background:rgba(94,200,255,.08);padding:1px 4px;border-radius:3px}
+.meters{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.meter{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:rgba(255,255,255,.02)}
+.meter .mv{font-family:var(--mono);font-size:18px;color:var(--text)}
+.meter .mv small{font-size:11px;color:var(--text-3)}
+.meter .ml{font-size:11px;color:var(--text-3);margin-top:2px}
+.meter .bar{height:3px;border-radius:3px;background:rgba(255,255,255,.06);margin-top:9px;overflow:hidden}
+.meter .bar i{display:block;height:100%;background:linear-gradient(90deg,#3ee0b6,#5ec8ff)}
+/* ---------- 状态机 ---------- */
+.fsm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px}
+.st{
+  font-family:var(--mono);font-size:11.5px;padding:5px 11px;border-radius:6px;
+  border:1px solid var(--line);color:var(--text-2);background:rgba(255,255,255,.03);
+}
+.st.idle{color:#9db0c4}
+.st.queued{color:var(--amber);border-color:rgba(255,185,94,.3);background:rgba(255,185,94,.07)}
+.st.running{color:var(--teal);border-color:rgba(62,224,182,.3);background:rgba(62,224,182,.07)}
+.st.error{color:var(--rose);border-color:rgba(255,122,138,.3);background:rgba(255,122,138,.07)}
+.st.blocked{color:#ff9d6b;border-color:rgba(255,157,107,.3);background:rgba(255,157,107,.07)}
+.ar{font-family:var(--mono);font-size:11px;color:var(--text-3)}
+/* ---------- 表格 ---------- */
+.tbl-wrap{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:rgba(13,20,29,.6)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{
+  text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-3);font-weight:500;padding:11px 14px;
+  border-bottom:1px solid var(--line);background:rgba(255,255,255,.02);white-space:nowrap;
+}
+td{padding:10px 14px;border-bottom:1px solid rgba(29,42,57,.55);color:var(--text-2);vertical-align:top;line-height:1.55}
+tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:rgba(255,255,255,.022)}
+td code,.mono-c{font-family:var(--mono);font-size:11.8px;color:#b9e8ff}
+td b{color:var(--text);font-weight:600}
+.pill{
+  display:inline-block;font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:20px;
+  border:1px solid var(--line);color:var(--text-3);white-space:nowrap;
+}
+.pill.r{color:#8fe3ff;border-color:rgba(94,200,255,.28);background:rgba(94,200,255,.06)}
+.pill.w{color:var(--amber);border-color:rgba(255,185,94,.28);background:rgba(255,185,94,.06)}
+.pill.x{color:#ff9d6b;border-color:rgba(255,157,107,.28);background:rgba(255,157,107,.06)}
+.pill.n{color:var(--teal);border-color:rgba(62,224,182,.28);background:rgba(62,224,182,.06)}
+.pill.s{color:var(--violet);border-color:rgba(169,155,255,.3);background:rgba(169,155,255,.07)}
+/* ---------- 缺口 ---------- */
+.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.dlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.dlist li{display:grid;grid-template-columns:20px 1fr;gap:9px;font-size:13px;color:var(--text-2);line-height:1.6}
+.dlist li .ic{font-family:var(--mono);font-size:12px;line-height:1.7}
+.dlist.ok .ic{color:var(--teal)}
+.dlist.no .ic{color:var(--rose)}
+.dlist li b{color:var(--text);font-weight:600}
+.dlist li small{display:block;color:var(--text-3);font-size:11.5px}
+footer{margin-top:64px;padding-top:22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;color:var(--text-3);font-size:12px}
+footer .mono{font-size:11.5px}
+/* ---------- 响应式 ---------- */
+@media(max-width:1020px){
+  .stats{grid-template-columns:repeat(3,1fr)}
+  .flow-body,.proc,.split{grid-template-columns:1fr}
+  .grow{grid-template-columns:repeat(3,1fr)}
+  .gnode[data-col="4"],.gnode[data-col="5"]{grid-column:span 1}
+}
+@media(max-width:720px){
+  .wrap{padding:0 18px 72px}
+  .topbar-in{padding:0 18px;gap:12px}
+  .brand span{display:none}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .layer{grid-template-columns:1fr;gap:8px}
+  .subsys,.loopgrid,.meters{grid-template-columns:1fr}
+  .grid2,.grid3{grid-template-columns:1fr}
+  .grow{grid-template-columns:1fr 1fr}
+  #edges{display:none}
+  .hero{padding:40px 0 22px}
+}
+@media(prefers-reduced-motion:reduce){
+  *{transition:none!important;scroll-behavior:auto!important}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <div class="brand"><span class="dot"></span><b>multi-agent-desktop</b><span>v0.4.0</span></div>
+    <nav class="nav" id="nav">
+      <a href="#overview">概览</a>
+      <a href="#layers">分层架构</a>
+      <a href="#deps">依赖图谱</a>
+      <a href="#flow">请求全链路</a>
+      <a href="#loop">执行循环</a>
+      <a href="#tools">工具与模型</a>
+      <a href="#data">数据与事件</a>
+      <a href="#limits">边界与缺口</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- ============ 01 概览 ============ -->
+  <header class="hero" id="overview">
+    <span class="kicker">Architecture Map · 2026-11-21</span>
+    <h1>一个 Go 进程，<em>一队会干活的 agent</em></h1>
+    <p class="lead">
+      跨平台多 Agent 开发工具桌面程序。单 Go 进程承载全部会话、循环与工具，React 19 前端通过 MyGo 的
+      typed IPC 直接调用 Go 方法；没有 WebSocket，没有跨进程序列化。本页把代码里真实存在的架构、完整请求链路与执行循环整理成一张可交互的地图。
+    </p>
+    <div class="meta">
+      <span class="chip">壳 <b>MyGo</b> · 无 cgo</span>
+      <span class="chip">前端 <b>React 19 + Vite</b></span>
+      <span class="chip">后端 <b>单 Go 进程</b></span>
+      <span class="chip">通信 <b>typed IPC</b></span>
+      <span class="chip">模块 <b>13 个 internal 包</b></span>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="n">16.7k</div><div class="l">Go 生产代码行 · 48 文件</div></div>
+      <div class="stat"><div class="n">9.0k</div><div class="l">Go 测试行 · 303 个 Test</div></div>
+      <div class="stat"><div class="n">9.0k</div><div class="l">前端 TS/TSX 行 · 37 文件</div></div>
+      <div class="stat"><div class="n">64</div><div class="l">公开 API 方法 · 共 79 个</div></div>
+      <div class="stat"><div class="n">22</div><div class="l">声明的强类型事件</div></div>
+      <div class="stat"><div class="n">8</div><div class="l">并行会话上限</div></div>
+    </div>
+  </header>
+
+  <!-- ============ 02 分层架构 ============ -->
+  <section id="layers">
+    <div class="sec-head"><span class="sec-num">02</span><h2>分层架构：职责只写在应该写的那一层</h2></div>
+    <p class="sec-sub">
+      从上到下六层。绑定层不做业务判断，「谁该回」这类规则只存在于 <span class="mono">channel.DecideReplies</span> 一个纯函数里，
+      业务层不依赖 UI，基础设施层只面对外部世界。
+    </p>
+
+    <div class="layers">
+      <div class="layer" style="--c:#5ec8ff">
+        <div class="lname">壳层<small>MyGo v0.9.0</small></div>
+        <div class="lbody">
+          <span class="tag hl">原生窗口</span><span class="tag hl">typed IPC</span><span class="tag">打包 dmg / exe / deb+rpm+AppImage</span>
+          <span class="tag">纯 Go 无 cgo</span>
+          <p class="lnote">选 MyGo 而放弃 Tauri 2 的原因：Tauri 必须在目标平台上打包，MyGo 一条命令就能交叉编译三端。UI 好看取决于 CSS 变量与组件设计，不取决于 Chromium。</p>
+        </div>
+      </div>
+
+      <div class="layer" style="--c:#3ee0b6">
+        <div class="lname">绑定层<small>main.go · API</small></div>
+        <div class="lbody">
+          <span class="tag hl">64 个公开 API 方法</span><span class="tag hl">22 个 mygo.NewEvent</span><span class="tag">emitToWindow</span><span class="tag">参数校验 / 错误转换</span>
+          <p class="lnote">mygo.Bind(API{}) 把方法直接暴露成前端可调用的 typed client（src/mygo.ts 由 mygo generate 生成）。这一层只负责投递与回填，不重新实现业务规则。</p>
+        </div>
+      </div>
+
+      <div class="layer" style="--c:#a99bff">
+        <div class="lname">业务层<small>会话 · 循环 · 频道 · 知识 · 飞书</small></div>
+        <div class="lbody">
+          <span class="tag hl">internal/agent</span><span class="tag hl">internal/loop</span><span class="tag hl">internal/channel</span><span class="tag hl">internal/knowledge</span><span class="tag hl">internal/feishu</span>
+          <p class="lnote">会话队列与父子关系、受治理的执行循环、群聊回合判定、JSONL 知识库、飞书多机器人长连接——真正的业务判断都在这一层完成。</p>
+        </div>
+      </div>
+
+      <div class="layer" style="--c:#ffb95e">
+        <div class="lname">基础设施层<small>模型 · 工具 · 浏览器 · shell</small></div>
+        <div class="lbody">
+          <span class="tag hl">internal/llm</span><span class="tag hl">internal/tool</span><span class="tag hl">internal/tool/builtin</span><span class="tag hl">internal/tool/web</span><span class="tag hl">internal/browser</span><span class="tag hl">internal/pty</span><span class="tag">config</span><span class="tag">proc</span><span class="tag">workdir</span><span class="tag">privacy</span>
+          <p class="lnote">七个 provider 共用一份连接池；工具注册表带 schema 校验、调用去重与头尾截断；内置浏览器是独立 WebView，不可信页面不并进主窗口。</p>
+        </div>
+      </div>
+
+      <div class="layer" style="--c:#ff7a8a">
+        <div class="lname">前端<small>React 19 + Vite</small></div>
+        <div class="lbody">
+          <span class="tag hl">src/lib/useBackend.ts</span><span class="tag hl">src/components/* · 24 个组件</span><span class="tag">src/mygo.ts（生成物，勿手改）</span><span class="tag">index.css 设计 token</span>
+          <p class="lnote">useBackend 是主窗口唯一状态源：订阅事件 → reducer → React state → 组件渲染。非当前会话只留 id、名字、状态和最后一句，点进去再向 Go 要最近一页（默认 40 条，上限 80）。</p>
+        </div>
+      </div>
+
+      <div class="layer" style="--c:#63788f">
+        <div class="lname">外部依赖<small>进程之外</small></div>
+        <div class="lbody">
+          <span class="tag">llama-server :8080</span><span class="tag">Ollama :11434</span><span class="tag">OpenAI 兼容网关</span><span class="tag">Qoder 自有协议</span><span class="tag">飞书开放平台</span><span class="tag">内置 WebView 登录态</span>
+          <p class="lnote">本地模型刻意不拉进应用进程。Qoder 不是兼容接口，走自己的对话协议，支持浏览器授权或 pt- 开头的访问令牌。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="proc">
+      <div class="card">
+        <h3>进程模型：Go 主进程内部的九个常驻子系统</h3>
+        <div class="subsys">
+          <div class="sys"><b>agent.Manager</b><span>N 个会话，每个一个 worker</span></div>
+          <div class="sys"><b>loop.Runner</b><span>受治理循环：停止 / 预算 / 检查点</span></div>
+          <div class="sys"><b>tool.Registry</b><span>文件、bash、web、会话与笔记工具</span></div>
+          <div class="sys"><b>llm.Client</b><span>mock / llama.cpp / ollama / 兼容 / Qoder</span></div>
+          <div class="sys"><b>channel.Manager</b><span>频道、回合策略、领域板</span></div>
+          <div class="sys"><b>feishu.Hub</b><span>每个机器人一条长连接</span></div>
+          <div class="sys"><b>browser.Desk</b><span>内置浏览器，单独窗口</span></div>
+          <div class="sys"><b>pty.Runner</b><span>界面上手动执行的 shell</span></div>
+          <div class="sys"><b>knowledge.Store</b><span>笔记 JSONL</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>两块 WebView，从不合并</h3>
+        <div class="fsm" style="flex-direction:column;align-items:flex-start;gap:10px">
+          <span class="st running">主窗口 · 会话 / 舰队 / 频道 / 检查器</span>
+          <span class="ar">↕ 各自独立，登录态不共享</span>
+          <span class="st queued">内置浏览器 · workbench 会话</span>
+        </div>
+        <p class="small muted" style="margin:14px 0 0">浏览器页面不可信，因此不并进主 WebView；登录 cookie 留在 workbench，不碰用户的 Chrome。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 03 依赖图谱 ============ -->
+  <section id="deps">
+    <div class="sec-head"><span class="sec-num">03</span><h2>包依赖图谱：箭头指向被依赖方</h2></div>
+    <p class="sec-sub">把 <span class="mono">internal/*</span> 的真实 import 关系摊平：越往下越接近叶子，越干净。悬停任一节点会点亮它的入边与出边。</p>
+
+    <div class="graph" id="graph">
+      <svg id="edges"></svg>
+      <div class="grow">
+        <div class="gnode root" data-id="main" style="grid-column:2 / 7; grid-row:1"><div class="gn">main.go · API</div><div class="gd">绑定 · 事件 · 窗口 · 飞书 / 浏览器接线</div></div>
+
+        <div class="gnode" data-id="agent" style="grid-column:2; grid-row:2"><div class="gn">agent</div><div class="gd">会话 / 队列 / 父子 / 学习摘要</div></div>
+        <div class="gnode" data-id="channel" style="grid-column:3; grid-row:2"><div class="gn">channel</div><div class="gd">频道 · 回合判定</div></div>
+        <div class="gnode" data-id="config" style="grid-column:4; grid-row:2"><div class="gn">config</div><div class="gd">config.json</div></div>
+        <div class="gnode" data-id="feishu" style="grid-column:5; grid-row:2"><div class="gn">feishu</div><div class="gd">多机器人长连接</div></div>
+        <div class="gnode" data-id="knowledge" style="grid-column:6; grid-row:2"><div class="gn">knowledge</div><div class="gd">知识库 JSONL</div></div>
+
+        <div class="gnode" data-id="loop" style="grid-column:2; grid-row:3"><div class="gn">loop</div><div class="gd">受治理循环</div></div>
+        <div class="gnode" data-id="llm" style="grid-column:3; grid-row:3"><div class="gn">llm</div><div class="gd">7 个 provider 适配</div></div>
+        <div class="gnode" data-id="privacy" style="grid-column:4; grid-row:3"><div class="gn">privacy</div><div class="gd">macOS 隐私权限</div></div>
+        <div class="gnode ext" data-id="lark" style="grid-column:5; grid-row:3"><div class="gn">飞书开放平台</div><div class="gd">长连接 · 权限 · 卡片</div></div>
+        <div class="gnode ext" data-id="models" style="grid-column:6; grid-row:3"><div class="gn">模型服务</div><div class="gd">llama.cpp · Ollama · 云 API</div></div>
+
+        <div class="gnode" data-id="tool" style="grid-column:2; grid-row:4"><div class="gn">tool</div><div class="gd">注册表 + builtin + web</div></div>
+
+        <div class="gnode" data-id="browser" style="grid-column:1; grid-row:5"><div class="gn">browser</div><div class="gd">workbench WebView</div></div>
+        <div class="gnode" data-id="proc" style="grid-column:2; grid-row:5"><div class="gn">proc</div><div class="gd">进程组 / shell 选择</div></div>
+        <div class="gnode" data-id="workdir" style="grid-column:3; grid-row:5"><div class="gn">workdir</div><div class="gd">目录过宽校验</div></div>
+        <div class="gnode" data-id="pty" style="grid-column:4; grid-row:5"><div class="gn">pty</div><div class="gd">手动 shell</div></div>
+      </div>
+
+      <div class="glegend">
+        <span><i></i>依赖方向（主进程 → 包 → 更底层）</span>
+        <span><i style="border-top:1px dashed var(--line-2)"></i>跨层直连</span>
+        <span class="mono">外部依赖：mygo（browser）、gorilla/websocket（feishu）</span>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px">
+      <div class="card">
+        <h3>值得注意的几条边</h3>
+        <ul class="fd-list">
+          <li><b>llm → tool</b>：provider 适配层只需要工具的 <code>Spec</code> 来描述函数，不反向依赖注册表。</li>
+          <li><b>loop → llm, tool</b>：循环只认一个更窄的 <code>Model</code> 接口（给历史，拿一轮结果），流式解析留在 provider 层。</li>
+          <li><b>agent 不依赖 mygo</b>：它持有的只是一个 <code>Emitter</code> 函数，单测时可以换成收集事件的实现。</li>
+          <li><b>tool → browser, proc, workdir</b>：内置浏览器、进程组和目录校验都是工具的真实外部边界。</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>分层纪律</h3>
+        <ul class="fd-list">
+          <li>依赖方向恒为 <b>main ← 业务 ← 基础设施</b>；底层包不 import UI 层，所以事件类型各自定义，不互相复用。</li>
+          <li><code>channel.DecideReplies</code> 是「谁该回」的唯一判定，绑定层只投递，不重复实现规则。</li>
+          <li>跨 goroutine 的返回值必须是副本（<code>clone()</code>），不泄漏内部指针。</li>
+          <li>新增事件必须同时有前端订阅，否则 <code>TestEveryBackendEventIsSubscribed</code> 会失败。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 04 请求全链路 ============ -->
+  <section id="flow">
+    <div class="sec-head"><span class="sec-num">04</span><h2>完整链路：从一次输入到一条回复</h2></div>
+    <p class="sec-sub">点任意阶段查看它真正落在哪个文件、做了什么、把什么交给下一步。也可以点「自动播放」按顺序走一遍。</p>
+
+    <div class="stepper" id="stepper"></div>
+
+    <div class="flow-body">
+      <div class="card flow-detail" id="flowDetail"></div>
+      <div class="card">
+        <h3 style="margin-bottom:10px">链路总览</h3>
+        <div class="rail" id="rail"></div>
+        <div class="playbar">
+          <button class="btn pri" id="playBtn">▶ 自动播放</button>
+          <button class="btn" id="prevBtn">← 上一步</button>
+          <button class="btn" id="nextBtn">下一步 →</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 05 执行循环 ============ -->
+  <section id="loop">
+    <div class="sec-head"><span class="sec-num">05</span><h2>执行循环：把四个控制点插在每一次迭代之间</h2></div>
+    <p class="sec-sub">
+      委托给外部 CLI 时，「停止生效、结果结构化、预算可控、可中途干预」这四个控制点全部拿不回来——因为委托模式里根本没有「迭代」这个位置。
+      <span class="mono">loop.Runner</span> 存在的理由，就是在进程内把这个位置造出来。
+    </p>
+
+    <div class="loopgrid">
+      <div class="lcard">
+        <div class="ln">01 / loop.go:243 <span>最前面</span></div>
+        <b>停止信号</b>
+        <p>先看 <code>runCtx.Err()</code>。任何阶段被打断都立刻进入 <code>PhaseStopped</code>，写 <code>stopReason</code>、落检查点再返回。停止按钮不再「看起来生效但进程还在跑」。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">02 / loop.go:257 <span>只增不减</span></div>
+        <b>预算检查</b>
+        <p><code>Budget.Exhausted()</code> 依次判断轮次、工具次数、墙钟。只存已用量不存剩余量，所以暂停 / 恢复不会把额度重置。超了就是 <code>PhaseBudget</code>。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">03 / loop.go:265 <span>Steer</span></div>
+        <b>插入用户插话</b>
+        <p>每次问模型之前，把后到的本会话消息取出来 append 进这一轮，而不是等整轮结束。群消息不进这条路径，留到这一轮结束再入队。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">04 / loop.go:272 <span>iter.start</span></div>
+        <b>轮次开始与上下文占用</b>
+        <p>迭代计数 +1，进入 <code>PhaseThinking</code>，同时发出 <code>ctxUsed / ctxBudget / ctxLimit</code>。三个值必须由后端算——前端自算不含 system 与内部 tool 轮次，必然偏小。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">05 / loop.go:288 <span>顺序有讲究</span></div>
+        <b>检查点必须在模型调用之前</b>
+        <p>模型调用是最贵的一步。在它之后落盘，意味着崩溃时钱已经白花了。<code>Sync</code> 顺便把完整消息拷回会话，避免只在整轮结束才写盘。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">06 / loop.go:292 <span>最多重试 4 次</span></div>
+        <b>收窗口，再调模型</b>
+        <p>发出前先 <code>llm.Compact</code> 裁到约 8000 token（system 原文另算）。服务端仍报装不下，就把预算减半重来，下限 512，最多 4 次，而不是直接失败。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">07 / loop.go:337 <span>终止条件</span></div>
+        <b>记录这一轮说了什么</b>
+        <p>assistant 的正文、推理与 toolCalls 一起进历史。没有工具调用就等于任务结束：<code>PhaseDone</code> + <code>FinalText</code>。工具回合留在历史里给模型看，但不逐条冒到界面。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">08 / loop.go:373 <span>逐个串行</span></div>
+        <b>执行工具</b>
+        <p>每个调用先计预算、发 <code>tool.start</code>，再进注册表：schema 校验 → 指纹去重（同参第 3 次直接拦下）→ 可选 Approver → 超时 → 头尾各半截断。结果以 tool 消息回填。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">09 / loop.go:359 <span>用户优先</span></div>
+        <b>中途插话 = 放弃本批工具</b>
+        <p>模型这一轮已经排好的工具调用全部不执行，逐个回填「这步先不做：用户插了一句」。把新说明 append 进历史后继续下一轮，让用户的话直接改变方向。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">10 / loop.go:400 <span>防打转</span></div>
+        <b>连续无进展就终止</b>
+        <p>连续 3 轮既没有成功的工具调用、也没有最终答案，判定原地绕圈，<code>PhaseFailed</code>。再跑下去只是烧预算。</p>
+      </div>
+      <div class="lcard">
+        <div class="ln">11 / 结局四种 <span>返回值永远是状态</span></div>
+        <b>done · stopped · budget_exhausted · failed</b>
+        <p>治理层的失败（超预算、被打转拦截）是正常结局，不是异常。真正的 error 只保留给「跑不下去了」，比如模型调用本身不可用。</p>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px">
+      <div class="card">
+        <h3>默认预算（第一次跑不至于烧穿钱包）</h3>
+        <div class="meters">
+          <div class="meter"><div class="mv">24 <small>轮</small></div><div class="ml">MaxIterations</div><div class="bar"><i style="width:100%"></i></div></div>
+          <div class="meter"><div class="mv">64 <small>次</small></div><div class="ml">MaxToolCalls</div><div class="bar"><i style="width:100%"></i></div></div>
+          <div class="meter"><div class="mv">600 <small>秒</small></div><div class="ml">MaxWallMS（暂停时长不计入）</div><div class="bar"><i style="width:100%"></i></div></div>
+        </div>
+        <p class="small muted" style="margin:13px 0 0">提示词预算开跑后按模型窗口推导；超了先压缩，不直接停。检查点跟检查点节奏走，不按 token 落盘。</p>
+      </div>
+      <div class="card">
+        <h3>会话状态机</h3>
+        <div class="fsm">
+          <span class="st idle">idle</span><span class="ar">→ 入队 →</span>
+          <span class="st queued">queued</span><span class="ar">→ worker 取到 →</span>
+          <span class="st running">running</span><span class="ar">→ 结束 →</span>
+          <span class="st idle">idle</span>
+          <span class="ar">/</span><span class="st error">error</span>
+        </div>
+        <div class="fsm" style="margin-top:10px">
+          <span class="st running">running</span><span class="ar">或</span><span class="st queued">queued</span>
+          <span class="ar">→ BlockAgent →</span><span class="st blocked">blocked</span>
+          <span class="ar">→ Unblock →</span><span class="st idle">idle</span>
+        </div>
+        <p class="small muted" style="margin:13px 0 0">一轮正常结束调用 <code class="mono">setIdleOrQueued</code>：队列空则 idle，还有消息则 queued。不会停在 done，也不留一颗绿色的「完成」点。</p>
+      </div>
+    </div>
+  </section>
+  <!-- ============ 06 工具与模型 ============ -->
+  <section id="tools">
+    <div class="sec-head"><span class="sec-num">06</span><h2>工具与模型：循环真正能伸出去的手</h2></div>
+    <p class="sec-sub">
+      每个会话在开跑前才装配工具（<span class="mono">tool.NewRegistry()</span>），而不是全局注册一份。文件读写与 bash 被限制在该会话的工作目录内。
+    </p>
+
+    <div class="tbl-wrap" style="margin-bottom:14px">
+      <table>
+        <thead><tr><th style="width:130px">工具</th><th style="width:110px">来源</th><th style="width:100px">能力</th><th>行为与边界</th></tr></thead>
+        <tbody>
+          <tr><td><b class="mono-c">read_file</b></td><td>builtin</td><td><span class="pill r">只读</span></td><td>只碰工作目录内的文件，先读再改是系统提示的第一条规则。</td></tr>
+          <tr><td><b class="mono-c">write_file</b></td><td>builtin</td><td><span class="pill w">写</span></td><td>直接执行，正式注册表上没有审批闸门（<span class="mono">Approver</span> 为空）。</td></tr>
+          <tr><td><b class="mono-c">edit_file</b></td><td>builtin</td><td><span class="pill w">写</span></td><td>oldText 必须与原文完全一致（含缩进）且只出现一次，否则报错让模型自己改。</td></tr>
+          <tr><td><b class="mono-c">bash</b></td><td>builtin</td><td><span class="pill x">执行</span></td><td>默认 60 秒，超时杀整个进程组；不读登录脚本；stdout/stderr 整段返回，不流式。</td></tr>
+          <tr><td><b class="mono-c">list_agents</b></td><td>会话</td><td><span class="pill n">读</span></td><td>看现在有哪些会话、各自在做什么。</td></tr>
+          <tr><td><b class="mono-c">ask_agent</b></td><td>会话</td><td><span class="pill s">协作</span></td><td>按名字把任务交给已有会话并等回复。互相等待会被拦住，避免死锁。</td></tr>
+          <tr><td><b class="mono-c">create_agent</b></td><td>会话</td><td><span class="pill s">协作</span></td><td>新建助手，沿用同一模型与工作目录；带 task 时会等它做完；ParentID 记父子关系。</td></tr>
+          <tr><td><b class="mono-c">delete_agent</b></td><td>会话</td><td><span class="pill w">写</span></td><td>只能删自己，或自己创建的子会话。</td></tr>
+          <tr><td><b class="mono-c">list_notes</b></td><td>知识</td><td><span class="pill n">读</span></td><td>看知识库已有笔记。</td></tr>
+          <tr><td><b class="mono-c">save_note</b></td><td>知识</td><td><span class="pill w">写</span></td><td>写一条并挂到自己身上，下一轮进系统提示。禁止直接改 knowledge.jsonl。</td></tr>
+          <tr><td><b class="mono-c">set_profile</b></td><td>会话</td><td><span class="pill w">写</span></td><td>改自己的名字、简介或工作目录，简介用来记住当前负责什么。</td></tr>
+          <tr><td><b class="mono-c">web</b></td><td>tool/web</td><td><span class="pill x">网络</span></td><td>操作内置浏览器：按控件编号或页面可见文字，一次最多 12 步，只交回最后一页。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>Provider：七个入口，一份连接池</h3>
+        <div class="tbl-wrap" style="border:none;background:transparent">
+          <table>
+            <thead><tr><th style="width:96px">provider</th><th>接入方式</th><th style="width:150px">默认地址</th></tr></thead>
+            <tbody>
+              <tr><td><b class="mono-c">mock</b></td><td>本地规则假回复，用于验证并行 / 流式 / 隔离</td><td class="mono-c">—</td></tr>
+              <tr><td><b class="mono-c">llamacpp</b></td><td>本机 llama-server，无需 API Key</td><td class="mono-c">127.0.0.1:8080</td></tr>
+              <tr><td><b class="mono-c">ollama</b></td><td>本机 Ollama，同样走 OpenAI 兼容</td><td class="mono-c">127.0.0.1:11434</td></tr>
+              <tr><td><b class="mono-c">openai</b></td><td>OpenAI 兼容接口</td><td class="mono-c">按 Base URL</td></tr>
+              <tr><td><b class="mono-c">deepseek</b></td><td>OpenAI 兼容接口</td><td class="mono-c">按 Base URL</td></tr>
+              <tr><td><b class="mono-c">claude</b></td><td>走兼容网关，不是 Anthropic 原生接口</td><td class="mono-c">按 Base URL</td></tr>
+              <tr><td><b class="mono-c">qoder</b></td><td>自有对话协议：浏览器授权或 pt- 访问令牌</td><td class="mono-c">api3.qoder.sh</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small muted" style="margin:12px 0 0">所有 provider 共用一个 <span class="mono">http.Client</span>。每轮新建客户端会重建连接池，撞上 server closed idle connection；池只有一份才能跨会话复用。单次请求硬上限 120 秒，否则外部卡住会让 worker 永久阻塞。</p>
+      </div>
+
+      <div class="card">
+        <h3>配置优先级与会话级回落</h3>
+        <div class="fsm" style="flex-direction:column;align-items:stretch;gap:8px">
+          <div class="st queued" style="text-align:left">① 环境变量 <span style="opacity:.7">MAD_LLM_* / MAD_WORK_DIR</span></div>
+          <div class="ar" style="text-align:center">↓ 覆盖同名字段</div>
+          <div class="st stopped" style="text-align:left;color:var(--violet);border-color:rgba(169,155,255,.3);background:rgba(169,155,255,.07)">② 会话级 <span style="opacity:.7">Agent.LLMCfg / Agent.WorkDir</span></div>
+          <div class="ar" style="text-align:center">↓ 为空则回落</div>
+          <div class="st idle" style="text-align:left">③ 全局 <span style="opacity:.7">config.json（权限 600）</span></div>
+          <div class="ar" style="text-align:center">↓ 都没有</div>
+          <div class="st error" style="text-align:left">④ 默认 mock —— loop 配 mock 会直接报「这个会话还没有模型」</div>
+        </div>
+        <p class="small muted" style="margin:13px 0 0">输入栏的 <span class="mono">ModelPicker</span> 只挑已保存的连接，凭据留在设置里；能思考的模型旁边浮出推理档位。</p>
+      </div>
+    </div>
+  </section>
+  <!-- ============ 07 数据与事件 ============ -->
+  <section id="data">
+    <div class="sec-head"><span class="sec-num">07</span><h2>数据与事件：状态落在哪，界面怎么知道</h2></div>
+    <p class="sec-sub">
+      全部持久化都在用户数据目录（<span class="mono">%APPDATA%\multi-agent-desktop</span> / <span class="mono">~/Library/Application Support</span> / <span class="mono">$XDG_DATA_HOME</span>）。
+      <span class="mono">agents.json</span> 是完整历史，界面只拿当前会话最近一页。
+    </p>
+
+    <div class="grid2" style="align-items:start">
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th style="width:150px">文件</th><th>内容</th><th style="width:120px">写入方式</th></tr></thead>
+          <tbody>
+            <tr><td><b class="mono-c">config.json</b></td><td>全局模型配置、已保存 provider、默认目录、飞书机器人（含 Secret）</td><td>tmp+rename，权限 600</td></tr>
+            <tr><td><b class="mono-c">agents.json</b></td><td>会话、完整历史、会话级配置、ParentID、学习摘要</td><td>tmp+rename 原子替换</td></tr>
+            <tr><td><b class="mono-c">channels.json</b></td><td>频道、消息、回合策略、接话人</td><td>tmp+rename</td></tr>
+            <tr><td><b class="mono-c">knowledge.jsonl</b></td><td>知识笔记</td><td>追加写；删除时整体重写</td></tr>
+            <tr><td><b class="mono-c">feishu-rooms.json</b></td><td>飞书群 / 私聊记录、绑定的本机会话</td><td>飞书包自己落盘</td></tr>
+            <tr><td><b class="mono-c">browser-page.json</b></td><td>内置浏览器上次地址与页面状态</td><td>关窗 / 重开时读回</td></tr>
+            <tr><td><b class="mono-c">images/</b></td><td>对话与飞书里的图片字节</td><td>按 id 存文件</td></tr>
+            <tr><td><b class="mono-c">loop/runs/</b></td><td>进程内循环的检查点</td><td>按运行 id 读写</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>事件：Go → 前端，全部强类型</h3>
+        <p class="small muted" style="margin:-4px 0 12px">
+          <span class="mono">mygo.NewEvent[T](name)</span> 声明，生成 <span class="mono">src/mygo.ts</span>；前端 <span class="mono">events.xxx.on()</span> 订阅。
+          <span class="mono">agent.Manager</span> 只持一个 <span class="mono">Emitter</span> 函数，不直接依赖 MyGo。
+        </p>
+        <div class="tbl-wrap" style="border:none;background:transparent">
+          <table>
+            <thead><tr><th style="width:170px">事件</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td class="mono-c">agent.created / deleted</td><td>新建 / 删除会话</td></tr>
+              <tr><td class="mono-c">agent.profile</td><td>名字、简介、学习摘要进度</td></tr>
+              <tr><td class="mono-c">agent.status</td><td>idle / queued / running / error / blocked</td></tr>
+              <tr><td class="mono-c">agent.delta</td><td>token 级流式正文</td></tr>
+              <tr><td class="mono-c">agent.reasoning</td><td>流式推理，不并进正文</td></tr>
+              <tr><td class="mono-c">agent.message</td><td>完整消息落定（含收尾合并的那一条）</td></tr>
+              <tr><td class="mono-c">agent.tool</td><td>工具开始 / 结束，带状态与截断后的内容</td></tr>
+              <tr><td class="mono-c">agent.context</td><td>每轮上下文占用（used / budget / limit）</td></tr>
+              <tr><td class="mono-c">agent.loop</td><td>循环结局：done / stopped / failed</td></tr>
+              <tr><td class="mono-c">agent.stopped</td><td>停止原因、迭代数、已用预算</td></tr>
+              <tr><td class="mono-c">agent.config</td><td>会话级模型或目录变更，携带完整 AgentView</td></tr>
+              <tr><td class="mono-c">shell.start / result</td><td>界面上手动执行的命令，整段结果</td></tr>
+              <tr><td class="mono-c">llm.config / workdir</td><td>全局配置变更</td></tr>
+              <tr><td class="mono-c">channel.created / deleted / message</td><td>频道增删与消息</td></tr>
+              <tr><td class="mono-c">knowledge.changed / deleted</td><td>笔记变更</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small muted" style="margin:12px 0 0">共 22 个声明事件，另有 map 协议的动态事件（如 <span class="mono">agent.channel.reply</span>）。新增事件必须同时有前端订阅，否则单测会失败。</p>
+      </div>
+    </div>
+  </section>
+  <!-- ============ 08 边界 ============ -->
+  <section id="limits">
+    <div class="sec-head"><span class="sec-num">08</span><h2>边界与缺口：哪些是真的，哪些还没做</h2></div>
+    <p class="sec-sub">这一节按 README 与 docs/design.md 的口径标注，避免把路线图当成现状看。</p>
+
+    <div class="split">
+      <div class="card">
+        <h3 style="color:var(--teal)">已经落地</h3>
+        <ul class="dlist ok">
+          <li><span class="ic">✓</span><div><b>舰队视图</b><small>一列一个 agent，同屏看状态、当前任务、实时输出、产出量</small></div></li>
+          <li><span class="ic">✓</span><div><b>Queue + Worker 串行</b><small>队列 32，满则报错；停止取消当前执行并清空队列</small></div></li>
+          <li><span class="ic">✓</span><div><b>进程内 agent loop</b><small>迭代 / 工具 / 墙钟上限，检查点可续跑</small></div></li>
+          <li><span class="ic">✓</span><div><b>会话级配置</b><small>每个会话独立模型、推理强度、工作目录，空则回落全局</small></div></li>
+          <li><span class="ic">✓</span><div><b>Agent 间协作</b><small>Route 派活 + list/ask/create/delete_agent，ParentID 侧栏嵌套</small></div></li>
+          <li><span class="ic">✓</span><div><b>群聊频道</b><small>discuss / direct / roundrobin，DecideReplies 单一判定</small></div></li>
+          <li><span class="ic">✓</span><div><b>知识库与学习摘要</b><small>挂上的笔记下一轮注入；更早对话收成摘要不挡当前回复</small></div></li>
+          <li><span class="ic">✓</span><div><b>内置浏览器与飞书多机器人</b><small>独立 WebView；每机器人一条长连接，主会话忙时认领助手</small></div></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3 style="color:var(--rose)">还没做 / 已知限制</h3>
+        <ul class="dlist no">
+          <li><span class="ic">✕</span><div><b>git worktree 隔离</b><small>多个 agent 改同一份代码会互相踩</small></div></li>
+          <li><span class="ic">✕</span><div><b>Supervisor 自动拆任务</b><small>没有编排层把一句话拆给多个 agent，任务仍要人来分</small></div></li>
+          <li><span class="ic">✕</span><div><b>工具审批闸门</b><small>Approver 接口存在，正式注册表没装；写文件与 shell 直接执行</small></div></li>
+          <li><span class="ic">✕</span><div><b>检查器的「改动 / 任务」</b><small>页已拿掉，后端也没有 diff 或任务清单</small></div></li>
+          <li><span class="ic">✕</span><div><b>shell 流式与手动命令超时</b><small>结果整段返回；手动执行只有取消才停</small></div></li>
+          <li><span class="ic">✕</span><div><b>凭据进钥匙串</b><small>API Key 与飞书 Secret 仍是明文落盘（config.json 权限 600）</small></div></li>
+          <li><span class="ic">✕</span><div><b>历史改 SQLite</b><small>仍是整份 agents.json；agent id 仍是 agent-&lt;时间戳&gt;</small></div></li>
+          <li><span class="ic">◐</span><div><b>未签名</b><small>分发给别人会被 Gatekeeper / SmartScreen 拦</small></div></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>怎么继续往下读</h3>
+      <div class="grid3" style="margin-top:4px">
+        <div><p class="small muted" style="margin:0 0 4px">想改行为</p><p class="small" style="margin:0">先看 <span class="mono">docs/design.md</span> 与本节，再看 <span class="mono">internal/agent/manager.go</span> 的队列与收尾路径。</p></div>
+        <div><p class="small muted" style="margin:0 0 4px">想改循环</p><p class="small" style="margin:0"><span class="mono">internal/loop/loop.go</span> 的 8 个控制点 + <span class="mono">loop_test.go</span>（18.9 KB）是最好的规格说明。</p></div>
+        <div><p class="small muted" style="margin:0 0 4px">想改界面</p><p class="small" style="margin:0">先读 <span class="mono">docs/skills/ui-design.md</span>；禁止硬编码色值，一律走 <span class="mono">--token</span>。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>基于源码盘点生成 · 2026-11-21 · 引用字段均来自仓库实际代码与 docs/design.md</div>
+    <div class="mono">multi-agent-desktop / docs/architecture-map.html</div>
+  </footer>
+</div>
+
+<script>
+/* ================= 一、请求链路数据 ================= */
+const STEPS = [
+  {
+    label:'输入采集', layer:'ui', title:'用户在输入栏发出一次请求',
+    path:'src/components/AgentView.tsx → src/lib/useBackend.ts',
+    points:[
+      '输入框、图片草稿（<b>ImageDraft</b>）与 @提及一起收进一次调用：<code>send(\'agent.prompt\', { agentId, text, images })</code>。',
+      '会话正在跑时，同一个入口承担「插话」：消息不会开新轮，而是等下一次模型调用前插进当前轮。',
+      '队列里还没落进历史的句子，界面先标「排队中」——它和「卡住了」外观相似，处置完全不同。'
+    ],
+    out:'<b>输出</b>：一次前端调用，参数随后由生成的 typed client 直接送进 Go 方法。'
+  },
+  {
+    label:'typed IPC', layer:'go', title:'跨过进程边界：没有握手，直接调方法',
+    path:'main.go:750 · func (s *API) PromptAgent(ctx, req)',
+    points:[
+      'MyGo 的 <code>mygo.Bind(API{})</code> 把 Go 方法直接暴露成前端可调用的函数；<code>mygo generate</code> 生成 <code>src/mygo.ts</code>，编译期类型安全。',
+      '没有 WebSocket、没有 REST、没有手写桥接：参数与返回值都是强类型，错在编译期而不是运行时。',
+      '绑定层只做参数校验、错误转换与事件发射，不做业务判断。'
+    ],
+    out:'<b>输出</b>：进入 <code>Manager.Prompt</code>；返回的 error 会直接变成输入栏上的错误提示。'
+  },
+  {
+    label:'入队', layer:'go', title:'Manager.Prompt：图片落盘、消息入队',
+    path:'internal/agent/manager.go:884 · func (m *Manager) Prompt',
+    points:[
+      '先按会话 id 取到 <b>Agent</b>，找不到就直接返回 <code>agent xxx not found</code>。',
+      '图片经 <code>llm.Accept</code> 存到 images 目录并转成 <b>blocks</b>，与文字保持原顺序，不把 base64 塞进历史。',
+      '调用 <code>a.enqueue(req)</code> 把请求放进该会话自己的队列，然后把状态从 idle 改成 queued 并发出事件。'
+    ],
+    out:'<b>输出</b>：<code>agent.status { status: "queued" }</code>；worker 会在下一个循环取走这条请求。'
+  },
+  {
+    label:'队列', layer:'go', title:'每会话一条有界队列',
+    path:'internal/agent/manager.go:1435 · func (a *Agent) enqueue',
+    points:[
+      'channel 容量 <b>32</b>。满了 <code>Prompt</code> 返回错误，不静默丢弃——用户能看见「没发出去」，而不是等半天。',
+      '同一会话的消息永远串行：连发不会乱序，也不会并发调用两次模型。',
+      '群消息走另一条口子：留到这一轮结束再入队（<code>later</code>），不与私聊抢当前轮。'
+    ],
+    out:'<b>输出</b>：队列长度同步到 <code>QueueLen</code>，舰队视图据此显示积压。'
+  },
+  {
+    label:'worker', layer:'go', title:'一个 goroutine 消费一条队列',
+    path:'internal/agent/manager.go:1093 · func (a *Agent) workerLoop',
+    points:[
+      '循环 select 在 <code>a.done</code>（会话被删除）与 <code>a.queue</code> 之间等待。',
+      '<code>runSafely</code> 把 panic 兜成可见错误并清空队列，避免后续消息重复触发同一个 panic。',
+      '执行完调用 <code>settle</code> 收尾，再 <code>playLater</code> 把群消息放回队列。'
+    ],
+    out:'<b>输出</b>：进入 <code>execute</code>，真正的一轮开始。'
+  },
+  {
+    label:'execute', layer:'go', title:'准备这一轮：写历史、置为 running、建可取消上下文',
+    path:'internal/agent/manager.go:1142 · func (a *Agent) execute',
+    points:[
+      '把 user 消息（含 blocks 与时间戳）append 进会话历史，并发出 <code>agent.message</code>，界面立刻看到自己刚说的话。',
+      '状态切到 <b>running</b>，记录 StartedAt、清空 Chars / LastTool，用于舰队视图的用时与产出量。',
+      '用 <code>context.WithCancel</code> 建 <code>runCtx</code> 并挂在 <code>a.cancel</code> 上；这一个是「停止」真正生效的把手。'
+    ],
+    out:'<b>输出</b>：<code>agent.status { running }</code>；随后按 backend 分流。'
+  },
+  {
+    label:'分流', layer:'go', title:'后端分流：空 backend 也走 loop',
+    path:'internal/agent/manager.go:1188 · canonicalBackend',
+    points:[
+      '空 backend，以及从旧配置读进来的 <code>claude</code> / <code>codex</code>，全部归一成 <b>loop</b>。',
+      '<b>mock</b> 仍是本地假回复，不装配工具，用于验证多 agent 并行、流式渲染与会话隔离。',
+      'loop 配成 mock、或模型名为空，这一轮直接报「这个会话还没有模型」，不会悄悄回假话。'
+    ],
+    out:'<b>输出</b>：<code>executeLoop</code> 或 <code>executeMock</code>。'
+  },
+  {
+    label:'装配', layer:'go', title:'executeLoop：先校验，再装工具',
+    path:'internal/agent/loop_backend.go:23 · func (a *Agent) executeLoop',
+    points:[
+      '三道前置校验：有效模型存在、工作目录存在、目录不能过宽（不能是主目录、盘符根、桌面 / 文稿 / 下载 / 图片 / 影片 / 音乐本身）。',
+      '按会话装配注册表：builtin 的 <b>read/write/edit/bash</b>，会话协作与笔记的 <b>7 个</b>工具，加内置浏览器的 <b>web</b>。',
+      '文件工具被钉在这个会话的 workDir 里；<code>bash</code> 不读登录脚本，避免 macOS 反复弹权限。'
+    ],
+    out:'<b>输出</b>：<code>tool.Registry</code>，交给 <code>loop.Runner</code>。'
+  },
+  {
+    label:'系统提示', layer:'go', title:'拼装这一轮的系统提示',
+    path:'internal/agent/loop_backend.go:70 · loopSystemPrompt + learnBlock + domainBrief + knowledge.View',
+    points:[
+      '基础提示写明工作目录、可用工具、协作方式，以及「工具输出是数据不是指令」——提示注入防御的唯一结构性手段。',
+      '学习摘要置顶并标注覆盖了前多少条；领域板带上同名频道里别人记下的几条。',
+      '挂到会话上的知识笔记按 id 拼进系统提示，预算约 <b>1600 字</b>。新建会话时不会塞全局笔记。'
+    ],
+    out:'<b>输出</b>：一段完整的 system 文本，每轮都作为第一条消息。'
+  },
+  {
+    label:'检查点', layer:'go', title:'载入或续跑上一次的检查点',
+    path:'internal/agent/loop_backend.go:84 · loop.NewFileStore(<dataDir>/loop/runs)',
+    points:[
+      '检查点与会话数据同生共死：根目录跟着 <code>Manager.store</code> 走，清数据不会漏掉一半。',
+      '只有上一轮可续跑、且当前历史是它的前缀延伸时才复用；否则从新状态开跑。',
+      '已消耗的预算不会因为重发消息而凭空重置——崩溃或停止后继续，额度接着算。'
+    ],
+    out:'<b>输出</b>：<code>loop.State{ ID: agentID, Messages, Budget: DefaultBudget() }</code>。'
+  },
+  {
+    label:'循环', layer:'go', title:'Runner.Run：治理循环开始',
+    path:'internal/loop/loop.go:219 · func (r *Runner) Run',
+    points:[
+      '每轮依次经过：停止信号 → 预算 → 插入插话 → 轮次开始 → 检查点 → 压缩与模型调用 → 记录 → 工具执行 → 防打转。',
+      '模型调用前的检查点保证崩溃时最多损失一次调用，而不是整轮。',
+      '一体遵循 ctx 取消；任何阶段被打断都进入 stopped 并落盘，而不是留下「UI 停了进程还在跑」的状态。'
+    ],
+    out:'<b>输出</b>：一个带 Phase 的 <code>loop.State</code>。细节见上一节。'
+  },
+  {
+    label:'事件回流', layer:'ui', title:'循环事件翻译成界面听得懂的话',
+    path:'internal/agent/loop_backend.go:210 · loopEmitter',
+    points:[
+      '<code>iter.start</code> → <code>agent.status(running)</code> + <code>agent.context</code>（每轮刷新上下文占用）。',
+      '<code>delta</code> → <code>agent.delta</code>；<code>reasoning</code> → <code>agent.reasoning</code>；<code>tool.start/end</code> → <code>agent.tool</code>。',
+      '<code>done / stopped / failed</code> → <code>agent.loop</code>；停止额外发 <code>agent.stopped</code> 带原因与已用预算。'
+    ],
+    out:'<b>输出</b>：<code>useBackend</code> 的 reducer 更新 React state，组件按增量渲染；不在底部时不强制滚动。'
+  },
+  {
+    label:'收尾', layer:'go', title:'一条回复、状态归位、三件后台事',
+    path:'internal/agent/loop_backend.go:142',
+    points:[
+      '<code>oneAnswer</code> 把这一轮所有 assistant 推理收成一条消息，工具回合留在历史里给模型看，但不逐条冒到界面。',
+      '<code>setIdleOrQueued</code> 让状态回到 idle（队列还有消息则 queued），不留「完成」态。',
+      '异步跑三件事：<b>evolveProfile</b> 收敛简介、<b>distillKnowledge</b> 蒸馏笔记、<b>studyHistory</b> 生成学习摘要——都不挡住已经显示的回复。'
+    ],
+    out:'<b>输出</b>：<code>agent.message</code> + <code>agent.status</code>，一轮结束。'
+  }
+];
+/* ================= 二、链路步进器 ================= */
+const stepperEl = document.getElementById('stepper');
+const railEl    = document.getElementById('rail');
+const detailEl  = document.getElementById('flowDetail');
+let stepIndex = 0;
+
+STEPS.forEach((s, i) => {
+  const b = document.createElement('button');
+  b.className = 'step';
+  b.dataset.i = i;
+  b.innerHTML = '<i>' + String(i + 1).padStart(2, '0') + '</i>' + s.label;
+  b.addEventListener('click', () => { stopPlay(); renderStep(i); });
+  stepperEl.appendChild(b);
+
+  const r = document.createElement('div');
+  r.className = 'rail-item';
+  r.dataset.i = i;
+  r.innerHTML = '<div class="rn">' + String(i + 1).padStart(2, '0') + '</div><div class="rt">' + s.label + '</div>';
+  r.addEventListener('click', () => { stopPlay(); renderStep(i); });
+  railEl.appendChild(r);
+});
+
+function renderStep(i){
+  stepIndex = Math.max(0, Math.min(STEPS.length - 1, i));
+  const s = STEPS[stepIndex];
+  document.querySelectorAll('.step').forEach((el, k) => el.classList.toggle('on', k === stepIndex));
+  document.querySelectorAll('.rail-item').forEach((el, k) => el.classList.toggle('on', k === stepIndex));
+
+  const badge = s.layer === 'ui'
+    ? '<span class="badge ui">前端 · 界面层</span>'
+    : '<span class="badge go">Go · 后端</span>';
+
+  detailEl.innerHTML =
+    '<div class="fd-head"><span class="badge">STEP ' + String(stepIndex + 1).padStart(2,'0') + ' / ' + STEPS.length + '</span>' + badge + '<h3>' + s.title + '</h3></div>' +
+    '<div class="fd-path">' + s.path + '</div>' +
+    '<ul class="fd-list">' + s.points.map(p => '<li>' + p + '</li>').join('') + '</ul>' +
+    '<div class="fd-out">' + s.out + '</div>' +
+    '<div class="fd-note"><b>读代码时的锚点</b><br>' +
+    '方法的强类型签名在 <code>main.go</code> 顶部的 <code>API</code> 结构上，<code>src/mygo.ts</code> 是生成物、不要手改。<br>' +
+    '同一会话的流式 delta 只走内存，落盘由检查点在「每次模型调用」前触发——不是每个 token 都写盘。</div>';
+}
+
+renderStep(0);
+
+/* ================= 三、自动播放 ================= */
+let playTimer = null;
+const playBtn = document.getElementById('playBtn');
+function stopPlay(){
+  if (playTimer){ clearInterval(playTimer); playTimer = null; }
+  playBtn.textContent = '▶ 自动播放';
+  playBtn.classList.remove('pri');
+}
+playBtn.addEventListener('click', () => {
+  if (playTimer){ stopPlay(); return; }
+  playBtn.textContent = '❚❚ 暂停';
+  playBtn.classList.add('pri');
+  renderStep(0);
+  playTimer = setInterval(() => {
+    if (stepIndex >= STEPS.length - 1){ stopPlay(); return; }
+    renderStep(stepIndex + 1);
+  }, 1900);
+});
+document.getElementById('prevBtn').addEventListener('click', () => { stopPlay(); renderStep(stepIndex - 1); });
+document.getElementById('nextBtn').addEventListener('click', () => { stopPlay(); renderStep(stepIndex + 1); });
+
+/* ================= 四、依赖图 ================= */
+const EDGES = [
+  ['main','agent','wire'], ['main','channel','wire'], ['main','config','wire'],
+  ['main','feishu','wire'], ['main','knowledge','wire'], ['main','llm','wire'],
+  ['main','browser','wire'], ['main','pty','wire'], ['main','privacy','wire'], ['main','workdir','wire'],
+  ['agent','loop','line'], ['agent','llm','line'], ['agent','tool','line'], ['agent','workdir','dash'],
+  ['loop','llm','line'], ['loop','tool','line'],
+  ['llm','tool','line'],
+  ['channel','llm','dash'], ['config','llm','dash'],
+  ['tool','browser','line'], ['tool','proc','line'], ['tool','workdir','line'],
+  ['pty','proc','line'], ['pty','workdir','line'],
+  ['feishu','lark','wire'], ['llm','models','wire']
+];
+
+const graphEl = document.getElementById('graph');
+const svgEl = document.getElementById('edges');
+let edgePaths = [];
+
+function center(el){
+  const r = el.getBoundingClientRect();
+  const g = graphEl.getBoundingClientRect();
+  return { x: r.left - g.left + r.width / 2, y: r.top - g.top + r.height / 2,
+           top: r.top - g.top, bottom: r.bottom - g.top };
+}
+
+function drawEdges(){
+  if (window.innerWidth <= 720) { svgEl.innerHTML = ''; edgePaths = []; return; }
+  const g = graphEl.getBoundingClientRect();
+  svgEl.setAttribute('width', g.width);
+  svgEl.setAttribute('height', g.height);
+  svgEl.innerHTML = '';
+  edgePaths = [];
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const defs = document.createElementNS(NS, 'defs');
+  const marker = document.createElementNS(NS, 'marker');
+  marker.setAttribute('id', 'arw');
+  marker.setAttribute('markerWidth', '6');
+  marker.setAttribute('markerHeight', '6');
+  marker.setAttribute('refX', '4.6');
+  marker.setAttribute('refY', '3');
+  marker.setAttribute('orient', 'auto');
+  const mp = document.createElementNS(NS, 'path');
+  mp.setAttribute('d', 'M0,0 L6,3 L0,6 Z');
+  mp.setAttribute('fill', 'rgba(62,224,182,.5)');
+  marker.appendChild(mp);
+  defs.appendChild(marker);
+  svgEl.appendChild(defs);
+
+  EDGES.forEach(([from, to, kind]) => {
+    const a = graphEl.querySelector('.gnode[data-id="' + from + '"]');
+    const b = graphEl.querySelector('.gnode[data-id="' + to + '"]');
+    if (!a || !b) return;
+    const ra = center(a), rb = center(b);
+
+    // 从上往下：源底部 → 目标顶部；水平相邻时改走侧边
+    let x1, y1, x2, y2;
+    if (Math.abs(ra.y - rb.y) < 34){
+      const right = rb.x > ra.x;
+      x1 = center(a).x + (right ? 1 : -1) * (a.offsetWidth / 2);
+      y1 = ra.y; x2 = rb.x - (right ? 1 : -1) * (b.offsetWidth / 2); y2 = rb.y;
+    } else if (rb.y < ra.y){
+      x1 = ra.x; y1 = ra.top; x2 = rb.x; y2 = rb.bottom;
+    } else {
+      x1 = ra.x; y1 = ra.bottom; x2 = rb.x; y2 = rb.top;
+    }
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const dy = (y2 - y1) * 0.55;
+    const d = Math.abs(x2 - x1) < 8
+      ? 'M' + x1 + ',' + y1 + ' C' + x1 + ',' + (y1 + dy) + ' ' + x2 + ',' + (y2 - dy) + ' ' + x2 + ',' + y2
+      : 'M' + x1 + ',' + y1 + ' C' + (x1 + (x2 - x1) * 0.35) + ',' + (y1 + dy) + ' ' + (x1 + (x2 - x1) * 0.65) + ',' + (y2 - dy) + ' ' + x2 + ',' + y2;
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke',
+      kind === 'wire' ? 'rgba(94,200,255,.25)'
+      : kind === 'dash' ? 'rgba(94,200,255,.36)'
+      : 'rgba(62,224,182,.36)');
+    path.setAttribute('stroke-width', '1.2');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('marker-end', 'url(#arw)');
+    if (kind === 'wire') path.setAttribute('stroke-dasharray', '2 6');
+    if (kind === 'dash') path.setAttribute('stroke-dasharray', '4 4');
+    path.dataset.from = from;
+    path.dataset.to = to;
+    path.dataset.base = path.getAttribute('stroke');
+    svgEl.appendChild(path);
+    edgePaths.push(path);
+  });
+}
+
+function resetEdges(){
+  edgePaths.forEach(p => {
+    p.style.stroke = '';
+    p.style.opacity = '';
+    p.style.strokeWidth = '';
+  });
+  document.querySelectorAll('.gnode').forEach(n => n.classList.remove('lit'));
+}
+
+graphEl.querySelectorAll('.gnode').forEach(node => {
+  node.addEventListener('mouseenter', () => {
+    const id = node.dataset.id;
+    document.querySelectorAll('.gnode').forEach(n => {
+      n.classList.toggle('lit', n.dataset.id === id);
+    });
+    edgePaths.forEach(p => {
+      const hit = p.dataset.from === id || p.dataset.to === id;
+      if (hit){
+        p.style.stroke = '#3ee0b6';
+        p.style.opacity = '.9';
+        p.style.strokeWidth = '1.8';
+        const other = p.dataset.from === id ? p.dataset.to : p.dataset.from;
+        const on = graphEl.querySelector('.gnode[data-id="' + other + '"]');
+        if (on) on.classList.add('lit');
+      } else {
+        p.style.opacity = '.25';
+      }
+    });
+  });
+  node.addEventListener('mouseleave', resetEdges);
+});
+
+let graphRAF = null;
+window.addEventListener('resize', () => {
+  if (graphRAF) cancelAnimationFrame(graphRAF);
+  graphRAF = requestAnimationFrame(() => { drawEdges(); resetEdges(); });
+});
+
+/* ================= 五、导航高亮 ================= */
+const navLinks = [...document.querySelectorAll('#nav a')];
+const sections = navLinks.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+
+navLinks.forEach(a => {
+  a.addEventListener('click', () => {
+    navLinks.forEach(x => x.classList.remove('on'));
+    a.classList.add('on');
+  });
+});
+
+if ('IntersectionObserver' in window){
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      const id = '#' + e.target.id;
+      navLinks.forEach(a => a.classList.toggle('on', a.getAttribute('href') === id));
+    });
+  }, { rootMargin: '-72px 0px -60% 0px', threshold: 0 });
+  sections.forEach(s => io.observe(s));
+}
+
+/* 首屏排完再画线，确保拿到真实尺寸 */
+function boot(){
+  drawEdges();
+  resetEdges();
+}
+if (document.readyState === 'complete') boot();
+else window.addEventListener('load', boot);
+window.addEventListener('fontsloaded', boot);
+setTimeout(boot, 600);
+</script>
+</body>
+</html>
