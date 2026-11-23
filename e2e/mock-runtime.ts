@@ -171,6 +171,9 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         worktreeBranch: on ? 'mad/demo' : '',
       }),
       'API.ProvidersStatus': () => [],
+      // 审批：启动时补状态返回空队列；点击决定后记录调用即可。
+      'API.ListApprovals': () => [],
+      'API.DecideApproval': () => undefined,
     }
 
     ;(window as unknown as Record<string, unknown>).mygo = {

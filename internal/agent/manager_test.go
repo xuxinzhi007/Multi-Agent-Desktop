@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -490,5 +492,52 @@ func TestPinnedBioStoresProposal(t *testing.T) {
 	sn := a.Snapshot()
 	if sn.Role != "我写的简介" || sn.Proposal != "这轮在查队列" {
 		t.Fatalf("role=%q proposal=%q", sn.Role, sn.Proposal)
+	}
+}
+
+// 并发 Save：saveMu + 原子 rename 之下，读者永远不该看到半截 JSON。
+func TestConcurrentSaveKeepsFileValid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	m := newTestManager(t)
+	if err := m.SetStore(path); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		ids = append(ids, m.Create("", fmt.Sprintf("成员%d", i), "开发").ID)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.Save(); err != nil {
+				t.Errorf("Save: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agents []Agent
+	if err := json.Unmarshal(raw, &agents); err != nil {
+		t.Fatalf("file is not valid JSON after concurrent saves: %v\n%s", err, raw)
+	}
+	if len(agents) != 6 {
+		t.Fatalf("agents = %d, want 6", len(agents))
+	}
+
+	m2 := newTestManager(t)
+	if err := m2.SetStore(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if _, ok := m2.Get(id); !ok {
+			t.Fatalf("reload lost agent %s", id)
+		}
 	}
 }

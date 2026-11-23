@@ -101,6 +101,18 @@ export interface AgentView {
   learnBusy?: boolean;
 }
 
+/** ApprovalView 是一张等待用户决定的写操作卡片。 */
+export interface ApprovalView {
+  id: string;
+  agentId: string;
+  agentName: string;
+  tool: string;
+  title: string;
+  detail: string;
+  diff?: string;
+  createdAt: number;
+}
+
 export interface Block {
   text?: string;
   id?: string;
@@ -177,6 +189,19 @@ export interface Diagnostics {
   agents: AgentDiag[];
   loops: LoopDiag[];
   checkedAt: number;
+}
+
+export interface Entry {
+  at: number;
+  agentId: string;
+  agentName: string;
+  tool: string;
+  callId?: string;
+  status: string;
+  summary?: string;
+  durationMs?: number;
+  exitCode?: number;
+  workDir?: string;
 }
 
 /** ErrorEvent 是错误。 */
@@ -455,6 +480,10 @@ export const API = {
   attachNoteToAgent(noteId: string, agentId: string): Promise<AgentView> {
     return call("API.AttachNoteToAgent", noteId, agentId);
   },
+  /** AuditPath 告诉界面审计日志落在哪。 */
+  auditPath(): Promise<string> {
+    return call("API.AuditPath");
+  },
   /** AuthorizeFeishuUser 打开飞书授权页，把这个机器人的用户令牌留在本机配置里。 */
   authorizeFeishuUser(id: string): Promise<FeishuView> {
     return call("API.AuthorizeFeishuUser", id);
@@ -492,6 +521,10 @@ export const API = {
    */
   createSupervisor(req: SupervisorRequest): Promise<AgentView> {
     return call("API.CreateSupervisor", req);
+  },
+  /** DecideApproval 是审批卡上的那一下。remember 表示本会话对这个工具以后放行。 */
+  decideApproval(id: string, allow: boolean, remember: boolean): Promise<void> {
+    return call("API.DecideApproval", id, allow, remember);
   },
   /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
@@ -560,6 +593,10 @@ export const API = {
    */
   listAllModels(): Promise<ModelChoice[]> {
     return call("API.ListAllModels");
+  },
+  /** ListApprovals 返回所有还在等用户决定的写操作。 */
+  listApprovals(): Promise<ApprovalView[]> {
+    return call("API.ListApprovals");
   },
   /** ListChannels 返回所有频道快照。 */
   listChannels(): Promise<Channel[]> {
@@ -644,6 +681,10 @@ export const API = {
   /** QueryNotes 按 scope / tags / 文本查询笔记。 */
   queryNotes(q: Query): Promise<Note[]> {
     return call("API.QueryNotes", q);
+  },
+  /** RecentAudit 返回最近的副作用操作记录（只读）。 */
+  recentAudit(limit: number): Promise<Entry[]> {
+    return call("API.RecentAudit", limit);
   },
   /** ResumeAll 不重跑已经停掉的 agent。停掉的那一轮不会自己再开始。 */
   resumeAll(): Promise<number> {
@@ -783,4 +824,10 @@ export const events = {
   /** 知识库事件。 */
   knowledgeChanged: event<Note>("knowledge.changed"),
   knowledgeDeleted: event<string>("knowledge.deleted"),
+  /**
+   * 写操作审批：卡片出现、卡片结束。后端还会用 ListApprovals 补状态，
+   * 保证界面刷新/重开后不会漏掉正在等的那一张。
+   */
+  toolApproval: event<ApprovalView>("tool.approval"),
+  toolApprovalDone: event<string>("tool.approval.done"),
 } as const;

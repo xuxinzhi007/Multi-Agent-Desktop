@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/tool"
@@ -42,6 +45,9 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 
 	reg := tool.NewRegistry()
 	builtin.Register(reg, workDir)
+	if appr := m.Approvals(); appr != nil {
+		reg.Approver = appr.Approver(a.ID, a.Name)
+	}
 	reg.Register(&listAgentsTool{m: m})
 	reg.Register(&askAgentTool{m: m, fromID: a.ID})
 	reg.Register(&createAgentTool{m: m, fromID: a.ID})
@@ -244,11 +250,78 @@ func (e *loopEmitter) Emit(ev loop.Event) {
 			"id": e.agent.ID, "tool": ev.Tool, "phase": "end",
 			"status": string(ev.Status), "content": truncate(ev.Content, 400),
 		})
+		e.audit(ev)
 	case "done", "stopped", "failed":
 		e.m.emit("agent.loop", map[string]any{
 			"id": e.agent.ID, "kind": ev.Kind, "iter": ev.Iter, "reason": ev.Reason,
 		})
 	}
+}
+
+// audit 把有副作用的工具调用写进独立日志。
+// 只记写操作和 bash：读文件也记的话，审计会被噪音淹掉。
+func (e *loopEmitter) audit(ev loop.Event) {
+	sink := e.m.Audit()
+	if sink == nil || ev.Result == nil || ev.Call == nil {
+		return
+	}
+	if !isSideEffectTool(ev.Call.Name) {
+		return
+	}
+	entry := audit.Entry{
+		AgentID:    e.agent.ID,
+		AgentName:  e.agent.Name,
+		Tool:       ev.Call.Name,
+		CallID:     ev.Call.ID,
+		Status:     string(ev.Result.Status),
+		DurationMS: ev.Result.Meta.DurationMS,
+		ExitCode:   ev.Result.Meta.ExitCode,
+		WorkDir:    e.agent.EffectiveWorkDir(e.m),
+		Summary:    auditSummary(ev.Call, ev.Result),
+	}
+	if err := sink.Append(entry); err != nil {
+		log.Printf("写审计日志失败：%v", err)
+	}
+}
+
+func isSideEffectTool(name string) bool {
+	switch name {
+	case "bash", "write_file", "edit_file":
+		return true
+	}
+	return false
+}
+
+func auditSummary(call *tool.Call, res *tool.Result) string {
+	switch call.Name {
+	case "bash":
+		var in struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(call.Input, &in) == nil && strings.TrimSpace(in.Command) != "" {
+			return truncate(in.Command, 240)
+		}
+	case "write_file", "edit_file":
+		if res.Meta.Path != "" {
+			added, removed := diffStat(res.Meta.Diff)
+			return fmt.Sprintf("%s +%d/-%d", res.Meta.Path, added, removed)
+		}
+	}
+	return truncate(res.Content, 120)
+}
+
+func diffStat(d string) (added, removed int) {
+	for _, line := range strings.Split(d, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+			continue
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	return added, removed
 }
 
 func truncate(s string, n int) string {

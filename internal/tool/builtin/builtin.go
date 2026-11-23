@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"multi-agent-desktop/internal/diff"
 	"multi-agent-desktop/internal/proc"
+	"multi-agent-desktop/internal/shellguard"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/workdir"
 )
@@ -58,6 +60,32 @@ func (*Bash) Schema() json.RawMessage {
 	}`)
 }
 
+// Preview 给审批卡看：要跑什么命令、在哪个目录。
+// 明显毁盘的写法在这里就拦掉，不浪费用户一次点击。
+func (b *Bash) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, error) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return tool.Preview{}, fmt.Errorf("cannot parse arguments: %v", err)
+	}
+	cmd := strings.TrimSpace(in.Command)
+	if cmd == "" {
+		return tool.Preview{}, fmt.Errorf("command must not be empty")
+	}
+	if blocked, reason := shellguard.Check(cmd); blocked {
+		return tool.Preview{Blocked: true, Reason: reason}, nil
+	}
+	dir := b.WorkDir
+	if dir == "" {
+		dir = "(未设置)"
+	}
+	return tool.Preview{
+		Title:  "运行命令",
+		Detail: "目录：" + dir + "\n" + cmd,
+	}, nil
+}
+
 func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
 		Command     string `json:"command"`
@@ -68,6 +96,9 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return tool.Fail("command must not be empty")
+	}
+	if blocked, reason := shellguard.Check(in.Command); blocked {
+		return tool.Result{Status: tool.StatusDenied, Content: "operation blocked by policy: " + reason}
 	}
 	if workdir.TooBroad(b.WorkDir) {
 		return tool.Fail("%s", workdir.RejectReason)
@@ -294,6 +325,31 @@ func (*WriteFile) Schema() json.RawMessage {
 	}`)
 }
 
+// Preview 先算出「会改成什么样」，审批卡和检查器都靠它。
+func (w *WriteFile) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, error) {
+	var in struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return tool.Preview{}, fmt.Errorf("cannot parse arguments: %v", err)
+	}
+	abs, err := safePath(w.WorkDir, in.Path)
+	if err != nil {
+		return tool.Preview{}, err
+	}
+	before, _ := os.ReadFile(abs)
+	detail := fmt.Sprintf("覆盖 %s：%d 字节 → %d 字节", in.Path, len(before), len(in.Content))
+	if _, err := os.Stat(abs); os.IsNotExist(err) {
+		detail = fmt.Sprintf("新建 %s：%d 字节", in.Path, len(in.Content))
+	}
+	return tool.Preview{
+		Title:  "写入文件",
+		Detail: detail,
+		Diff:   diff.Unified(displayPath(in.Path), string(before), in.Content, 3),
+	}, nil
+}
+
 func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
 		Path    string `json:"path"`
@@ -309,10 +365,14 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return tool.Fail("cannot create parent directory: %v", err)
 	}
+	before, _ := os.ReadFile(abs)
 	if err := os.WriteFile(abs, []byte(in.Content), 0o644); err != nil {
 		return tool.Fail("cannot write %s: %v", in.Path, err)
 	}
-	return tool.OK(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path))
+	res := tool.OK(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path))
+	res.Meta.Path = displayPath(in.Path)
+	res.Meta.Diff = diff.Unified(displayPath(in.Path), string(before), in.Content, 3)
+	return res
 }
 
 // EditFile 精确替换。
@@ -340,49 +400,87 @@ func (*EditFile) Schema() json.RawMessage {
 	}`)
 }
 
-func (e *EditFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
+type editPlan struct {
+	Path   string
+	Abs    string
+	Before string
+	After  string
+}
+
+// plan 做所有只读校验，算出替换后的全文。
+// Preview 和 Execute 共用，保证「审批时看到的」就是「真要写的」。
+func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	var in struct {
 		Path    string `json:"path"`
 		OldText string `json:"oldText"`
 		NewText string `json:"newText"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return tool.Fail("cannot parse arguments: %v", err)
+		return editPlan{}, fmt.Errorf("cannot parse arguments: %v", err)
 	}
 	if in.OldText == "" {
-		return tool.Fail("oldText must not be empty")
+		return editPlan{}, fmt.Errorf("oldText must not be empty")
 	}
 	if in.OldText == in.NewText {
-		return tool.Fail("oldText and newText are identical; nothing to do")
+		return editPlan{}, fmt.Errorf("oldText and newText are identical; nothing to do")
 	}
 	abs, err := safePath(e.WorkDir, in.Path)
 	if err != nil {
-		return tool.Fail("%v", err)
+		return editPlan{}, err
 	}
-
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		return tool.Fail("cannot read %s: %v", in.Path, err)
+		return editPlan{}, fmt.Errorf("cannot read %s: %v", in.Path, err)
 	}
 	src := string(data)
-
 	n := strings.Count(src, in.OldText)
 	if n == 0 {
-		return tool.Fail(
+		return editPlan{}, fmt.Errorf(
 			"oldText not found in %s. Read the file again and copy the exact text, "+
 				"including whitespace and indentation.", in.Path)
 	}
 	if n > 1 {
-		return tool.Fail(
+		return editPlan{}, fmt.Errorf(
 			"oldText appears %d times in %s; it must be unique. "+
 				"Include more surrounding context to disambiguate.", n, in.Path)
 	}
+	return editPlan{
+		Path:   in.Path,
+		Abs:    abs,
+		Before: src,
+		After:  strings.Replace(src, in.OldText, in.NewText, 1),
+	}, nil
+}
 
-	out := strings.Replace(src, in.OldText, in.NewText, 1)
-	if err := os.WriteFile(abs, []byte(out), 0o644); err != nil {
-		return tool.Fail("cannot write %s: %v", in.Path, err)
+func (e *EditFile) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, error) {
+	p, err := e.plan(raw)
+	if err != nil {
+		return tool.Preview{}, err
 	}
-	return tool.OK(fmt.Sprintf("edited %s (%d bytes -> %d bytes)", in.Path, len(src), len(out)))
+	return tool.Preview{
+		Title:  "编辑文件",
+		Detail: fmt.Sprintf("编辑 %s：%d 字节 → %d 字节", p.Path, len(p.Before), len(p.After)),
+		Diff:   diff.Unified(displayPath(p.Path), p.Before, p.After, 3),
+	}, nil
+}
+
+func (e *EditFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
+	p, err := e.plan(raw)
+	if err != nil {
+		return tool.Fail("%v", err)
+	}
+	if err := os.WriteFile(p.Abs, []byte(p.After), 0o644); err != nil {
+		return tool.Fail("cannot write %s: %v", p.Path, err)
+	}
+	res := tool.OK(fmt.Sprintf("edited %s (%d bytes -> %d bytes)", p.Path, len(p.Before), len(p.After)))
+	res.Meta.Path = displayPath(p.Path)
+	res.Meta.Diff = diff.Unified(displayPath(p.Path), p.Before, p.After, 3)
+	return res
+}
+
+// displayPath 把相对路径统一成 slash，diff 头里不出现反斜杠。
+func displayPath(p string) string {
+	return strings.ReplaceAll(filepath.ToSlash(p), "\\", "/")
 }
 
 // Register 把 4 个原语工具装进注册表。

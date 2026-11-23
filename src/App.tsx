@@ -6,6 +6,7 @@ import FeishuRoomView from './components/FeishuRoomView'
 import FleetView from './components/FleetView'
 import AmbientBackground from './components/AmbientBackground'
 import Inspector, { type InspectorTab } from './components/Inspector'
+import ApprovalModal from './components/ApprovalModal'
 import KnowledgePanel from './components/KnowledgePanel'
 import SettingsModal from './components/SettingsModal'
 import ToastContainer from './components/Toast'
@@ -253,6 +254,8 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
       />
+
+      <ApprovalModal items={s.approvals} onDecide={s.decideApproval} />
 
       <ToastContainer />
       </div>

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"multi-agent-desktop/internal/approval"
+	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/worktree"
 )
@@ -120,6 +122,10 @@ type Manager struct {
 	knowledge KnowledgeProvider
 	feed      Feed
 	feishuOn  bool
+	// approvals 是写操作审批中心；nil 表示不审批（测试/无界面）。
+	approvals *approval.Center
+	// audit 记录有副作用的工具调用；nil 表示不记录。
+	audit *audit.Log
 	// waiting 记录 ask_agent 的等待边：fromID -> toID。用来拦住互相等待。
 	waiting map[string]string
 	// routed 记录转发出去、还没结束的目标。
@@ -153,6 +159,34 @@ func (m *Manager) SetKnowledge(k KnowledgeProvider) {
 	m.mu.Lock()
 	m.knowledge = k
 	m.mu.Unlock()
+}
+
+// SetApprovals 注入审批中心。nil 表示写操作不审批。
+func (m *Manager) SetApprovals(c *approval.Center) {
+	m.mu.Lock()
+	m.approvals = c
+	m.mu.Unlock()
+}
+
+// Approvals 返回审批中心，没装时为 nil。
+func (m *Manager) Approvals() *approval.Center {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.approvals
+}
+
+// SetAudit 注入审计日志。nil 表示不记录。
+func (m *Manager) SetAudit(l *audit.Log) {
+	m.mu.Lock()
+	m.audit = l
+	m.mu.Unlock()
+}
+
+// Audit 返回审计日志，没装时为 nil。
+func (m *Manager) Audit() *audit.Log {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.audit
 }
 
 func (m *Manager) NoteBook() NoteBook {
@@ -799,6 +833,10 @@ func (m *Manager) remove(id string, cancel bool) bool {
 	close(a.done)
 	if cancel {
 		a.stop()
+	}
+	// 会话删了，「本会话允许」的授权没有意义，避免同名新会话继承旧授权。
+	if appr := m.Approvals(); appr != nil {
+		appr.Forget(id)
 	}
 	go m.emit("agent.deleted", map[string]any{"id": id})
 	m.goSave()

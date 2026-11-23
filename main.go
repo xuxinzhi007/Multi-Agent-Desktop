@@ -18,6 +18,8 @@ import (
 	"github.com/egoist/mygo"
 
 	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/approval"
+	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
@@ -107,7 +109,31 @@ var (
 	// 知识库事件。
 	KnowledgeChanged = mygo.NewEvent[knowledge.Note]("knowledge.changed")
 	KnowledgeDeleted = mygo.NewEvent[string]("knowledge.deleted")
+	// 写操作审批：卡片出现、卡片结束。后端还会用 ListApprovals 补状态，
+	// 保证界面刷新/重开后不会漏掉正在等的那一张。
+	ToolApproval     = mygo.NewEvent[ApprovalView]("tool.approval")
+	ToolApprovalDone = mygo.NewEvent[string]("tool.approval.done")
 )
+
+// ApprovalView 是一张等待用户决定的写操作卡片。
+type ApprovalView struct {
+	ID        string `json:"id"`
+	AgentID   string `json:"agentId"`
+	AgentName string `json:"agentName"`
+	Tool      string `json:"tool"`
+	Title     string `json:"title"`
+	Detail    string `json:"detail"`
+	Diff      string `json:"diff,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func toApprovalView(v approval.View) ApprovalView {
+	return ApprovalView{
+		ID: v.ID, AgentID: v.AgentID, AgentName: v.AgentName,
+		Tool: v.Tool, Title: v.Title, Detail: v.Detail, Diff: v.Diff,
+		CreatedAt: v.CreatedAt,
+	}
+}
 
 // StatusEvent 是 agent 状态变化。
 type StatusEvent struct {
@@ -799,6 +825,58 @@ func (s *API) CreateSupervisor(req SupervisorRequest) (AgentView, error) {
 func (s *API) CreateCLIAgent(name, role, backend string) AgentView {
 	a := s.mgr.CreateWithBackend("", name, role, backend)
 	return toAgentView(a)
+}
+
+// ListApprovals 返回所有还在等用户决定的写操作。
+func (s *API) ListApprovals() []ApprovalView {
+	if s.mgr == nil {
+		return nil
+	}
+	center := s.mgr.Approvals()
+	if center == nil {
+		return nil
+	}
+	list := center.Pending()
+	out := make([]ApprovalView, 0, len(list))
+	for _, v := range list {
+		out = append(out, toApprovalView(v))
+	}
+	return out
+}
+
+// DecideApproval 是审批卡上的那一下。remember 表示本会话对这个工具以后放行。
+func (s *API) DecideApproval(id string, allow, remember bool) error {
+	if s.mgr == nil {
+		return fmt.Errorf("会话还没准备好")
+	}
+	center := s.mgr.Approvals()
+	if center == nil {
+		return fmt.Errorf("当前没有审批队列")
+	}
+	return center.Decide(id, allow, remember, "")
+}
+
+// RecentAudit 返回最近的副作用操作记录（只读）。
+func (s *API) RecentAudit(limit int) ([]audit.Entry, error) {
+	if s.mgr == nil {
+		return nil, nil
+	}
+	log := s.mgr.Audit()
+	if log == nil {
+		return nil, nil
+	}
+	return log.Recent(limit)
+}
+
+// AuditPath 告诉界面审计日志落在哪。
+func (s *API) AuditPath() string {
+	if s.mgr == nil {
+		return ""
+	}
+	if log := s.mgr.Audit(); log != nil {
+		return log.Path()
+	}
+	return ""
 }
 
 // PromptAgent 发消息并流式回流。
@@ -2405,6 +2483,43 @@ func toAgentReasoning(data any) (AgentReasoningEvent, bool) {
 	return AgentReasoningEvent{ID: id, Reasoning: reasoning}, true
 }
 
+func toApprovalEvent(data any) (ApprovalView, bool) {
+	switch v := data.(type) {
+	case approval.View:
+		return toApprovalView(v), true
+	case map[string]any:
+		id, _ := v["id"].(string)
+		if id == "" {
+			return ApprovalView{}, false
+		}
+		out := ApprovalView{
+			ID:        id,
+			AgentID:   str(v["agentId"]),
+			AgentName: str(v["agentName"]),
+			Tool:      str(v["tool"]),
+			Title:     str(v["title"]),
+			Detail:    str(v["detail"]),
+			Diff:      str(v["diff"]),
+		}
+		out.CreatedAt, _ = v["createdAt"].(int64)
+		return out, true
+	}
+	return ApprovalView{}, false
+}
+
+func approvalDoneID(data any) (string, bool) {
+	if m, ok := data.(map[string]any); ok {
+		id, _ := m["id"].(string)
+		return id, id != ""
+	}
+	return "", false
+}
+
+func str(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
 func toAgentTool(data any) (AgentToolEvent, bool) {
 	m, ok := data.(map[string]any)
 	if !ok {
@@ -2661,6 +2776,14 @@ func emitToWindow(win *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, 
 			if n, ok := noteFromEvent(data); ok {
 				KnowledgeChanged.Emit(win, n)
 			}
+		case "tool.approval":
+			if v, ok := toApprovalEvent(data); ok {
+				ToolApproval.Emit(win, v)
+			}
+		case "tool.approval.done":
+			if id, ok := approvalDoneID(data); ok {
+				ToolApprovalDone.Emit(win, id)
+			}
 		case "agent.channel.reply":
 			if v, ok := toAgentChannelReply(data); ok {
 				// 把 agent 回复写入频道历史
@@ -2728,6 +2851,9 @@ func main() {
 
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
+	// 写操作审批与审计：生产路径必须有，测试里不装就是放行。
+	mgr.SetApprovals(approval.New(func(event string, data any) { emit(event, data) }))
+	mgr.SetAudit(audit.Open(filepath.Join(dataDir, "audit.jsonl")))
 	mgr.SetProviders(effective.Providers)
 	workDir := defaultWorkDir(dataDir)
 	if effective.WorkDir != "" && !workdir.TooBroad(effective.WorkDir) {

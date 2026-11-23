@@ -138,6 +138,7 @@ type Event struct {
 	Status  tool.Status   `json:"status,omitempty"`
 	Content string        `json:"content,omitempty"`
 	Result  *tool.Result  `json:"result,omitempty"`
+	Call    *tool.Call    `json:"call,omitempty"`
 	Reason  string        `json:"reason,omitempty"`
 	Calls   []tool.Call   `json:"calls,omitempty"`
 	Msgs    []llm.Message `json:"msgs,omitempty"`
@@ -391,9 +392,10 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 			st.Messages = append(st.Messages, toolMessage(c, res, r.SaveImage))
 			keepLatestImage(st.Messages)
+			call := c
 			r.emit(Event{
 				Kind: "tool.end", Phase: st.Phase, Iter: st.Iteration,
-				Tool: c.Name, Status: res.Status, Content: res.Content, Result: &res,
+				Tool: c.Name, Status: res.Status, Content: res.Content, Result: &res, Call: &call,
 			})
 		}
 

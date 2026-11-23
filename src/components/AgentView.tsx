@@ -1578,6 +1578,33 @@ const Bubble = memo(
       (b.calls ?? []).map((c) => `${c.name}:${c.ok}:${c.reply}`).join('\n'),
 )
 
+/**
+ * StreamingMarkdown 把「每来一个 token 就整段重新解析」降到约 8 次/秒。
+ *
+ * 长回答里 ReactMarkdown 是最大的单帧成本：文本越长，解析越慢，
+ * 但人眼分辨不出 16ms 和 120ms 的排版更新。正文仍然立刻累积进状态，
+ * 只有解析按间隔跑；流结束后的那一帧做一次全量解析，保证最终内容准确。
+ */
+function StreamingMarkdown({ text, live }: { text: string; live: boolean }) {
+  const latest = useRef(text)
+  latest.current = text
+  const [shown, setShown] = useState(text)
+
+  useEffect(() => {
+    if (!live) return
+    const id = window.setInterval(() => setShown(latest.current), 120)
+    return () => window.clearInterval(id)
+  }, [live])
+
+  useEffect(() => {
+    if (!live) setShown(text)
+  }, [text, live])
+
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>{live ? shown : text}</ReactMarkdown>
+  )
+}
+
 type BubbleProps = {
   m: Message
   tone: number
@@ -1759,7 +1786,7 @@ function BubbleImpl({
       </div>
       <div className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
         {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+        <StreamingMarkdown text={displayContent} live={!!live} />
         <PeerCallList calls={calls} agents={agents} />
       </div>
       {artifacts.length > 0 && (

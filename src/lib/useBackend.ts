@@ -3,6 +3,7 @@ import {
   API,
   events,
   type AgentView as Agent,
+  type ApprovalView,
   type Channel,
   type ChannelMessage,
   type Config,
@@ -59,6 +60,8 @@ type State = {
   outbox: Record<string, string[]>
   /** 最近一次停止的原因与进度。「为什么停」必须能说清，不能只显示「已停止」。 */
   stops: Record<string, { reason: string; iter: number; used: number; at: number }>
+  /** 等待用户决定的写操作。队列按到达顺序，模态框只展示最前面一张。 */
+  approvals: ApprovalView[]
 }
 
 const EMPTY: State = {
@@ -83,6 +86,7 @@ const EMPTY: State = {
   pending: {},
   outbox: {},
   stops: {},
+  approvals: [],
 }
 
 const PAGE = 40
@@ -243,6 +247,8 @@ export function useBackend() {
     )
     load(API.getLLMConfig(), (llm) => setState((s) => ({ ...s, llm })))
     load(API.getWorkDir(), (workDir) => setState((s) => ({ ...s, workDir })))
+    // 审批队列要补一次状态：界面刷新或后端已经卡在等审批时，不能靠事件补历史。
+    load(API.listApprovals(), (list) => setState((s) => ({ ...s, approvals: list ?? [] })))
 
     sub(events.agentCreated, (a) =>
       setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, shellAgent(a)] })),
@@ -387,9 +393,8 @@ export function useBackend() {
       })
     })
     sub(events.toolStart, (e) => {
-      // 工具已开始执行 —— 这是信息事件，不是审批请求。
-      // 真正的「等你审批」要等后端接入工具审批流程后由后端发状态，
-      // 前端不能在这里把 agent 标成 blocked（会永久锁在等人状态）。
+      // 工具已开始执行 —— 这是信息事件。真正的「等你审批」走 tool.approval，
+      // 审批卡由 ApprovalModal 单独渲染；这里不能把 agent 标成 blocked。
       setState((s) => ({
         ...s,
         tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
@@ -562,6 +567,19 @@ export function useBackend() {
     )
     sub(events.knowledgeDeleted, (id) =>
       setState((s) => ({ ...s, notes: s.notes.filter((n) => n.id !== id) })),
+    )
+
+    // 审批：按 id 去重后入队。决定送达后端时本地先收卡，后端随后发的 done 是幂等的；
+    // 送达失败时不收卡，错误会留在卡片上。
+    sub(events.toolApproval, (v: ApprovalView) =>
+      setState((s) =>
+        s.approvals.some((x) => x.id === v.id)
+          ? { ...s, approvals: s.approvals.map((x) => (x.id === v.id ? v : x)) }
+          : { ...s, approvals: [...s.approvals, v] },
+      ),
+    )
+    sub(events.toolApprovalDone, (id) =>
+      setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) })),
     )
 
     return () => {
@@ -853,7 +871,14 @@ export function useBackend() {
     }
   }, [refreshNotes])
 
-  return { ...state, send, refreshNotes, openAgent, parkAgents }
+  // 决定送达后端后先收卡，界面立刻有反馈；后端随后发的 done 是幂等的。
+  // 送达失败时不收卡，错误留在卡片上，用户能重试。
+  const decideApproval = useCallback(async (id: string, allow: boolean, remember: boolean) => {
+    await API.decideApproval(id, allow, remember)
+    setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) }))
+  }, [])
+
+  return { ...state, send, refreshNotes, openAgent, parkAgents, decideApproval }
 }
 
 function oneLine(text?: string) {

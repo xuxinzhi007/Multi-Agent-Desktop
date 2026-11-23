@@ -1,7 +1,7 @@
 # 设计文档：multi-agent-desktop
 
-> 版本：0.4.0
-> 最后更新：2026-11-21
+> 版本：0.4.2
+> 最后更新：2026-11-23
 
 这一份写的是**代码里已经落地的行为**。`docs/reviews/` 里的评审和方案是历史提案，不代表现在能用。
 
@@ -12,9 +12,9 @@
 跨平台（macOS / Windows / Linux）的多 Agent 开发工具桌面程序。
 N 个 AI agent 并行工作，各自独立会话。用户可以看舰队和对话、中途插话、停止、改这个会话的模型和工作目录。
 
-**当前形态**：多 agent 会话 + 进程内工具循环（读写文件、shell、内置浏览器、会话之间派活）+ 频道 + 知识库 + 飞书多机器人。
+**当前形态**：多 agent 会话 + 进程内工具循环（读写文件、shell、内置浏览器、会话之间派活）+ 写操作审批与命令审计 + 频道 + 知识库 + 飞书多机器人 + git worktree 隔离 + Supervisor 自动拆任务。
 
-**还没做**：git worktree 隔离、Supervisor 自动拆任务、工具审批、检查器里的改动/任务数据、shell 流式输出和手动命令的超时、API Key 进钥匙串、历史改 SQLite、agent id 改 ULID。
+**还没做**：检查器里的改动/任务数据、shell 流式输出和手动命令的超时、API Key 进钥匙串、历史改 SQLite、agent id 改 ULID。
 
 ---
 
@@ -212,7 +212,9 @@ running / queued --BlockAgent--> blocked
 
 预算默认 24 轮、64 次工具、10 分钟墙钟。上下文超过窗口时先压缩，保留系统提示和最近大约 8000 token。同一会话的检查点在 `<dataDir>/loop/runs`，本会话消息能接上时可以续跑；频道里的这一轮不续跑。
 
-工具注册表的 `Approver` 在正式路径上是空的。写操作直接执行。`StatusDenied` 和检查器里的「待批准」样式没有产品入口。
+写操作在 `Registry.Invoke` 里分两步：先调工具的 `Preview`（标题、命令、diff），策略拦截的直接以 `denied` 结束；再由审批中心挂起，等界面上的卡片决定。允许一次只放行这一次，本会话允许按「会话 + 工具」记忆，删会话即失效。等待上限 5 分钟，ctx 取消（按停止）也会收起卡片。
+
+每次有副作用的调用（`bash` / `write_file` / `edit_file`）追加一行到 `<dataDir>/audit.jsonl`，字段包括会话、命令或文件、状态、退出码、耗时。前端只读地拿最近记录，不提供修改入口。危险命令（根目录/系统目录递归删除、格式化、写块设备、关机重启、fork bomb）由 `shellguard` 在执行前拦下，bash 的 `Preview` 与 `Execute` 各检查一次，防绕过注册表直调。
 
 ### 5.3 Agent 间协作与父子（已落地）
 
@@ -229,7 +231,7 @@ running / queued --BlockAgent--> blocked
 
 会话总数上限 8。`delete_agent` 只能删自己，或自己创建的子会话。互相 `ask_agent` 等待会被拦住。
 
-没有 Supervisor。不会读到一句用户消息就自动拆成前端/后端任务。
+Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目标，`executeSupervisor` 让模型拆成 2-4 个子任务，每个子任务建一个独立子会话（默认各自 worktree），并行跑完后把汇总写回父会话。最多 4 个子任务、总时限 20 分钟，仍受 8 会话上限约束；停止父会话会级联停止子会话。模型没给出可用的 JSON 方案时退化成一个子任务，不报错。
 
 ### 5.4 群聊（已落地）
 
@@ -363,7 +365,7 @@ running / queued --BlockAgent--> blocked
 | 限制 | 状态 | 说明 |
 |---|---|---|
 | 每个会话一条队列，连发不乱序 | ✅ 已落地 | `workerLoop`。跑的过程中本会话新消息会插进下一步 |
-| agent 可以互相派活 | ✅ 已落地 | `Route`、`ask_agent`、`create_agent`。没有自动拆任务 |
+| agent 可以互相派活 | ✅ 已落地 | `Route`、`ask_agent`、`create_agent`；批量拆任务走 Supervisor |
 | 会话持久化 | ✅ 已落地 | `agents.json`。不是 SQLite |
 | 群聊 | ✅ 已落地 | `discuss` / `direct` / `roundrobin` |
 | 会话级模型与目录 | ✅ 已落地 | 输入栏选择，凭据在设置里 |
@@ -375,9 +377,10 @@ running / queued --BlockAgent--> blocked
 | 父子会话 | ✅ 已落地 | `ParentID`，侧栏嵌套，总数 8 |
 | Qoder、StaleBuild、模型选择 | ✅ 已落地 | 见 5.11 |
 | 检查器的改动 / 任务 | ❌ 未做 | 页已经拿掉，没有结构化数据 |
-| 工具审批 | ❌ 未做 | `Approver` 未接入正式注册表 |
-| git worktree | ❌ 未做 | 多会话改同一份代码会冲突 |
-| Supervisor 自动拆任务 | ❌ 未做 | 要人分，或由模型自己调用工具 |
+| 工具审批 | ✅ 已落地 | 写前快照 + 结构化 diff；允许一次 / 本会话允许；5 分钟超时，停止即取消 |
+| 命令审计 | ✅ 已落地 | `<dataDir>/audit.jsonl`，记会话、命令、状态、退出码、耗时；危险命令前置拦截 |
+| git worktree | ✅ 已落地 | 会话级开关；工作树在 `.mad-worktrees/<仓库>/`，分支 `mad/<slug>`；仅 git 仓库生效 |
+| Supervisor 自动拆任务 | ✅ 已落地 | `backend=supervisor`，侧栏入口；2-4 个子任务、20 分钟总时限、子会话默认各建 worktree |
 | shell 流式输出；手动命令的超时 | ❌ 未做 | 手动执行只在取消时杀进程组 |
 | API Key / 飞书 Secret 明文 | 🟡 未做迁移 | `config.json` 权限 600；会话 Key 在 `agents.json`。见 `TODO(secrets)` |
 | 历史改 SQLite | ❌ 未做 | 仍是整份 JSON |

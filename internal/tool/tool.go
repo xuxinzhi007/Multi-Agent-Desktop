@@ -37,6 +37,28 @@ type Meta struct {
 	ExitCode   int  `json:"exitCode,omitempty"`
 	Truncated  bool `json:"truncated"`
 	Repeated   bool `json:"repeated,omitempty"`
+	// Path 是这次写操作改的文件（相对工作目录），Diff 是统一 diff 文本。
+	// 只在文件写工具上有值，用来给审批卡和检查器看"到底改了什么"。
+	Path string `json:"path,omitempty"`
+	Diff string `json:"diff,omitempty"`
+}
+
+// Preview 是执行前能给用户看的说明。
+//
+// 写操作审批不能只弹「write_file 要写某个文件」——用户没有信息就没法判断。
+// 所以工具在执行前先把标题、细节和 diff 交出来。
+type Preview struct {
+	Title  string `json:"title,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Diff   string `json:"diff,omitempty"`
+	// Blocked 为 true 表示策略层直接拒绝，不必再问用户。
+	Blocked bool   `json:"blocked,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// Previewer 可选实现：写操作执行前给出可读说明。
+type Previewer interface {
+	Preview(ctx context.Context, in json.RawMessage) (Preview, error)
 }
 
 // Call 是模型发起的一次工具调用。
@@ -44,6 +66,8 @@ type Call struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+	// Preview 由 Registry 在审批前填好，Approver 和界面直接读。
+	Preview Preview `json:"preview,omitempty"`
 }
 
 // Result 是一次调用的结局。
@@ -197,6 +221,25 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 	r.repeats[fp] = 1
 	r.mu.Unlock()
 
+	// 写操作先让工具交底：标题、命令、diff。没有这一步，审批只是盲签。
+	if t.Writes() {
+		if pv, ok := t.(Previewer); ok {
+			preview, err := pv.Preview(ctx, c.Input)
+			if err != nil {
+				return done(c, Fail("%v", err), start)
+			}
+			if preview.Blocked {
+				msg := "operation blocked by policy"
+				if preview.Reason != "" {
+					msg += ": " + preview.Reason
+				}
+				r.forget(fp)
+				return done(c, Result{Status: StatusDenied, Content: msg}, start)
+			}
+			c.Preview = preview
+		}
+	}
+
 	if t.Writes() && r.Approver != nil {
 		allowed, reason := r.Approver.Approve(ctx, c)
 		if !allowed {
@@ -204,6 +247,7 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 			if reason != "" {
 				msg += ": " + reason
 			}
+			r.forget(fp)
 			return done(c, Result{Status: StatusDenied, Content: msg}, start)
 		}
 	}
@@ -275,6 +319,15 @@ func done(c Call, res Result, start time.Time) Result {
 		res.Meta.DurationMS = int(time.Since(start).Milliseconds())
 	}
 	return res
+}
+
+// forget 清掉占位的幂等键。被拒或策略拦截的调用没有执行，
+// 不该在缓存里留下一条空结果，否则模型重试会拿到假的「相同结果」。
+func (r *Registry) forget(fp string) {
+	r.mu.Lock()
+	delete(r.seen, fp)
+	delete(r.repeats, fp)
+	r.mu.Unlock()
 }
 
 // Reset 清空去重状态。新一轮用户消息开始时调用，
