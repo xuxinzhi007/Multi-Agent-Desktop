@@ -29,10 +29,35 @@ type openAICompat struct {
 
 func (c *openAICompat) Name() string { return c.name }
 
-func (c *openAICompat) endpoint() string {
-	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
+func (c *openAICompat) endpoint() string { return ChatURL(c.cfg) }
+
+// ChatURL 拼对话地址。豆包方舟走 /api/v3/chat/completions，
+// 其它 OpenAI 兼容服务走 /v1/chat/completions。
+func ChatURL(cfg Config) string {
+	base := doubaoBase(cfg)
+	if cfg.Provider == "doubao" {
+		return base + "/chat/completions"
+	}
 	base = strings.TrimSuffix(base, "/v1")
 	return base + "/v1/chat/completions"
+}
+
+// ModelsURL 拼模型列表地址。
+func ModelsURL(cfg Config) string {
+	base := doubaoBase(cfg)
+	if cfg.Provider == "doubao" {
+		return base + "/models"
+	}
+	base = strings.TrimSuffix(base, "/v1")
+	return base + "/v1/models"
+}
+
+func doubaoBase(cfg Config) string {
+	base := strings.TrimSuffix(cfg.BaseURL, "/")
+	if cfg.Provider == "doubao" && !strings.Contains(base, "/api/") {
+		base += "/api/v3"
+	}
+	return base
 }
 
 // do 发出请求，并在「连接层就断了」时重试一次。
@@ -100,6 +125,17 @@ type chatResp struct {
 
 // ListModels 调 OpenAI /models 接口获取可用模型列表。
 func ListModels(ctx context.Context, cfg Config) ([]string, error) {
+	if cfg.Provider == DoubaoCLIProvider {
+		metas, err := ListDoubaoCLIModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, len(metas))
+		for i, m := range metas {
+			names[i] = m.Name
+		}
+		return names, nil
+	}
 	if cfg.Provider == "qoder" {
 		cfg = ApplyDefaults(cfg)
 		if cfg.APIKey == "" {
@@ -117,9 +153,7 @@ func ListModels(ctx context.Context, cfg Config) ([]string, error) {
 		}
 		return names, nil
 	}
-	base := strings.TrimSuffix(cfg.BaseURL, "/")
-	base = strings.TrimSuffix(base, "/v1")
-	url := base + "/v1/models"
+	url := ModelsURL(cfg)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

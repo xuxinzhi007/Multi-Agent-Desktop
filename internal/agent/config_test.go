@@ -376,7 +376,8 @@ func (s *stubKnowledge) NotesForSystemPrompt() []string {
 
 func TestSystemPromptFor(t *testing.T) {
 	got := systemPromptFor("后端专家")
-	want := "角色：后端专家。工作在 multi-agent-desktop 里，回答要具体、可执行。"
+	// 角色不再拼进 system：它由会话首条消息带出，系统提示只留应用级的边界。
+	want := "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。"
 	if got != want {
 		t.Errorf("systemPromptFor(\"后端专家\") = %q, want %q", got, want)
 	}

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/worktree"
 )
 
 type Status string
@@ -44,6 +46,14 @@ type Agent struct {
 	BlockedReason string `json:"blockedReason,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的，侧栏里和别人平级。
 	ParentID string `json:"parentId,omitempty"`
+	// Worktree 是这个会话的独立工作树路径。空表示和主仓库共用目录。
+	// 有值时 WorkDir 指向它，工具和 shell 都在里面跑。
+	Worktree       string `json:"worktree,omitempty"`
+	WorktreeBranch string `json:"worktreeBranch,omitempty"`
+	// WorktreeRepo 是主仓库根目录，回收 worktree 时用。
+	WorktreeRepo string `json:"worktreeRepo,omitempty"`
+	// WorktreeFrom 是切到 worktree 之前的工作目录，关掉隔离时还原。
+	WorktreeFrom string `json:"worktreeFrom,omitempty"`
 	// BioPinned 为真时，简介是用户写的，一轮结束不再覆盖。
 	BioPinned bool `json:"bioPinned,omitempty"`
 	// Proposal 是一轮结束后建议改成的简介。采用前不替换现在这一行。
@@ -212,23 +222,27 @@ func (m *Manager) Save() error {
 		if a, ok := m.agents[id]; ok {
 			a.mu.Lock()
 			data = append(data, Agent{
-				ID:        a.ID,
-				Name:      a.Name,
-				Role:      a.Role,
-				Color:     a.Color,
-				Status:    StatusIdle, // 重启后都是空闲
-				CreatedAt: a.CreatedAt,
-				Messages:  append([]llm.Message(nil), a.Messages...),
-				Backend:   a.Backend,
-				WorkDir:   a.WorkDir,
-				LLMCfg:    a.LLMCfg,
-				ParentID:  a.ParentID,
-				BioPinned: a.BioPinned,
-				Proposal:  a.Proposal,
-				LearnAt:   a.LearnAt,
-				LearnText: a.LearnText,
-				LearnBy:   a.LearnBy,
-				Knowledge: append([]string(nil), a.Knowledge...),
+				ID:             a.ID,
+				Name:           a.Name,
+				Role:           a.Role,
+				Color:          a.Color,
+				Status:         StatusIdle, // 重启后都是空闲
+				CreatedAt:      a.CreatedAt,
+				Messages:       append([]llm.Message(nil), a.Messages...),
+				Backend:        a.Backend,
+				WorkDir:        a.WorkDir,
+				LLMCfg:         a.LLMCfg,
+				ParentID:       a.ParentID,
+				Worktree:       a.Worktree,
+				WorktreeBranch: a.WorktreeBranch,
+				WorktreeRepo:   a.WorktreeRepo,
+				WorktreeFrom:   a.WorktreeFrom,
+				BioPinned:      a.BioPinned,
+				Proposal:       a.Proposal,
+				LearnAt:        a.LearnAt,
+				LearnText:      a.LearnText,
+				LearnBy:        a.LearnBy,
+				Knowledge:      append([]string(nil), a.Knowledge...),
 			})
 			a.mu.Unlock()
 		}
@@ -353,26 +367,30 @@ func (m *Manager) Load() error {
 	defer m.mu.Unlock()
 	for _, saved := range data {
 		a := &Agent{
-			ID:            saved.ID,
-			Name:          saved.Name,
-			Role:          saved.Role,
-			Color:         saved.Color,
-			Status:        StatusIdle,
-			CreatedAt:     saved.CreatedAt,
-			Messages:      saved.Messages,
-			Backend:       canonicalBackend(saved.Backend),
-			WorkDir:       saved.WorkDir,
-			LLMCfg:        saved.LLMCfg,
-			ParentID:      saved.ParentID,
-			Knowledge:     append([]string(nil), saved.Knowledge...),
-			BlockedReason: saved.BlockedReason,
-			BioPinned:     saved.BioPinned,
-			Proposal:      saved.Proposal,
-			LearnAt:       saved.LearnAt,
-			LearnText:     saved.LearnText,
-			LearnBy:       saved.LearnBy,
-			queue:         make(chan PromptRequest, 32),
-			done:          make(chan struct{}),
+			ID:             saved.ID,
+			Name:           saved.Name,
+			Role:           saved.Role,
+			Color:          saved.Color,
+			Status:         StatusIdle,
+			CreatedAt:      saved.CreatedAt,
+			Messages:       saved.Messages,
+			Backend:        canonicalBackend(saved.Backend),
+			WorkDir:        saved.WorkDir,
+			LLMCfg:         saved.LLMCfg,
+			ParentID:       saved.ParentID,
+			Worktree:       saved.Worktree,
+			WorktreeBranch: saved.WorktreeBranch,
+			WorktreeRepo:   saved.WorktreeRepo,
+			WorktreeFrom:   saved.WorktreeFrom,
+			Knowledge:      append([]string(nil), saved.Knowledge...),
+			BlockedReason:  saved.BlockedReason,
+			BioPinned:      saved.BioPinned,
+			Proposal:       saved.Proposal,
+			LearnAt:        saved.LearnAt,
+			LearnText:      saved.LearnText,
+			LearnBy:        saved.LearnBy,
+			queue:          make(chan PromptRequest, 32),
+			done:           make(chan struct{}),
 		}
 		m.agents[a.ID] = a
 		m.order = append(m.order, a.ID)
@@ -463,6 +481,10 @@ func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	if !ok {
 		return fmt.Errorf("agent %s not found", id)
 	}
+	// 换目录等于离开隔离的工作树。先收掉它，否则会留下一个孤儿检出。
+	if sn := a.Snapshot(); sn.Worktree != "" {
+		m.disableWorktreeQuiet(id)
+	}
 	a.mu.Lock()
 	a.WorkDir = dir
 	a.mu.Unlock()
@@ -488,6 +510,14 @@ func (m *Manager) SetAgentLLM(id string, cfg llm.Config) error {
 		cfg = fillSavedCreds(m, cfg)
 		cfg = llm.ApplyDefaults(cfg)
 		a.LLMCfg = &cfg
+	}
+	// 选了豆包 CLI 就走 CLI 后端：这条通道的工具循环在 CLI 进程里，
+	// 不能再按 loop 去拼我们自己的工具注册表。换回别的模型时还原 loop。
+	switch {
+	case cfg.Provider == llm.DoubaoCLIProvider:
+		a.Backend = "doubao"
+	case a.Backend == "doubao":
+		a.Backend = "loop"
 	}
 	a.mu.Unlock()
 	m.goSave()
@@ -753,6 +783,19 @@ func (m *Manager) remove(id string, cancel bool) bool {
 		return false
 	}
 
+	// 会话没了，它的独立工作树也该收掉。失败只记日志：
+	// 删会话是用户意图，不能被一个 git 锁挡住。
+	if sn := a.Snapshot(); sn.Worktree != "" {
+		info := worktree.Info{Repo: sn.WorktreeRepo, Path: sn.Worktree, Branch: sn.WorktreeBranch}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := worktree.Remove(ctx, info); err != nil {
+				log.Printf("清理 worktree 失败：%v", err)
+			}
+		}()
+	}
+
 	close(a.done)
 	if cancel {
 		a.stop()
@@ -818,7 +861,7 @@ func complete(req PromptRequest, text, err string) {
 // RunPrompt 入队并等到这条消息结束。不写 ChannelID，回复留在该会话里。
 func (m *Manager) RunPrompt(ctx context.Context, agentID, text string) (string, error) {
 	out := &promptOutcome{done: make(chan struct{})}
-	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Done: out.done, outcome: out}); err != nil {
+	if err := m.Prompt(ctx, PromptRequest{AgentID: agentID, Text: text, Done: out.done, outcome: out, Ctx: ctx}); err != nil {
 		return "", err
 	}
 	select {
@@ -1196,6 +1239,10 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 	switch backend {
 	case "loop":
 		a.executeLoop(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
+	case "supervisor":
+		a.executeSupervisor(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
+	case "doubao":
+		a.executeDoubao(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
 	default:
 		a.executeMock(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
 	}
@@ -1560,34 +1607,38 @@ func (a *Agent) Snapshot() *Agent {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return &Agent{
-		ID:            a.ID,
-		Name:          a.Name,
-		Role:          a.Role,
-		Color:         a.Color,
-		Status:        a.Status,
-		CreatedAt:     a.CreatedAt,
-		Messages:      append([]llm.Message(nil), a.Messages...),
-		QueueLen:      a.QueueLen,
-		Backend:       a.Backend,
-		WorkDir:       a.WorkDir,
-		LLMCfg:        a.LLMCfg,
-		ParentID:      a.ParentID,
-		Knowledge:     append([]string(nil), a.Knowledge...),
-		BlockedReason: a.BlockedReason,
-		BioPinned:     a.BioPinned,
-		Proposal:      a.Proposal,
-		LearnAt:       a.LearnAt,
-		LearnText:     a.LearnText,
-		LearnBy:       a.LearnBy,
-		LearnBusy:     a.LearnBusy,
-		StartedAt:     a.StartedAt,
-		QueuedAt:      a.QueuedAt,
-		LastTool:      a.LastTool,
-		Chars:         a.Chars,
-		LastError:     a.LastError,
-		turnKind:      a.turnKind,
-		turnReason:    a.turnReason,
-		BusyPlace:     a.BusyPlace,
+		ID:             a.ID,
+		Name:           a.Name,
+		Role:           a.Role,
+		Color:          a.Color,
+		Status:         a.Status,
+		CreatedAt:      a.CreatedAt,
+		Messages:       append([]llm.Message(nil), a.Messages...),
+		QueueLen:       a.QueueLen,
+		Backend:        a.Backend,
+		WorkDir:        a.WorkDir,
+		LLMCfg:         a.LLMCfg,
+		ParentID:       a.ParentID,
+		Worktree:       a.Worktree,
+		WorktreeBranch: a.WorktreeBranch,
+		WorktreeRepo:   a.WorktreeRepo,
+		WorktreeFrom:   a.WorktreeFrom,
+		Knowledge:      append([]string(nil), a.Knowledge...),
+		BlockedReason:  a.BlockedReason,
+		BioPinned:      a.BioPinned,
+		Proposal:       a.Proposal,
+		LearnAt:        a.LearnAt,
+		LearnText:      a.LearnText,
+		LearnBy:        a.LearnBy,
+		LearnBusy:      a.LearnBusy,
+		StartedAt:      a.StartedAt,
+		QueuedAt:       a.QueuedAt,
+		LastTool:       a.LastTool,
+		Chars:          a.Chars,
+		LastError:      a.LastError,
+		turnKind:       a.turnKind,
+		turnReason:     a.turnReason,
+		BusyPlace:      a.BusyPlace,
 	}
 }
 
@@ -1596,25 +1647,27 @@ func (a *Agent) viewMap() map[string]any {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return map[string]any{
-		"id":            a.ID,
-		"name":          a.Name,
-		"role":          a.Role,
-		"color":         a.Color,
-		"status":        string(a.Status),
-		"createdAt":     a.CreatedAt,
-		"messages":      append([]llm.Message(nil), a.Messages...),
-		"queueLen":      a.QueueLen,
-		"backend":       a.Backend,
-		"workDir":       a.WorkDir,
-		"parentId":      a.ParentID,
-		"llmCfg":        llm.RedactedPtr(a.LLMCfg), // nil 表示这个会话还没选模型
-		"knowledge":     append([]string(nil), a.Knowledge...),
-		"blockedReason": a.BlockedReason,
-		"proposal":      a.Proposal,
-		"learnAt":       a.LearnAt,
-		"learnTotal":    LearnEnd(len(a.Messages)),
-		"learnBy":       a.LearnBy,
-		"learnBusy":     a.LearnBusy,
+		"id":             a.ID,
+		"name":           a.Name,
+		"role":           a.Role,
+		"color":          a.Color,
+		"status":         string(a.Status),
+		"createdAt":      a.CreatedAt,
+		"messages":       append([]llm.Message(nil), a.Messages...),
+		"queueLen":       a.QueueLen,
+		"backend":        a.Backend,
+		"workDir":        a.WorkDir,
+		"worktree":       a.Worktree,
+		"worktreeBranch": a.WorktreeBranch,
+		"parentId":       a.ParentID,
+		"llmCfg":         llm.RedactedPtr(a.LLMCfg), // nil 表示这个会话还没选模型
+		"knowledge":      append([]string(nil), a.Knowledge...),
+		"blockedReason":  a.BlockedReason,
+		"proposal":       a.Proposal,
+		"learnAt":        a.LearnAt,
+		"learnTotal":     LearnEnd(len(a.Messages)),
+		"learnBy":        a.LearnBy,
+		"learnBusy":      a.LearnBusy,
 	}
 }
 

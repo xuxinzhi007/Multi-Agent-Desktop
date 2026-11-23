@@ -3,6 +3,7 @@ import { API, type AgentView as Agent, type Channel, type Room } from '../mygo'
 import { agentTree, linkParents, type AgentNode } from '../lib/agent-tree'
 import { previewMode } from '../lib/preview-runtime'
 import CreateAgentModal from './CreateAgentModal'
+import SupervisorModal from './SupervisorModal'
 
 type Props = {
   agents: Agent[]
@@ -16,6 +17,8 @@ type Props = {
   provider: string
   onSelect: (kind: 'agent' | 'channel' | 'feishu', id: string) => void
   onCreate: (name: string, role: string, backend: string, workDir?: string) => void
+  /** 自动拆任务：输入目标后由 Supervisor 建子会话并行执行 */
+  onCreateSupervisor: (req: { name: string; role: string; goal: string; workDir: string }) => Promise<void>
   onDelete: (id: string) => void
   onCreateChannel: (name: string, members: string[]) => void
   onOpenSettings: () => void
@@ -180,6 +183,14 @@ function AgentLine({
               {childCount}
             </span>
           )}
+          {a.worktree && (
+            <span
+              title={`独立工作树：${a.worktreeBranch || ''}`}
+              style={{ fontSize: 'var(--text-xs)', color: 'var(--accent-bright)', flexShrink: 0 }}
+            >
+              ⎇
+            </span>
+          )}
           <span
             className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}
             style={{ width: 5, height: 5 }}
@@ -299,6 +310,7 @@ function sessionLine(a: Agent): string {
 
 export default function Sidebar(p: Props) {
   const [showChannelModal, setShowChannelModal] = useState(false)
+  const [supOpen, setSupOpen] = useState(false)
   const [folded, setFolded] = useState<Record<string, boolean>>({})
   const [recovered, setRecovered] = useState<Record<string, string>>({})
   const hasParent = p.agents.some((a) => !!a.parentId)
@@ -646,6 +658,13 @@ export default function Sidebar(p: Props) {
         >
           <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
         </button>
+        <button
+          className="c-btn c-btn--ghost c-btn--full"
+          title="输入目标，自动拆成子任务并行执行"
+          onClick={() => setSupOpen(true)}
+        >
+          <span style={{ fontSize: 12, lineHeight: 1 }}>⑂</span> 自动拆任务
+        </button>
       </div>
 
       {/* 新建 Agent 弹窗 */}
@@ -654,6 +673,12 @@ export default function Sidebar(p: Props) {
         onClose={() => p.onCreateOpenChange(false)}
         onCreate={p.onCreate}
         existingCount={p.agents.length}
+      />
+
+      <SupervisorModal
+        open={supOpen}
+        onClose={() => setSupOpen(false)}
+        onCreate={p.onCreateSupervisor}
       />
 
       <CreateChannelModal

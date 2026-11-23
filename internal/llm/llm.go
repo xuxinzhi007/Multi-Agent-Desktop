@@ -31,12 +31,24 @@ type ToolCall struct {
 }
 
 // Chunk 是流式返回的一个片段。
+//
+// 除正文以外，CLI 通道还会带回推理、工具开始/结束和最终结果。
+// 这些字段对 HTTP provider 恒为空，不影响既有调用方。
 type Chunk struct {
 	Delta     string `json:"delta,omitempty"`
 	Done      bool   `json:"done,omitempty"`
 	Err       string `json:"error,omitempty"`
 	TokensIn  int    `json:"tokensIn,omitempty"`
 	TokensOut int    `json:"tokensOut,omitempty"`
+	// Reasoning 是思考模式的推理增量（豆包 CLI 的 thinking block）。
+	Reasoning string `json:"reasoning,omitempty"`
+	// Tool / ToolPhase / ToolStatus / Content 描述 CLI 自己发起的工具调用。
+	Tool       string `json:"tool,omitempty"`
+	ToolPhase  string `json:"toolPhase,omitempty"` // start | end
+	ToolStatus string `json:"toolStatus,omitempty"`
+	Content    string `json:"content,omitempty"`
+	// Final 是 result 事件里的最终答案。正文没流出来时用它兜底。
+	Final string `json:"final,omitempty"`
 }
 
 // Client 是一个流式对话客户端。实现必须支持 ctx 取消。
@@ -82,6 +94,10 @@ const DefaultLlamaCppBaseURL = "http://127.0.0.1:8080"
 // 但发出去的请求会打到空 baseUrl 上。
 const DefaultOllamaBaseURL = "http://127.0.0.1:11434"
 
+// DefaultDoubaoBaseURL 是火山方舟（豆包）的 OpenAI 兼容入口。
+// 它的协议是 /api/v3/chat/completions，不是 /v1，所以路径单独拼。
+const DefaultDoubaoBaseURL = "https://ark.cn-beijing.volces.com/api/v3"
+
 // Redacted 返回一份去掉 API Key 的副本。磁盘上的配置不动，只用于交给窗口。
 func Redacted(cfg Config) Config {
 	cfg.APIKey = ""
@@ -100,7 +116,7 @@ func RedactedPtr(cfg *Config) *Config {
 // IsLocalProvider 表示服务跑在本机、不需要 API Key。
 // 鉴权检查靠它短路，否则本地服务会被误判成「Key 未填写」而直接拒绝。
 func IsLocalProvider(name string) bool {
-	return name == "llamacpp" || name == "ollama"
+	return name == "llamacpp" || name == "ollama" || name == DoubaoCLIProvider
 }
 
 // ApplyDefaults 补齐 provider 的默认 BaseURL / Model / Provider 本身。
@@ -124,6 +140,15 @@ func ApplyDefaults(cfg Config) Config {
 		if cfg.Model == "" {
 			cfg.Model = DefaultQoderModel
 		}
+	case "doubao":
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = DefaultDoubaoBaseURL
+		}
+	case DoubaoCLIProvider:
+		// CLI 不用地址和 Key，模型 ID 来自 `doubao model list`。
+		if cfg.Model == "" {
+			cfg.Model = DefaultDoubaoCLIModel
+		}
 	}
 	return cfg
 }
@@ -146,6 +171,9 @@ func New(cfg Config) Client {
 		cfg = ApplyDefaults(cfg)
 		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
 	case "openai", "deepseek", "claude":
+		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
+	case "doubao":
+		cfg = ApplyDefaults(cfg)
 		return &openAICompat{name: cfg.Provider, cfg: cfg, client: httpClient}
 	case "qoder":
 		cfg = ApplyDefaults(cfg)

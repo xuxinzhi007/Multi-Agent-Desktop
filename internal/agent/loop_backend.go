@@ -219,15 +219,8 @@ func (e *loopEmitter) Emit(ev loop.Event) {
 		e.m.emit("agent.delta", map[string]any{"id": e.agent.ID, "delta": ev.Text, "channelId": e.channelID})
 	case "iter.start":
 		e.m.emit("agent.status", e.agent.statusPayload(StatusRunning))
-		// 上下文占用单独发一个事件：不塞进 agent.status（那是状态语义），
-		// 也不塞进 agent.loop（只在 done/stopped/failed 发）——这个量每轮都要
-		// 刷新，而且只有配了窗口才有意义，CtxLimit<=0 时发出去前端也无从算比例。
-		if ev.CtxLimit > 0 {
-			e.m.emit("agent.context", map[string]any{
-				"id": e.agent.ID, "iter": ev.Iter,
-				"used": ev.CtxUsed, "budget": ev.CtxBudget, "limit": ev.CtxLimit,
-			})
-		}
+		// 上下文占用由前端按消息与 usage 现算（contextMeter），
+		// 不进事件流：这个量每轮都变，单独发一条会多出一份对不上号的副本。
 	case "reasoning":
 		e.m.emit("agent.reasoning", map[string]any{"id": e.agent.ID, "reasoning": ev.Text})
 	case "tool.start":

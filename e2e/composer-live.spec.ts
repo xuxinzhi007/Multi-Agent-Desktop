@@ -39,7 +39,7 @@ test('运行中输入框有停止，空着不能再显示成发送', async ({ pa
     .toBe(true)
 })
 
-test('运行中写了字，发送变成排队而不是插进当前这一轮', async ({ page }) => {
+test('运行中写了字，发送变成插入当前这一轮而不是排队', async ({ page }) => {
   await mockRuntime(page, { agents: [AGENT], channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
@@ -47,6 +47,6 @@ test('运行中写了字，发送变成排队而不是插进当前这一轮', as
   if (await tab.count()) await tab.first().click()
 
   await page.locator('textarea').first().fill('等这轮完再说')
-  await expect(page.getByRole('button', { name: '排队', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '插入', exact: true })).toBeEnabled()
   await expect(page.getByRole('button', { name: '停止' }).last()).toBeVisible()
 })

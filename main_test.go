@@ -178,8 +178,10 @@ func TestProvidersStatus(t *testing.T) {
 	if _, ok := byID["mock"]; ok {
 		t.Error("mock 已下线，不该再出现在列表里")
 	}
-	if byID["ollama"].ID != "" {
-		t.Error("ollama 已下线，不该再出现在列表里")
+	// Ollama 仍是支持的本地 provider（README 与设置页都还在用），
+	// 只有 mock 退出了这个列表。
+	if byID["ollama"].ID == "" {
+		t.Error("ollama 仍是支持的本地 provider，应当出现在列表里")
 	}
 	ds := byID["deepseek"]
 	if !ds.Ready || !ds.HasKey || ds.Model != "deepseek-chat" {

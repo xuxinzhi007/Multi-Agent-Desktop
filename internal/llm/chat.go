@@ -305,9 +305,7 @@ func (c *ChatModel) postChat(ctx context.Context, msgs []Message, tools []tool.S
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
 
-	base := strings.TrimSuffix(c.cfg.BaseURL, "/")
-	base = strings.TrimSuffix(base, "/v1")
-	url := base + "/v1/chat/completions"
+	url := ChatURL(c.cfg)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

@@ -29,6 +29,9 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
 
     const handlers: Record<string, (...args: unknown[]) => unknown> = {
       'API.ListAgents': () => initial.agents,
+      // 会话历史按需加载：页面先拿壳，打开某个 agent 时才取它自己的消息。
+      'API.AgentMessages': (id) =>
+        (initial.agents as { id?: string; messages?: unknown[] }[]).find((a) => a.id === id)?.messages ?? [],
       'API.ListChannels': () => initial.channels,
       'API.QueryNotes': () => initial.notes,
       'API.GetLLMConfig': () => ({
@@ -117,6 +120,7 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         }
       },
       'API.SetWorkDir': () => undefined,
+      'API.PickDirectory': () => '/tmp/e2e-project',
       'API.ListModels': () => ['mock'],
       'API.ListProviderEndpoints': () => [
         {
@@ -147,6 +151,25 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.ResumeAll': () => 0,
       'API.StopAllAgents': () => 2,
       'API.ClearAgentLLM': (id: unknown) => ({ id, messages: [] }),
+      'API.SetAgentLLM': (id: unknown) => ({ id, messages: [] }),
+      'API.CreateSupervisor': () => ({
+        id: 'sup-1',
+        name: 'Supervisor',
+        role: '任务编排者',
+        color: '#c084fc',
+        status: 'idle',
+        createdAt: Date.now() / 1000,
+        messages: [],
+        queueLen: 0,
+        backend: 'supervisor',
+        workDir: '/tmp/e2e-project',
+      }),
+      'API.SetAgentWorktree': (id: unknown, on: unknown) => ({
+        id,
+        messages: [],
+        worktree: on ? '/tmp/e2e-project/.mad-worktrees/demo' : '',
+        worktreeBranch: on ? 'mad/demo' : '',
+      }),
       'API.ProvidersStatus': () => [],
     }
 

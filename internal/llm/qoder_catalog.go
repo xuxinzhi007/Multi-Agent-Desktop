@@ -34,6 +34,9 @@ type ModelMeta struct {
 
 // ListModelMetas 返回模型名，以及目录里实际带回来的思考档位。
 func ListModelMetas(ctx context.Context, cfg Config) ([]ModelMeta, error) {
+	if cfg.Provider == DoubaoCLIProvider {
+		return ListDoubaoCLIModels(ctx)
+	}
 	if cfg.Provider == "qoder" {
 		cfg = ApplyDefaults(cfg)
 		if cfg.APIKey == "" {

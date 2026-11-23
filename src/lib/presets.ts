@@ -34,6 +34,8 @@ export const ROLE_PRESETS = [
 export const PROVIDERS = [
   { id: 'mock', label: 'Mock（内置）', hint: '本地规则引擎，无需任何配置' },
   { id: 'ollama', label: 'Ollama', hint: 'http://127.0.0.1:11434，本地免费' },
+  { id: 'doubao-cli', label: '豆包 CLI（本机）', hint: '复用本机已登录的 doubao 命令，不填 Key' },
+  { id: 'doubao', label: '豆包（方舟 API）', hint: '火山方舟 OpenAI 兼容入口' },
   { id: 'openai', label: 'OpenAI 兼容', hint: 'OpenAI 或各类兼容网关' },
   { id: 'qoder', label: 'Qoder', hint: '浏览器授权，不用填 Key' },
   { id: 'deepseek', label: 'DeepSeek', hint: 'https://api.deepseek.com' },
@@ -45,6 +47,8 @@ export const DEFAULT_BASE: Record<string, string> = {
   openai: 'https://api.openai.com',
   qoder: 'https://api3.qoder.sh',
   deepseek: 'https://api.deepseek.com',
+  doubao: 'https://ark.cn-beijing.volces.com/api/v3',
+  'doubao-cli': '',
   claude: '',
 }
 
@@ -52,6 +56,8 @@ export const DEFAULT_MODEL: Record<string, string> = {
   openai: 'gpt-4o-mini',
   qoder: 'DeepSeek-V4-Pro',
   deepseek: 'deepseek-chat',
+  doubao: '',
+  'doubao-cli': '',
   claude: 'claude-3-5-sonnet-20241022',
 }
 

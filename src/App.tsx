@@ -86,6 +86,15 @@ export default function App() {
     if (created) setActive({ kind: 'agent', id: created.id })
   }
 
+  // 自动拆任务：创建 Supervisor 会话后立刻把目标派进去，剩下交给后端。
+  const createSupervisor = async (req: { name: string; role: string; goal: string; workDir: string }) => {
+    const created = await s.send<Agent | null>('agent.createSupervisor', req)
+    if (created) {
+      setActive({ kind: 'agent', id: created.id })
+      setView('chat')
+    }
+  }
+
   return (
     <>
       <AmbientBackground />
@@ -111,6 +120,7 @@ export default function App() {
           setInspectorOpen(v === 'chat')
         }}
         onCreate={createAgent}
+        onCreateSupervisor={createSupervisor}
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
         onOpenSettings={() => setSettingsOpen(true)}

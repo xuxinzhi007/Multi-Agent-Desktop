@@ -34,6 +34,14 @@ test('高频 delta 下界面不应掉帧', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const mygo = (window as unknown as { mygo: { emit: (n: string, d: unknown) => void } }).mygo
 
+    // 先热一轮：首帧要编译样式、建列表，那一两个长任务是启动成本，不是打字卡顿
+    mygo.emit('agent.status', { id: 'a0', status: 'running' })
+    const warmUntil = performance.now() + 500
+    while (performance.now() < warmUntil) {
+      mygo.emit('agent.delta', { id: 'a0', delta: '预' })
+      await new Promise((r) => setTimeout(r, 16))
+    }
+
     const gaps: number[] = []
     let last = performance.now()
     let running = true
@@ -46,7 +54,6 @@ test('高频 delta 下界面不应掉帧', async ({ page }) => {
     requestAnimationFrame(tick)
 
     // 以真实模型的节奏推 delta：每 16ms 一个 token，持续 1.5s
-    mygo.emit('agent.status', { id: 'a0', status: 'running' })
     const deadline = performance.now() + 1500
     while (performance.now() < deadline) {
       mygo.emit('agent.delta', { id: 'a0', delta: '流' })

@@ -6,12 +6,22 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"multi-agent-desktop/internal/llm"
 )
 
-// Message 是频道里的一条消息。
+// msgSeq 给同一毫秒内的消息补一个序号。
+//
+// Windows 的时钟粒度约 15ms，连续两条消息很容易拿到同一个 UnixNano。
+// 只靠时间戳做 ID 会出现重复：Post 按 ID 找消息时会命中上一条，
+// 第二条的 kind 就留在空值，RecentPosts 直接把它过滤掉。
+var msgSeq atomic.Uint64
+
+func newMessageID() string {
+	return fmt.Sprintf("msg-%d-%d", time.Now().UnixNano(), msgSeq.Add(1))
+}
 type Message struct {
 	ID        string      `json:"id"`
 	ChannelID string      `json:"channelId"`
@@ -230,7 +240,8 @@ func (msg Message) clone() Message {
 func (m *Manager) Create(id, name string, members []string, policy TurnPolicy) Channel {
 	m.mu.Lock()
 	if id == "" {
-		id = fmt.Sprintf("ch-%d", time.Now().UnixNano())
+		// 同一个时钟粒度里连开两间房，只靠 UnixNano 会撞 ID；补序号。
+		id = fmt.Sprintf("ch-%d-%d", time.Now().UnixNano(), msgSeq.Add(1))
 	}
 	if policy == "" {
 		policy = PolicyDiscuss
@@ -408,7 +419,7 @@ func (m *Manager) addMessage(channelId, fromId, fromName, text string, blocks []
 	}
 
 	msg := Message{
-		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		ID:        newMessageID(),
 		ChannelID: channelId,
 		FromID:    fromId,
 		FromName:  fromName,

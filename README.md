@@ -20,9 +20,11 @@
 - Queue + Worker 串行执行，队列长度 32，满了会返回错误。这一轮还在跑时，接着发来的本会话消息会在下一步模型调用前插进去；频道消息留到这一轮结束。停止会取消当前执行并清空队列
 - token 级流式渲染，运行中可中断。进程内循环里，文字和推理按增量推到界面；工具调用等这一轮流结束、参数拼成完整 JSON 后再执行
 - **进程内 agent loop** 是默认执行路径。空 backend，以及读进来的旧 `claude` / `codex`，都按 loop 跑。`mock` 仍是本地假回复。一轮有迭代、工具次数和墙钟上限，检查点在用户数据目录的 `loop/runs`，同一会话可以接着上次没跑完的预算
-- 模型 provider：Mock / 本地 llama.cpp / Ollama / OpenAI 兼容 / DeepSeek / Claude（走 OpenAI 兼容网关）/ Qoder。Qoder 不是兼容接口，走它自己的对话协议；可以浏览器授权，也可以填 `pt-` 开头的 Personal Access Token 或访问令牌
+- 模型 provider：Mock / 本地 llama.cpp / Ollama / OpenAI 兼容 / DeepSeek / Claude（走 OpenAI 兼容网关）/ Qoder / 豆包（方舟 API）/ 豆包 CLI。Qoder 不是兼容接口，走它自己的对话协议；可以浏览器授权，也可以填 `pt-` 开头的 Personal Access Token 或访问令牌。豆包 CLI 直接复用本机已登录的 `doubao` 命令，不填 Key
 - **会话级配置**：每个 agent 可独立设置模型、推理强度与工作目录，未设置则回落全局。输入栏里的模型列表用已经保存的连接，不在这里重填 API Key
-- **Agent 间协作**：`Route` 可以把一条消息派给另一个会话。loop 里模型还能调用 `list_agents`、`ask_agent`、`create_agent`、`delete_agent`。`create_agent` 记下 `ParentID`，侧栏把子会话嵌在父会话下面。这是模型或用户显式建的层级，不是自动拆任务
+- **Agent 间协作**：`Route` 可以把一条消息派给另一个会话。loop 里模型还能调用 `list_agents`、`ask_agent`、`create_agent`、`delete_agent`。`create_agent` 记下 `ParentID`，侧栏把子会话嵌在父会话下面。模型或用户都能显式建这层关系；批量拆任务走下面的 Supervisor
+- **Supervisor 自动拆任务**：侧栏「自动拆任务」输入一句目标，模型拆成 2-4 个子任务，各建一个子会话并行跑完，汇总写回 Supervisor 会话。最多占用 4 个子会话，受 8 个会话上限约束；总时限 20 分钟。停止 Supervisor 会连带停止子会话
+- **git worktree 隔离**：会话可以在独立工作树里工作（分支 `mad/<名字>`），改动只落在自己的检出里。Supervisor 的子会话默认开启，普通会话在输入栏的文件夹弹层里手动开关。工作树放在仓库旁边的 `.mad-worktrees/<仓库名>/`，不写脏仓库；删除会话时回收，分支保留
 - **群聊频道**：共享 transcript、@提及、三种回合策略（discuss / direct / roundrobin）。discuss 里没人被 @ 时，只由当前接话人回复；接话人可以改，从下一条生效
 - **知识库**：手写笔记（约定、术语、偏好），标签筛选 + 全文检索。列表按「被谁引用」排序，能挂到会话或摘下来。挂上的笔记在下一轮 loop 里进提示词；新建会话时不会把全局笔记塞进首条 system。一轮结束时，模型可能再写一条值得留下的笔记
 - **学习摘要**：历史超过最近 8 条之后，用一次单独的模型调用把更早的对话收成摘要，不挡住用户正在看的回复。有空闲子会话时用它的名字和模型；还没有子会话、人数也没到 8 时，先建一个「…的学习」。已经有子会话但都不空闲，或人数满了，就用本会话自己的模型。摘要写在下一轮上下文开头，里面的路径必须能在原文里对上
@@ -37,8 +39,6 @@
 
 ### 没做
 
-- ❌ **git worktree 隔离** —— 多个 agent 改同一份代码会互相踩
-- ❌ **Supervisor 自动拆解任务** —— 没有编排层把一句话拆给多个 agent。模型可以自己调 `create_agent` / `ask_agent`，任务仍要人来分，或由模型在对话里决定
 - ❌ **工具审批流** —— 工具包里有 `Approver` 接口，正式跑起来的注册表没有装上。写文件和 shell 直接执行，没有「待批准 / 允许 / 拒绝」闸门
 - ❌ **检查器的「改动 / 任务」** —— 这两个页已经不在界面上，后端也没有产出 diff 或任务清单
 - ❌ **shell 流式输出，以及手动执行命令的超时** —— 结果整段返回。模型用的 `bash` 有 60 秒上限；界面上手动执行的命令没有单独超时，取消才会停
@@ -254,7 +254,8 @@ multi-agent-desktop/
 - **shell 不流式**。模型的 `bash` 默认 60 秒后杀进程组；界面上手动执行的命令没有超时，取消请求才会停
 - **shell 不读登录脚本**。macOS / Linux 用 `zsh -dfc`（没有 zsh 时用 `sh -c`）；Windows 用 `powershell.exe -NoProfile -NonInteractive`，模型应写 PowerShell，不要写 bash。登录脚本会去碰桌面、文稿、下载，macOS 就按文件夹反复弹权限。工作目录不能是主目录、盘符根（如 `C:\`）、`/`，也不能是桌面、文稿、下载、图片、影片、音乐这些文件夹本身；放在其中的项目子目录可以
 - **工具调用没有审批闸门**，写文件和命令直接执行
-- **无 worktree 隔离**，多 agent 并行改同一仓库会冲突
+- **worktree 只在 git 仓库里生效**。不是仓库的文件夹开不了隔离，Supervisor 会自动退回共用目录，并在汇总里写明
+- **豆包 CLI 一次只能跑一件任务**。同一个账号已经有任务在跑时（比如正在用豆包办公本身），新的 `doubao -p` 会排队或等不到结果；停止按钮会杀掉整组进程。装 CLI 用 `npm i -g @bytedance/doubao-cli`，找不到原生命令时可用 `MAD_DOUBAO_BIN` 指定路径
 - **API Key 与飞书 Secret 明文落盘**（`config.json` 权限 600，会话级 Key 在 `agents.json`）—— 计划迁移到系统钥匙串
 - **会话历史是整份 JSON**，不是数据库。界面只拿当前会话的最近一页
 

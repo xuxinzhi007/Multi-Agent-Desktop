@@ -59,7 +59,8 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 	if gotAgent != "a1" || !strings.Contains(gotText, "你好") || strings.Contains(gotText, "来自飞书") {
 		t.Fatalf("agent=%s text=%s", gotAgent, gotText)
 	}
-	if !strings.Contains(gotText, "这台电脑") || replies["om_1"] == "好" {
+	// 现在答完会另发一条消息（群里才有提醒），卡片只改成「已回复」。
+	if !strings.Contains(gotText, "这台电脑") || replies["om_1"] != "好" {
 		t.Fatalf("text=%s replies=%v", gotText, replies)
 	}
 
@@ -82,8 +83,8 @@ func TestServiceDispatchesPrivateText(t *testing.T) {
 	if !strings.Contains(gotText, "别人在说话") || !strings.Contains(gotText, "群里说") || !strings.Contains(gotText, "这台电脑") {
 		t.Fatalf("group text=%s", gotText)
 	}
-	if replies["om_2"] == "好" {
-		t.Fatalf("最终回复不该再发一条新消息：%v", replies)
+	if !strings.Contains(replies["om_2"], "好") {
+		t.Fatalf("群里答完应当另发一条文本回复：%v", replies)
 	}
 
 	gotText = ""
@@ -135,7 +136,8 @@ func TestPostImageOrder(t *testing.T) {
 	if strings.Contains(body, "图片文件：") {
 		t.Fatalf("path in wire: %s", body)
 	}
-	if replies["om"] == "看过了" || !strings.Contains(replies["om_card"], "看过了") {
+	// 文本答案另发一条；进度卡片只收尾成「已回复」。
+	if !strings.Contains(replies["om"], "看过了") || !strings.Contains(replies["om_card"], "已回复") {
 		t.Fatalf("reply=%v", replies)
 	}
 }

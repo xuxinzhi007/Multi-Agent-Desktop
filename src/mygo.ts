@@ -88,6 +88,9 @@ export interface AgentView {
   proposal?: string;
   /** ParentID 是创建它的会话。空表示用户自己建的。 */
   parentId?: string;
+  /** Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。 */
+  worktree?: string;
+  worktreeBranch?: string;
   /** LearnAt 是已经收进摘要的消息条数。 */
   learnAt?: number;
   /** LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。 */
@@ -390,6 +393,14 @@ export interface StatusEvent {
   busy?: string;
 }
 
+/** SupervisorRequest 是新建「自动拆任务」会话的参数。 */
+export interface SupervisorRequest {
+  name: string;
+  role: string;
+  goal: string;
+  workDir: string;
+}
+
 /** SystemInfo 描述运行环境。 */
 export interface SystemInfo {
   os: string;
@@ -464,16 +475,23 @@ export const API = {
   createAgent(req: CreateAgentRequest): Promise<AgentView> {
     return call("API.CreateAgent", req);
   },
-  /**
-   * isRelevantToRole 判断消息是否与角色相关。
-   * CreateCLIAgent 新建一个 CLI backend 的 agent。
-   */
+  /** CreateCLIAgent 新建一个 CLI backend 的 agent。 */
   createCLIAgent(name: string, role: string, backend: string): Promise<AgentView> {
     return call("API.CreateCLIAgent", name, role, backend);
   },
   /** CreateChannel 新建频道。policy 为空时由 channel 包回落 discuss。 */
   createChannel(name: string, members: string[], policy: string): Promise<Channel> {
     return call("API.CreateChannel", name, members, policy);
+  },
+  /**
+   * isRelevantToRole 判断消息是否与角色相关。
+   * CreateSupervisor 新建一个自动拆任务的会话，并把目标立刻派进去。
+   *
+   * 它和普通 agent 的区别只在 backend：这一轮由 executeSupervisor 接手，
+   * 先拆子任务、建子会话、并行跑完，再把汇总写回这个会话。
+   */
+  createSupervisor(req: SupervisorRequest): Promise<AgentView> {
+    return call("API.CreateSupervisor", req);
   },
   /** DeleteAgent 删除一个 agent，并从所有频道成员中剔除。 */
   deleteAgent(id: string): Promise<boolean> {
@@ -672,6 +690,13 @@ export const API = {
   /** SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。 */
   setAgentWorkDir(agentId: string, dir: string): Promise<AgentView> {
     return call("API.SetAgentWorkDir", agentId, dir);
+  },
+  /**
+   * SetAgentWorktree 打开或关闭这个会话的独立 git 工作树。
+   * 打开后 WorkDir 指向工作树，会话有自己的分支；关闭时还原原目录。
+   */
+  setAgentWorktree(agentId: string, on: boolean): Promise<AgentView> {
+    return call("API.SetAgentWorktree", agentId, on);
   },
   /** SetAlwaysOnTop 控制窗口置顶（悬浮）。 */
   setAlwaysOnTop(v: boolean): Promise<boolean> {

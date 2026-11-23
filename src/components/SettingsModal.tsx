@@ -18,6 +18,8 @@ const VENDORS: { id: string; label: string; local: boolean; baseUrl: string; log
   { id: 'llamacpp', label: '本地 llama.cpp', local: true, baseUrl: 'http://127.0.0.1:8080' },
   { id: 'ollama', label: '本地 Ollama', local: true, baseUrl: 'http://127.0.0.1:11434' },
   { id: 'qoder', label: 'Qoder', local: false, baseUrl: 'https://api3.qoder.sh', login: true },
+  { id: 'doubao-cli', label: '豆包 CLI（本机）', local: true, baseUrl: '' },
+  { id: 'doubao', label: '豆包（方舟 API）', local: false, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { id: 'deepseek', label: 'DeepSeek', local: false, baseUrl: 'https://api.deepseek.com' },
   { id: 'openai', label: 'OpenAI', local: false, baseUrl: 'https://api.openai.com' },
   { id: 'claude', label: 'Claude', local: false, baseUrl: '' },
@@ -41,6 +43,9 @@ function savedText(ep: ProviderEndpoint, verb: '保存' | '登录'): { err: stri
   const name = vendorLabel(ep.provider)
   if (!ep.ok) return { err: ep.reason || `${name}没有生效`, note: '' }
   const quota = ep.quota ? `${ep.quota}。` : ''
+  if (ep.provider === 'doubao-cli') {
+    return { err: '', note: `已保存。${name} 可以用。${quota}会话里选中它的模型即可，不用再填 Key。` }
+  }
   const how = verb === '登录' ? '这次授权' : '这把 Key'
   return { err: '', note: `已${verb}。${name} 现在用${how}。${quota}之后的对话会用它。` }
 }
@@ -199,8 +204,17 @@ function ProviderBoard() {
 
           {editing && (
             <>
-              <label className="c-settings__field">
-                <span className="c-settings__field-label">服务地址</span>
+              {editing === 'doubao-cli' ? (
+                <div className="c-settings__field">
+                  <p className="c-settings__hint">
+                    这是本机命令，复用你已经登录的豆包账号，不需要地址和 Key。模型列表直接读 `doubao model list`；
+                    对话时用 `doubao -p` 在会话工作目录里执行。
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <label className="c-settings__field">
+                    <span className="c-settings__field-label">服务地址</span>
                 <input
                   className="c-settings__input"
                   aria-label="服务地址"
@@ -243,6 +257,8 @@ function ProviderBoard() {
                   </button>
                 </span>
               </label>
+                </>
+              )}
               {editing === 'qoder' && (
                 <div className="c-settings__field">
                   <p className="c-settings__hint">

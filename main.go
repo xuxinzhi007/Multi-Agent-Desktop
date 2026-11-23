@@ -69,6 +69,14 @@ type CreateAgentRequest struct {
 	Role string `json:"role"`
 }
 
+// SupervisorRequest 是新建「自动拆任务」会话的参数。
+type SupervisorRequest struct {
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	Goal    string `json:"goal"`
+	WorkDir string `json:"workDir"`
+}
+
 // Events 推给前端。
 var (
 	AgentCreated = mygo.NewEvent[Agent]("agent.created")
@@ -223,6 +231,9 @@ type AgentView struct {
 	Proposal string `json:"proposal,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的。
 	ParentID string `json:"parentId,omitempty"`
+	// Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。
+	Worktree       string `json:"worktree,omitempty"`
+	WorktreeBranch string `json:"worktreeBranch,omitempty"`
 	// LearnAt 是已经收进摘要的消息条数。
 	LearnAt int `json:"learnAt,omitempty"`
 	// LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。
@@ -237,30 +248,32 @@ func toAgentView(a *agent.Agent) AgentView {
 	// Snapshot 在 agent 锁内拷贝，避免与 worker 的 append 竞争。
 	s := a.Snapshot()
 	return AgentView{
-		ID:            s.ID,
-		Name:          s.Name,
-		Role:          s.Role,
-		Color:         s.Color,
-		Status:        string(s.Status),
-		CreatedAt:     s.CreatedAt,
-		Messages:      s.Messages,
-		QueueLen:      s.QueueLen,
-		Backend:       s.Backend,
-		WorkDir:       s.WorkDir,
-		LLM:           llm.RedactedPtr(s.LLMCfg),
-		Knowledge:     s.Knowledge,
-		BlockedReason: s.BlockedReason,
-		StartedAt:     s.StartedAt,
-		LastTool:      s.LastTool,
-		Chars:         s.Chars,
-		Busy:          s.BusyPlace,
-		ParentID:      s.ParentID,
-		SeesImages:    seesModel(s.LLMCfg),
-		Proposal:      s.Proposal,
-		LearnAt:       s.LearnAt,
-		LearnTotal:    agent.LearnEnd(len(s.Messages)),
-		LearnBy:       s.LearnBy,
-		LearnBusy:     s.LearnBusy,
+		ID:             s.ID,
+		Name:           s.Name,
+		Role:           s.Role,
+		Color:          s.Color,
+		Status:         string(s.Status),
+		CreatedAt:      s.CreatedAt,
+		Messages:       s.Messages,
+		QueueLen:       s.QueueLen,
+		Backend:        s.Backend,
+		WorkDir:        s.WorkDir,
+		LLM:            llm.RedactedPtr(s.LLMCfg),
+		Knowledge:      s.Knowledge,
+		BlockedReason:  s.BlockedReason,
+		StartedAt:      s.StartedAt,
+		LastTool:       s.LastTool,
+		Chars:          s.Chars,
+		Busy:           s.BusyPlace,
+		ParentID:       s.ParentID,
+		Worktree:       s.Worktree,
+		WorktreeBranch: s.WorktreeBranch,
+		SeesImages:     seesModel(s.LLMCfg),
+		Proposal:       s.Proposal,
+		LearnAt:        s.LearnAt,
+		LearnTotal:     agent.LearnEnd(len(s.Messages)),
+		LearnBy:        s.LearnBy,
+		LearnBusy:      s.LearnBusy,
 	}
 }
 
@@ -295,6 +308,8 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.Status, _ = m["status"].(string)
 	v.Backend, _ = m["backend"].(string)
 	v.WorkDir, _ = m["workDir"].(string)
+	v.Worktree, _ = m["worktree"].(string)
+	v.WorktreeBranch, _ = m["worktreeBranch"].(string)
 	if ids, ok := m["knowledge"].([]string); ok {
 		v.Knowledge = ids
 	}
@@ -740,6 +755,46 @@ func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text
 }
 
 // isRelevantToRole 判断消息是否与角色相关。
+// CreateSupervisor 新建一个自动拆任务的会话，并把目标立刻派进去。
+//
+// 它和普通 agent 的区别只在 backend：这一轮由 executeSupervisor 接手，
+// 先拆子任务、建子会话、并行跑完，再把汇总写回这个会话。
+func (s *API) CreateSupervisor(req SupervisorRequest) (AgentView, error) {
+	if s.mgr == nil {
+		return AgentView{}, fmt.Errorf("会话还没准备好")
+	}
+	goal := strings.TrimSpace(req.Goal)
+	if goal == "" {
+		return AgentView{}, fmt.Errorf("请先写一句目标")
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "Supervisor"
+	}
+	role := strings.TrimSpace(req.Role)
+	if role == "" {
+		role = "任务编排者：拆分子任务、并行派发、汇总结果"
+	}
+	if req.WorkDir != "" && workdir.TooBroad(req.WorkDir) {
+		return AgentView{}, fmt.Errorf("%s", workdir.RejectReason)
+	}
+
+	a := s.mgr.CreateWithBackend("", name, role, "supervisor")
+	if req.WorkDir != "" {
+		if err := s.mgr.SetAgentWorkDir(a.ID, req.WorkDir); err != nil {
+			s.mgr.Delete(a.ID)
+			return AgentView{}, err
+		}
+	}
+	view := toAgentView(a)
+	AgentConfig.Emit(s.win, catalogView(view))
+
+	if err := s.mgr.Prompt(context.Background(), agent.PromptRequest{AgentID: a.ID, Text: goal}); err != nil {
+		return view, err
+	}
+	return view, nil
+}
+
 // CreateCLIAgent 新建一个 CLI backend 的 agent。
 func (s *API) CreateCLIAgent(name, role, backend string) AgentView {
 	a := s.mgr.CreateWithBackend("", name, role, backend)
@@ -868,6 +923,11 @@ func (s *API) ListAllModels(ctx context.Context) []ModelChoice {
 
 	add := func(provider string) {
 		cfg, configured := creds[provider]
+		// 豆包 CLI 是本机能力：没保存过也能直接用，只要本机装了 CLI。
+		if provider == llm.DoubaoCLIProvider {
+			configured = true
+			cfg = llm.ApplyDefaults(llm.Config{Provider: provider})
+		}
 		if !configured {
 			cfg = llm.ApplyDefaults(llm.Config{Provider: provider})
 		}
@@ -941,11 +1001,15 @@ func providerLabel(p string) string {
 		return "Claude"
 	case "qoder":
 		return "Qoder"
+	case "doubao":
+		return "豆包（方舟 API）"
+	case "doubao-cli":
+		return "豆包 CLI（本机）"
 	}
 	return p
 }
 
-var knownProviderIDs = []string{"llamacpp", "ollama", "deepseek", "openai", "claude", "qoder"}
+var knownProviderIDs = []string{"llamacpp", "ollama", "deepseek", "openai", "claude", "qoder", "doubao", "doubao-cli"}
 
 func knownProvider(id string) bool {
 	for _, p := range knownProviderIDs {
@@ -1010,6 +1074,15 @@ func (s *API) SaveProvider(ctx context.Context, cfg LLMConfig) (ProviderEndpoint
 		}
 	}
 	cfg.Model = ""
+	// 豆包 CLI 没有地址和 Key，只有「本机装没装、登没登录」。
+	if cfg.Provider == llm.DoubaoCLIProvider {
+		ok, text := llm.DoubaoCLIStatus(ctx)
+		if !ok {
+			return ProviderEndpoint{}, fmt.Errorf("豆包 CLI 不可用：%s", text)
+		}
+		s.rememberProvider(cfg)
+		return s.endpointFor(ctx, cfg.Provider, cfg, true), nil
+	}
 	if cfg.BaseURL == "" {
 		return ProviderEndpoint{}, fmt.Errorf("请先填写服务地址")
 	}
@@ -1069,6 +1142,29 @@ func (s *API) LoginQoder(ctx context.Context) (ProviderEndpoint, error) {
 
 func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved bool) ProviderEndpoint {
 	ep := ProviderEndpoint{Provider: id, Saved: saved}
+	// 豆包 CLI 是本机进程：没有地址和 Key，检查的是「能不能启动、能不能列模型」。
+	if id == llm.DoubaoCLIProvider {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		ok, ver := llm.DoubaoCLIStatus(cctx)
+		if !ok {
+			ep.Reason = ver
+			return ep
+		}
+		metas, err := llm.ListDoubaoCLIModels(cctx)
+		if err != nil {
+			ep.Reason = err.Error()
+			return ep
+		}
+		names := make([]string, len(metas))
+		for i, m := range metas {
+			names[i] = m.Name
+		}
+		ep.OK = true
+		ep.Quota = ver
+		ep.Models = names
+		return ep
+	}
 	if !saved {
 		ep.Reason = "未保存"
 		return ep
@@ -1625,6 +1721,30 @@ func (s *API) SetAgentWorkDir(agentId, dir string) (AgentView, error) {
 	return v, nil
 }
 
+// SetAgentWorktree 打开或关闭这个会话的独立 git 工作树。
+// 打开后 WorkDir 指向工作树，会话有自己的分支；关闭时还原原目录。
+func (s *API) SetAgentWorktree(agentId string, on bool) (AgentView, error) {
+	if s.mgr == nil {
+		return AgentView{}, fmt.Errorf("会话还没准备好")
+	}
+	if on {
+		if err := s.mgr.EnableWorktree(context.Background(), agentId); err != nil {
+			return AgentView{}, err
+		}
+	} else {
+		if err := s.mgr.DisableWorktree(context.Background(), agentId); err != nil {
+			return AgentView{}, err
+		}
+	}
+	a, ok := s.mgr.Get(agentId)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentId)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, catalogView(v))
+	return v, nil
+}
+
 // SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。
 func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 	if err := s.mgr.SetAgentLLM(agentId, cfg); err != nil {
@@ -1684,6 +1804,9 @@ func (s *API) listModelsWithSavedCreds(ctx context.Context, cfg llm.Config) ([]s
 	switch {
 	case cfg.Provider == "" || cfg.Provider == "mock":
 		return nil, fmt.Errorf("%w：这个会话还没有模型", llm.ErrNotConfigured)
+	case cfg.Provider == llm.DoubaoCLIProvider:
+		// CLI 不用地址和 Key，能启动就能列模型。
+		return llm.ListModels(ctx, cfg)
 	case cfg.BaseURL == "":
 		return nil, fmt.Errorf("%w：请先在设置里填写 %s 的 Base URL", llm.ErrNotConfigured, cfg.Provider)
 	case cfg.APIKey == "" && !llm.IsLocalProvider(cfg.Provider):

@@ -1078,7 +1078,24 @@ function WorkDirChip({
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
+  const [wtBusy, setWtBusy] = useState(false)
+  const [wtErr, setWtErr] = useState('')
   const effective = agent.workDir
+
+  // 独立工作树：开/关都只影响这个会话。
+  // 状态走 API 返回的事件（agentConfig）刷新，这里不乐观地改本地状态。
+  const toggleWorktree = async () => {
+    setWtBusy(true)
+    setWtErr('')
+    try {
+      await API.setAgentWorktree(agent.id, !agent.worktree)
+      setOpen(false)
+    } catch (e) {
+      setWtErr(e instanceof Error && e.message ? e.message : '操作失败，稍后再试')
+    } finally {
+      setWtBusy(false)
+    }
+  }
 
   // 切换会话时收起，避免弹层残留在新会话上
   useEffect(() => {
@@ -1102,10 +1119,14 @@ function WorkDirChip({
           setOpen((v) => !v)
           setDraft(effective)
         }}
-        title={`工作目录：${effective || '未设置'}（点击修改，仅影响本会话）`}
+        title={
+          agent.worktree
+            ? `工作树：${agent.worktree}（分支 ${agent.worktreeBranch}，仅影响本会话）`
+            : `工作目录：${effective || '未设置'}（点击修改，仅影响本会话）`
+        }
         style={chipStyle(open)}
       >
-        📁 {shortPath(effective)}
+        {agent.worktree ? `⎇ ${agent.worktreeBranch || 'worktree'}` : `📁 ${shortPath(effective)}`}
         <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
       </button>
 
@@ -1130,6 +1151,46 @@ function WorkDirChip({
             <div style={popoverLabel}>这个会话的文件夹</div>
             <DirectoryPicker value={draft} onChange={setDraft} />
             <div style={hintStyle}>只给这个会话用。读代码、跑命令都在这个目录里。</div>
+
+            <div
+              style={{
+                marginTop: 10,
+                paddingTop: 8,
+                borderTop: '1px solid var(--border-subtle)',
+                display: 'flex',
+                gap: 8,
+                alignItems: 'flex-start',
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>独立 git worktree</div>
+                <div style={hintStyle}>
+                  {agent.worktree
+                    ? `分支 ${agent.worktreeBranch}，改动只落在这份检出里。`
+                    : '开启后这个会话用自己的分支，改代码不和别的会话抢同一份检出。'}
+                </div>
+                {agent.worktree && (
+                  <div
+                    className="mono"
+                    style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 3, wordBreak: 'break-all' }}
+                  >
+                    {agent.worktree}
+                  </div>
+                )}
+                {wtErr && (
+                  <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 4 }}>{wtErr}</div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="c-btn c-btn--ghost c-btn--sm"
+                disabled={wtBusy || !effective}
+                onClick={() => void toggleWorktree()}
+              >
+                {wtBusy ? '处理中…' : agent.worktree ? '关闭' : '开启'}
+              </button>
+            </div>
+
             <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
               <button
                 className="c-btn c-btn--primary c-btn--sm"

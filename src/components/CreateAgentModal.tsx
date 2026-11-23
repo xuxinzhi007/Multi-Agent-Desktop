@@ -73,7 +73,9 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
     if (!nameTouched) setName(suggestName(preset.name, existingCount))
   }
 
-  const canSubmit = name.trim().length > 0 && workDir.trim().length > 0
+  // 文件夹可以后补：先让人和 agent 说上话，比卡在选目录更重要。
+  // 没选目录时文件与命令工具会明确报错，会话本身仍然能用。
+  const canSubmit = name.trim().length > 0
 
   const submit = () => {
     if (!canSubmit) return

@@ -123,14 +123,20 @@ test('目录 chip 显示可辨认的路径，不是只有最后一级', async ({
   expect(text.replace(/\s+/g, '')).toMatch(/projects\/shop-web|shop-web/)
 })
 
-test('打开会话后，显示的模型已经写进这次对话', async ({ page, callLog }) => {
+test('会话自己记模型：没选时是选择模型，选完就写进这次对话', async ({ page, callLog }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
   await openChatView(page)
 
-  // 没点过选择器，按钮上的名字就是已经记到这次对话里的模型。
-  await expect(page.locator('.mp__label')).toContainText('qwen2')
+  // 没选过就不借用别处的模型名，避免用户以为已经生效
+  await expect(page.locator('.mp__label')).toContainText('选择模型')
+
+  await page.locator('.mp__trigger').click()
+  await page.getByRole('option', { name: 'deepseek-chat' }).click()
+
+  // 选完按钮上显示的就是这次对话记下的模型
+  await expect(page.locator('.mp__label')).toContainText('deepseek-chat')
   await expect
     .poll(async () => {
       const calls = await callLog()
@@ -146,7 +152,7 @@ test('目录 chip 和模型选择器都能打开', async ({ page }) => {
   await openChatView(page)
 
   await page.locator('button[title*="工作目录"]').click()
-  await expect(page.getByText('本会话工作目录')).toBeVisible()
+  await expect(page.getByText('这个会话的文件夹')).toBeVisible()
   await page.keyboard.press('Escape')
 
   // 模型不再走弹层，而是直接列出模型供点选
@@ -333,7 +339,8 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
 
   const user = page.locator('.c-user-bubble')
   const userBg = await user.evaluate((el) => getComputedStyle(el).backgroundColor)
-  expect(userBg).not.toBe('rgba(0, 0, 0, 0)')
+  // 窄栏设计：用户消息也不铺底色，靠缩进和头像区分，不是靠色块
+  expect(userBg).toBe('rgba(0, 0, 0, 0)')
   const userBox = await user.boundingBox()
   const streamBox = await stream.boundingBox()
   expect(userBox).not.toBeNull()

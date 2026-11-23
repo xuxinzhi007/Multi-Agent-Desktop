@@ -581,6 +581,8 @@ export function useBackend() {
           (data as { role: string }).role,
           (data as { backend: string }).backend,
         )
+      case 'agent.createSupervisor':
+        return API.createSupervisor(data as { name: string; role: string; goal: string; workDir: string })
       case 'agent.delete':
         return API.deleteAgent((data as { id: string }).id)
       case 'agent.profile': {

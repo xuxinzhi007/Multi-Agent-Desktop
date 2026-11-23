@@ -31,7 +31,7 @@ test('新建 Agent 弹窗能打开且表单字段可见', async ({ page }) => {
   const roleGroup = dialog.getByRole('group', { name: '角色' })
   await expect(roleGroup).toBeVisible()
   await expect(roleGroup.getByRole('button', { name: '后端' })).toBeVisible()
-  await expect(dialog.locator('label', { hasText: '工作目录' })).toBeVisible()
+  await expect(dialog.locator('label', { hasText: '文件夹' })).toBeVisible()
 
   // 弹窗必须在视口内（transform 被动画覆盖时会被推出屏幕）
   const box = await dialog.boundingBox()
@@ -198,6 +198,30 @@ test('连接页按厂商保存，生效的会标出来', async ({ page, callLog 
   const calls = await callLog()
   expect(calls.some((c) => c.method === 'API.SaveProvider')).toBe(true)
   expect(calls.some((c) => c.method === 'API.ListProviderEndpoints')).toBe(true)
+})
+
+test('自动拆任务：没目标没文件夹不能提交，齐了点下去会建 Supervisor', async ({ page, callLog }) => {
+  await mockRuntime(page, { agents: [], channels: [], notes: [] })
+  await page.goto('/')
+  await page.waitForSelector('.c-shell')
+
+  await page.getByRole('button', { name: /自动拆任务/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('写一句目标')).toBeVisible()
+
+  const submit = dialog.getByRole('button', { name: '拆开并开始' })
+  await expect(submit).toBeDisabled()
+
+  await dialog.locator('textarea').fill('给设置页加上供应商分组搜索，并补测试')
+  await dialog.getByRole('button', { name: '浏览…' }).click()
+  await expect(dialog.getByText('/tmp/e2e-project')).toBeVisible()
+  await expect(submit).toBeEnabled()
+
+  await submit.click()
+  await expect(dialog).toBeHidden()
+  const calls = await callLog()
+  expect(calls.some((c) => /createSupervisor/i.test(c.method))).toBe(true)
 })
 
 test('源码比进程新时，诊断页必须警告「后端是旧版本」', async ({ page }) => {

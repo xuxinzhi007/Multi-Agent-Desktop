@@ -68,7 +68,7 @@ test('运行中的 agent 显示耗时与产出字数', async ({ page }) => {
   expect(metrics, `卡片内容: ${metrics}`).toMatch(/42 字/)
 })
 
-test('舰队列显示当前任务与最近产出', async ({ page }) => {
+test('舰队卡片先显示最近产出，打开会话后才加载完整历史', async ({ page }) => {
   await mockRuntime(page, {
     agents: [
       agent({
@@ -89,7 +89,13 @@ test('舰队列显示当前任务与最近产出', async ({ page }) => {
   await page.goto('/')
   await page.waitForSelector('.c-shell')
 
+  // 没打开会话时只拿壳：卡片上不该假装知道这一轮的任务
   await expect(page.getByText('当前任务')).toBeVisible()
+  await expect(page.getByText('还没有任务')).toBeVisible()
+  await expect(page.getByText('好的，我先看现有实现')).toBeVisible()
+
+  // 打开对话后才去取历史，用户那句话在转写里
+  await page.getByRole('button', { name: '打开对话' }).click()
   await expect(page.getByText('把登录接口的错误码统一一下')).toBeVisible()
 })
 
@@ -206,5 +212,6 @@ test('切到对话视图时检查器自动展开', async ({ page }) => {
   await page.getByRole('button', { name: /对话/ }).first().click()
   await expect(page.getByRole('button', { name: '工具', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /任务/ })).toHaveCount(0)
+  // 精确匹配：侧栏底部的「⑂ 自动拆任务」不该被当成检查器的任务页
+  await expect(page.getByRole('button', { name: '任务', exact: true })).toHaveCount(0)
 })
