@@ -51,7 +51,20 @@ func TestAddAndRemove(t *testing.T) {
 	if info.Branch != "mad/frontend" {
 		t.Fatalf("branch = %q", info.Branch)
 	}
-	if !strings.HasPrefix(info.Path, filepath.Dir(repo)) {
+	// macOS 的 t.TempDir() 给 /var/...，git rev-parse 回 /private/var/...，
+	// 两边先解析符号链接再比，否则前缀永远对不上。
+	realRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realPath, err := filepath.EvalSymlinks(filepath.Dir(info.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(realPath, filepath.Dir(realRepo)) {
+		t.Fatalf("worktree 不该放进仓库里：%s", info.Path)
+	}
+	if strings.HasPrefix(info.Path, repo+string(filepath.Separator)) {
 		t.Fatalf("worktree 不该放进仓库里：%s", info.Path)
 	}
 	if _, err := os.Stat(filepath.Join(info.Path, "README.md")); err != nil {

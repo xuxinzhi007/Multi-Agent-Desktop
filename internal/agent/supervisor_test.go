@@ -76,7 +76,7 @@ func TestSupervisorDecomposesAndAggregates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
-	if !strings.Contains(out, "已拆成 2 个子任务") {
+	if !strings.Contains(out, "派了 2 个子任务：2 个完成") {
 		t.Fatalf("汇总里没有拆解结果：%q", out)
 	}
 	if !strings.Contains(out, "写登录页") || !strings.Contains(out, "写登录接口") {
@@ -151,8 +151,12 @@ func TestSupervisorRespectsAgentCap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_, err := m.RunPrompt(ctx, "sp", "目标")
-	if err == nil || !strings.Contains(err.Error(), "没有名额") {
+	if err == nil || !strings.Contains(err.Error(), "装不下") {
 		t.Fatalf("满了应当明确拒绝，实际 %v", err)
+	}
+	// 名额不够时整个派活失败，不静默少派。
+	if strings.Contains(err.Error(), "重试") == false {
+		t.Fatalf("错误信息应当叫模型别重试，实际 %v", err)
 	}
 	if len(m.List()) != maxAgents {
 		t.Fatalf("不该再建会话，实际 %d", len(m.List()))

@@ -221,7 +221,8 @@ running / queued --BlockAgent--> blocked
 两条路并存：
 
 - `Manager.Route(from, to, text)`：显式把一条消息放进对方队列。界面上是路由气泡
-- 模型工具：`ask_agent` 按名字把任务交给已有会话并等待回复；`create_agent` 新建助手，带 `task` 时会等它做完
+- 模型工具：`ask_agent` 按名字把任务交给已有会话并等待回复；`create_agent` 新建一个闲置助手；
+  `delegate` 把当前任务切成 1-3 块，各建一个子会话在独立工作树里并行做，最后汇总回父会话
 
 `ParentID` 记在 `Agent` 上，并进 `Save` / `Load` / `snapshot` / `viewMap`。侧栏按它嵌套。三种子会话都会带上父 id：
 
@@ -231,7 +232,33 @@ running / queued --BlockAgent--> blocked
 
 会话总数上限 8。`delete_agent` 只能删自己，或自己创建的子会话。互相 `ask_agent` 等待会被拦住。
 
-Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目标，`executeSupervisor` 让模型拆成 2-4 个子任务，每个子任务建一个独立子会话（默认各自 worktree），并行跑完后把汇总写回父会话。最多 4 个子任务、总时限 20 分钟，仍受 8 会话上限约束；停止父会话会级联停止子会话。模型没给出可用的 JSON 方案时退化成一个子任务，不报错。
+#### 派活（`internal/agent/delegate.go`）
+
+Supervisor 和 `delegate` 工具共用同一套执行内核 `runSpawn`，区别只在谁给出子任务列表：
+Supervisor 让模型先拆一次（`planWithModel`），`delegate` 由模型在工具调用里直接给出（不再拆第二次，避免双重推理）。
+
+上限与语义，逐条对照行业一手规则（依据见 `docs/reviews/research-multi-agent-orchestration.md`）：
+
+| 项 | 取值 | why |
+|---|---|---|
+| 单次子任务数 | 3 | Anthropic research 是 3-5；本仓库会话上限 8，父占 1，留飞书助手余量 |
+| 嵌套层数 | 2 | Claude Code 是 3 层但 20 并发；8 个名额下 3 层会撞满 |
+| 墙钟 | 子 10 分钟 / 父 20 分钟 | 父超时只停止等待，**不取消**子会话 |
+| 审批 | 不审批 | OpenAI `as_tool` 默认不审批；子会话内的写操作照旧走 `Registry` |
+
+三条刻意的语义：
+
+- **名额不足时整个派活失败**，不静默少派。悄悄少派两个会让父会话以为活干全了
+- **部分产出回传**并标 `partial`，不因为超时把已有文字整块丢掉
+- **父超时只断等待**，子会话用独立 ctx 继续跑完，结果留在它自己的会话里，用户仍能进去看
+
+`Depth` 记在 `Agent` 上（用户自己建的为 0），进 `Save` / `Load` / `Snapshot` / `viewMap`。
+到 `maxDelegateDepth` 时 `delegate` 和 `create_agent` **不出现在工具表里**，而不是调用时报错——
+省掉一轮白跑的模型调用（Claude Code 的做法）。`ask_agent` 不占名额，任何层都能用。
+
+Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目标，`executeSupervisor` 让模型拆一次，
+之后走 `runSpawn`。拆解提示词收窄到官方点名的三种适合场景（大量独立调查 / 信息量超过一个上下文 / 需对接多种工具），
+并显式禁止「并行改同一批文件」。模型没给出可用方案时退化成一个子任务，不报错。群聊里不能派子任务。
 
 ### 5.4 群聊（已落地）
 
@@ -276,8 +303,51 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 - 群可以 `MentionOnly`：只有被 @ 或被回复才回答。私聊照常接
 - 文本、富文本、图片、合并转发会进会话。其它类型回一句「目前只接收文本、富文本和图片」
 - 同一条 `message_id` 重推会被丢掉
-- 权限检查对照：发消息/读历史/标表情、接收单聊、接收群消息、查看所在群。缺了可以打开飞书开通页
-- 用户授权后的令牌留在本机配置里
+- 权限检查对照六项，分必需和可选，见下表。设置页「检查权限」逐项列出：缺哪些、scope 名、缺了会出现什么现象，另有「已有 N 项」和「租户已授予的 N 个 scope」可以展开看。只有缺必需项时才弹开通页
+
+  | 能力 | scope | 必需 | 免审 |
+  |---|---|---|---|
+  | 发消息 | `im:message:send_as_bot` | ✅ | 是 |
+  | 接收单聊 | `im:message.p2p_msg:readonly` | ✅ | 是 |
+  | 接收群里被 @ 的消息 | `im:message.group_at_msg:readonly` | ✅ | 是 |
+  | 查看所在群 | `im:chat:readonly` | ✅ | 是 |
+  | 标处理中表情 | `im:message.reactions:write_only` | ❌ 可选 | 是 |
+  | 读取群里**全部**消息 | `im:message.group_msg` | ❌ 可选 | **否，要审核** |
+
+  只被 @ 的权限是免审的，`im:message.group_msg` 不是。开着前四项就能在群里被 @ 后回答，
+  缺 `im:message.group_msg` 只影响**主动补拉群历史**，不影响事件推送进来的消息
+- 缺权限时**从飞书的报错正文里取 `need scope: xxx`** 显示（`missingScopeFromError`），
+  不靠静态清单猜——`230027` 这类错误码只有正文里才写清缺的是哪一项
+- `MentionOnly` 的群**照旧补拉历史并记进房间**，只是不主动接话。原来这里直接 return，
+  导致群记录永远是空的
+- 长连接进入 `connected` 时立刻 `ensureBot`，`spokenTo` 在 `botID` 为空时再同步补取一次。
+  `botID` 是「群里被 @ 了吗」的判断依据，缺了会退化成「见到 @ 了某个 bot 就当在叫我」
+#### 身份：应用 vs 用户
+
+`internal/feishu/cred.go` 的 `Cred` 决定一次调用用谁的身份。
+
+| | tenant_access_token | user_access_token |
+|---|---|---|
+| 权限来源 | 应用被授予的 scope | **这个人本人在群里的可见范围** |
+| 读群全部消息 | 要 `im:message.group_msg`（**需审核**） | 只要这个人在群里 |
+| 过期 | 由 `tenantToken` 自动续 | 约 2 小时，用 `refresh_token` 续 |
+
+`Cred.token()` 的顺序是**先用户后应用**：有用户令牌且没过期就用它，过期就刷新；
+刷新失败退回应用身份——应用身份读不了群消息，但单聊和发消息都正常，
+不能因为没授权用户身份就整个不能用。
+
+三个读接口各有 `xxxAs(ctx, Cred, ...)` 形式，旧签名转发到应用身份，测试不受影响：
+
+- `HistoryAs` / `ListChatsAs` / `OpenStopsAs`
+
+`Service.cred()` 从 `Config` 拼出 `Cred`，`replayChat` / `catchUp` / `closeHung` 都走它。
+`Config` 因此带了函数字段 `OnUserRefresh`，`hub.sameConfig` 逐字段比较，跳过函数。
+
+刷新结果通过 `OnUserRefresh` 写回 `config.json`（`main.go` 的 `botRefresher`）。
+不写回去的话进程重启后又拿到过期令牌，只能重新授权。
+
+授权完成后 `probeUserRead` 立刻用新令牌试读一次群消息，把结论（能读几个群、几条消息、
+还是缺哪个 scope）直接显示在设置页，不用等用户自己猜。
 - 主会话忙时 `Assist` 挑一个空闲助手；没有就新建，沿用主会话的模型和工作目录。助手满了返回 busy，等这一轮结束再派
 - 模型已经说出的句子和工具行写回飞书卡片
 - `FeishuRoomView` 只展示 `feishu-rooms.json` 里的记录。`SetFeishuRoomAgent` 从下一条起改由另一个本机会话回答

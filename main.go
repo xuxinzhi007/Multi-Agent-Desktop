@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,18 @@ type API struct {
 	imageDir  string
 	shellMu   sync.Mutex
 	shellBusy map[string]bool
+	// 设备授权是两段式：先拿验证码给用户看，再等他确认。
+	authMu sync.Mutex
+	auths  map[string]feishu.DeviceAuth
+	// 图片下载结果缓存一小会儿，避免界面反复轮询重复下载。
+	mediaMu sync.Mutex
+	media   map[string]mediaBlob
+}
+
+// mediaBlob 是一条消息里的图片转成的 data URL。
+type mediaBlob struct {
+	url string
+	at  time.Time
 }
 
 // Agent 是前端可见的会话视图。
@@ -257,6 +270,8 @@ type AgentView struct {
 	Proposal string `json:"proposal,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的。
 	ParentID string `json:"parentId,omitempty"`
+	// Depth 是派活的嵌套层数。用户自己建的会话为 0。
+	Depth int `json:"depth,omitempty"`
 	// Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。
 	Worktree       string `json:"worktree,omitempty"`
 	WorktreeBranch string `json:"worktreeBranch,omitempty"`
@@ -292,6 +307,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		Chars:          s.Chars,
 		Busy:           s.BusyPlace,
 		ParentID:       s.ParentID,
+		Depth:          s.Depth,
 		Worktree:       s.Worktree,
 		WorktreeBranch: s.WorktreeBranch,
 		SeesImages:     seesModel(s.LLMCfg),
@@ -342,6 +358,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.BlockedReason, _ = m["blockedReason"].(string)
 	v.Proposal, _ = m["proposal"].(string)
 	v.ParentID, _ = m["parentId"].(string)
+	v.Depth = mapInt(m["depth"])
 	v.LearnBy, _ = m["learnBy"].(string)
 	v.LearnBusy, _ = m["learnBusy"].(bool)
 	v.LearnAt = mapInt(m["learnAt"])
@@ -1434,6 +1451,12 @@ type FeishuView struct {
 	MentionOnly bool   `json:"mentionOnly"`
 	Status      string `json:"status"`
 	Detail      string `json:"detail,omitempty"`
+	// UserName 是用户身份授权后问到的人名。
+	UserName string `json:"userName,omitempty"`
+	// UserExpire 是用户令牌到期时间（Unix 秒），0 表示没授权过。
+	UserExpire int64 `json:"userExpire,omitempty"`
+	// UserRead 是「用户身份现在能读到什么」的一次实测结论。
+	UserRead string `json:"userRead,omitempty"`
 }
 
 // FeishuSave 是设置页提交的一个机器人。AppSecret 为空表示沿用已保存的值。ID 为空表示新建。
@@ -1507,11 +1530,26 @@ func (s *API) SetAgentProfile(id, name, role string) (AgentView, error) {
 }
 
 // FeishuScopeView 是这个机器人还缺的飞书权限。
+// FeishuScopeItem 是一项权限的检查结果，界面上逐条列出来。
+type FeishuScopeItem struct {
+	Name     string `json:"name"`
+	Ask      string `json:"ask"`
+	Why      string `json:"why,omitempty"`
+	OK       bool   `json:"ok"`
+	Optional bool   `json:"optional,omitempty"`
+}
+
 type FeishuScopeView struct {
 	OK      bool     `json:"ok"`
 	Missing []string `json:"missing,omitempty"`
 	URL     string   `json:"url,omitempty"`
 	Detail  string   `json:"detail,omitempty"`
+	// Granted 是已经拿到的全部权限名，「当前有哪些」用它。
+	Granted []string `json:"granted,omitempty"`
+	// Items 是逐项检查结果，界面上按必需/可选分组显示。
+	Items []FeishuScopeItem `json:"items,omitempty"`
+	// MissingWhy 和 Missing 一一对应，说明缺了会出现什么现象。
+	MissingWhy []string `json:"missingWhy,omitempty"`
 }
 
 // CheckFeishuScopes 对照发消息、表情、历史、单聊、群消息和群列表，看租户已经授予了哪些。
@@ -1554,10 +1592,26 @@ func (s *API) OpenFeishuScopes(id string) (FeishuScopeView, error) {
 	return view, nil
 }
 
+func scopeItems(rep feishu.ScopeReport) []FeishuScopeItem {
+	src := feishu.ScopeItems(rep)
+	out := make([]FeishuScopeItem, 0, len(src))
+	for _, it := range src {
+		out = append(out, FeishuScopeItem{Name: it.Name, Ask: it.Ask, Why: it.Why, OK: it.OK, Optional: it.Optional})
+	}
+	return out
+}
+
 func scopeView(rep feishu.ScopeReport) FeishuScopeView {
-	view := FeishuScopeView{OK: rep.OK, Missing: rep.Missing, URL: rep.URL}
+	view := FeishuScopeView{
+		OK:         rep.OK,
+		Missing:    rep.Missing,
+		URL:        rep.URL,
+		Granted:    rep.Granted,
+		MissingWhy: rep.MissingWhy,
+		Items:      scopeItems(rep),
+	}
 	if !rep.OK {
-		view.Detail = "还缺这些权限：" + strings.Join(rep.Missing, "、") + "。开通后要发布版本，飞书才会放行。"
+		view.Detail = "还有必需的权限没开通，开通后要发布版本，飞书才会放行。"
 	}
 	return view
 }
@@ -1686,6 +1740,24 @@ func (s *API) syncFeishu() {
 	if s.bot == nil {
 		return
 	}
+	// 用户令牌会自动过期，刷新结果要落回配置，否则重启后又变回过期令牌。
+	botRefresher = func(botID, access, refresh string, expire int64) {
+		if s.settings == nil {
+			return
+		}
+		for _, b := range s.settings.Get().FeishuBots {
+			if b.ID != botID {
+				continue
+			}
+			b.UserAccess = access
+			b.UserRefresh = refresh
+			b.UserExpire = expire
+			if _, err := s.settings.SaveFeishuBot(b); err != nil {
+				log.Printf("feishu user token: 保存失败 %v", err)
+			}
+			return
+		}
+	}
 	bots := []config.FeishuBot{}
 	if s.settings != nil {
 		bots = s.settings.Get().FeishuBots
@@ -1715,6 +1787,7 @@ func (s *API) feishuView(cfg config.FeishuBot) FeishuView {
 		AgentID:     cfg.AgentID,
 		MentionOnly: cfg.MentionOnly,
 		Status:      "stopped",
+		UserExpire:  cfg.UserExpire,
 	}
 	if s.bot != nil {
 		st := s.bot.Status(cfg.ID)
@@ -1728,50 +1801,237 @@ func (s *API) feishuView(cfg config.FeishuBot) FeishuView {
 
 func feishuConfig(cfg config.FeishuBot) feishu.Config {
 	return feishu.Config{
-		Enabled:     cfg.Enabled,
-		AppID:       cfg.AppID,
-		AppSecret:   cfg.AppSecret,
-		AgentID:     cfg.AgentID,
-		MentionOnly: cfg.MentionOnly,
-		UserAccess:  cfg.UserAccess,
+		Enabled:       cfg.Enabled,
+		AppID:         cfg.AppID,
+		AppSecret:     cfg.AppSecret,
+		AgentID:       cfg.AgentID,
+		MentionOnly:   cfg.MentionOnly,
+		UserAccess:    cfg.UserAccess,
+		UserRefresh:   cfg.UserRefresh,
+		UserExpire:    cfg.UserExpire,
+		AllowChats:    cfg.AllowChats,
+		OnUserRefresh: persistUserToken(cfg.ID),
 	}
 }
 
-// AuthorizeFeishuUser 打开飞书授权页，把这个机器人的用户令牌留在本机配置里。
-func (s *API) AuthorizeFeishuUser(ctx context.Context, id string) (FeishuView, error) {
-	if s.settings == nil {
-		return FeishuView{}, fmt.Errorf("会话还没准备好")
-	}
-	var cfg config.FeishuBot
-	found := false
-	for _, b := range s.settings.Get().FeishuBots {
-		if b.ID == id {
-			cfg = b
-			found = true
-			break
+// persistUserToken 在用户令牌被自动刷新时写回配置。
+// 不写回去的话，进程重启后又拿到过期的令牌，只能重新授权。
+func persistUserToken(botID string) func(string, string, int64) {
+	return func(access, refresh string, expire int64) {
+		if botRefresher != nil {
+			botRefresher(botID, access, refresh, expire)
 		}
 	}
-	if !found {
-		return FeishuView{}, fmt.Errorf("机器人不存在")
+}
+
+// botRefresher 由 API 初始化时接上，避免 feishuConfig 依赖整个 API。
+var botRefresher func(botID, access, refresh string, expire int64)
+
+// FeishuAuthView 是一次设备授权要展示给用户的东西。
+// 用户在浏览器里确认 user_code 之后，才能把令牌取回来。
+type FeishuAuthView struct {
+	URL       string `json:"url"`
+	Code      string `json:"code"`
+	ExpiresIn int    `json:"expiresIn"`
+}
+
+// BeginFeishuUserAuth 申请设备授权码，并把确认页打开。
+// 用户点「同意」之后，前端再调 FinishFeishuUserAuth 把令牌取回来。
+func (s *API) BeginFeishuUserAuth(ctx context.Context, id string) (FeishuAuthView, error) {
+	cfg, err := s.feishuBot(id)
+	if err != nil {
+		return FeishuAuthView{}, err
 	}
 	if cfg.AppID == "" || cfg.AppSecret == "" {
-		return FeishuView{}, fmt.Errorf("先保存 App ID 和 App Secret")
+		return FeishuAuthView{}, fmt.Errorf("先保存 App ID 和 App Secret")
 	}
-	access, refresh, exp, err := feishu.AuthorizeUser(ctx, cfg.AppID, cfg.AppSecret, func(u string) {
-		_ = mygo.Shell.OpenExternal(u)
-	})
+	call, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	d, err := feishu.StartDeviceAuth(call, cfg.AppID, cfg.AppSecret)
+	if err != nil {
+		return FeishuAuthView{}, err
+	}
+	s.authMu.Lock()
+	if s.auths == nil {
+		s.auths = map[string]feishu.DeviceAuth{}
+	}
+	s.auths[id] = d
+	s.authMu.Unlock()
+	_ = mygo.Shell.OpenExternal(d.VerifyURL)
+	return FeishuAuthView{URL: d.VerifyURL, Code: d.UserCode, ExpiresIn: int(d.Expires.Seconds())}, nil
+}
+
+// FinishFeishuUserAuth 等用户确认，把用户令牌留在本机配置里。
+func (s *API) FinishFeishuUserAuth(ctx context.Context, id string) (FeishuView, error) {
+	cfg, err := s.feishuBot(id)
+	if err != nil {
+		return FeishuView{}, err
+	}
+	s.authMu.Lock()
+	d, ok := s.auths[id]
+	s.authMu.Unlock()
+	if !ok {
+		return FeishuView{}, fmt.Errorf("先点「用我的飞书身份授权」拿到验证码")
+	}
+	// 设备码十分钟有效，但一次调用等十分钟太久，先等三分钟。
+	wait := d.Expires
+	if wait > 3*time.Minute {
+		wait = 3 * time.Minute
+	}
+	call, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	access, refresh, exp, err := feishu.WaitDeviceAuth(call, cfg.AppID, cfg.AppSecret, d)
 	if err != nil {
 		return FeishuView{}, err
 	}
 	cfg.UserAccess = access
 	cfg.UserRefresh = refresh
 	cfg.UserExpire = exp.Unix()
+	// 立刻验一次：授权成功不等于能读群消息，用户要马上看到结论。
+	who, werr := feishu.WhoAmI(ctx, feishu.Cred{
+		AppID: cfg.AppID, Secret: cfg.AppSecret,
+		UserToken: cfg.UserAccess, UserRefresh: cfg.UserRefresh, UserExpire: cfg.UserExpire,
+	})
+	if werr != nil {
+		log.Printf("feishu whoami: %v", werr)
+	}
+	probe := probeUserRead(ctx, cfg)
 	saved, err := s.settings.SaveFeishuBot(cfg)
 	if err != nil {
 		return FeishuView{}, err
 	}
+	s.authMu.Lock()
+	delete(s.auths, id)
+	s.authMu.Unlock()
 	s.syncFeishu()
-	return s.feishuView(saved), nil
+	view := s.feishuView(saved)
+	if who.Name != "" {
+		view.UserName = who.Name
+	}
+	view.UserRead = probe
+	return view, nil
+}
+
+// SyncFeishuChat 按 chat_id 拉一次群历史，返回新增条数。
+//
+// 这是「显式放行」入口：默认只同步机器人在的群，机器人不在的群不会自动读；
+// 手动读一次之后，这个群会被记进配置的放行名单，之后继续补历史（仍然只读）。
+func (s *API) SyncFeishuChat(chatID string) (int, error) {
+	if s.bot == nil {
+		return 0, fmt.Errorf("飞书还没接上")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n, err := s.bot.SyncRoom(ctx, chatID)
+	if err != nil {
+		return n, err
+	}
+	s.allowFeishuChat(chatID)
+	return n, nil
+}
+
+// allowFeishuChat 把手动读过的群记进配置，视为显式放行。
+func (s *API) allowFeishuChat(chatID string) {
+	if s.settings == nil || strings.TrimSpace(chatID) == "" {
+		return
+	}
+	chatID = strings.TrimSpace(chatID)
+	for _, b := range s.settings.Get().FeishuBots {
+		if b.UserAccess == "" {
+			continue
+		}
+		for _, id := range b.AllowChats {
+			if id == chatID {
+				return
+			}
+		}
+		b.AllowChats = append(b.AllowChats, chatID)
+		if _, err := s.settings.SaveFeishuBot(b); err != nil {
+			log.Printf("feishu allow chat: %v", err)
+			return
+		}
+		s.syncFeishu()
+		return
+	}
+}
+
+// FeishuMedia 下载一条消息里的图片，返回可以直接放进 img 的 data URL。
+// 前端只在要显示缩略图时调用；失败时把飞书的原因原样带出去。
+func (s *API) FeishuMedia(messageID, key string) (string, error) {
+	if s.bot == nil {
+		return "", fmt.Errorf("飞书还没接上")
+	}
+	if messageID == "" || key == "" {
+		return "", fmt.Errorf("缺少图片信息")
+	}
+	cacheKey := messageID + "\n" + key
+	s.mediaMu.Lock()
+	if hit, ok := s.media[cacheKey]; ok && time.Since(hit.at) < 30*time.Minute {
+		url := hit.url
+		s.mediaMu.Unlock()
+		return url, nil
+	}
+	s.mediaMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	raw, mime, err := s.bot.FetchMedia(ctx, messageID, key, "image")
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > 4<<20 {
+		return "", fmt.Errorf("图片太大（%d KB），没有加载", len(raw)/1024)
+	}
+	url := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+	s.mediaMu.Lock()
+	if s.media == nil || len(s.media) > 256 {
+		s.media = map[string]mediaBlob{}
+	}
+	s.media[cacheKey] = mediaBlob{url: url, at: time.Now()}
+	s.mediaMu.Unlock()
+	return url, nil
+}
+
+// probeUserRead 用用户身份试读一次群消息，把结论做成一句能直接看的说明。
+//
+// 授权本身成功不代表能读群：可能这个账号不在任何群里，
+// 也可能重定向 URL 没配好。与其让用户等半天，不如现在就说清。
+func probeUserRead(ctx context.Context, cfg config.FeishuBot) string {
+	c := feishu.Cred{
+		AppID: cfg.AppID, Secret: cfg.AppSecret,
+		UserToken: cfg.UserAccess, UserRefresh: cfg.UserRefresh, UserExpire: cfg.UserExpire,
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	chats, err := feishu.ListChatsAs(probeCtx, c)
+	if err != nil {
+		return "用户身份已授权，但列群失败：" + err.Error()
+	}
+	var groups int
+	var first string
+	for _, ch := range chats {
+		if ch.Kind == "p2p" {
+			continue
+		}
+		groups++
+		if first == "" {
+			first = ch.ID
+		}
+	}
+	if groups == 0 {
+		return "用户身份已授权。这个账号当前不在任何群里，群消息暂时没有可读的。"
+	}
+	if first == "" {
+		return fmt.Sprintf("用户身份已授权，能看到 %d 个群。", groups)
+	}
+	lines, err := feishu.HistoryAs(probeCtx, c, first, 0)
+	if err != nil {
+		if scope := strings.TrimSpace(err.Error()); strings.Contains(scope, "need scope") {
+			return "用户身份已授权，但读群消息仍缺权限：" + scope
+		}
+		return "用户身份已授权，但读群消息失败：" + err.Error()
+	}
+	return fmt.Sprintf("用户身份已授权，能读 %d 个群的消息（刚试读了 %d 条）。", groups, len(lines))
 }
 
 // SettingsPath 返回配置文件路径。

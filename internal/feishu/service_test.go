@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -604,6 +605,59 @@ func TestCatchUpRunsUnanswered(t *testing.T) {
 	case extra := <-got:
 		t.Fatalf("多跑了：%s", extra)
 	case <-time.After(200 * time.Millisecond):
+	}
+	// 「只在被 @ 时回答」不该连历史都不补：群里说过的话要能在记录里看到。
+	var sawGroup bool
+	for _, room := range s.log.Rooms() {
+		if room.ID != "oc_g" {
+			continue
+		}
+		sawGroup = true
+		if len(room.Messages) == 0 {
+			t.Fatal("群历史应当进房间记录")
+		}
+		found := false
+		for _, m := range room.Messages {
+			if strings.Contains(m.Text, "群里没点名") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("群消息没记进来：%+v", room.Messages)
+		}
+	}
+	if !sawGroup {
+		t.Fatal("群房间根本没建出来")
+	}
+}
+
+// 读不到群消息时要报出缺的具体 scope，而不是只留一行日志。
+func TestHistoryGapSurfacesMissingScope(t *testing.T) {
+	s := New(Hooks{})
+	s.log = NewLog()
+	s.listChats = func(context.Context, string, string) ([]listedChat, error) {
+		return []listedChat{{ID: "oc_g", Name: "一组", Kind: "group"}}, nil
+	}
+	s.history = func(context.Context, string, string, string, int64) ([]Line, error) {
+		return nil, errors.New(`{"code":230027,"msg":"Lack of necessary permissions, ext=need scope: im:message.group_msg"}`)
+	}
+	s.catchUp(context.Background(), "cli", "sec")
+	s.mu.Lock()
+	detail := s.detail
+	s.mu.Unlock()
+	if !strings.Contains(detail, "im:message.group_msg") {
+		t.Fatalf("detail 应当点名缺的 scope，实际 %q", detail)
+	}
+}
+
+func TestNoteFaultNamesMissingScope(t *testing.T) {
+	s := New(Hooks{})
+	s.noteFault(errors.New(`{"code":230027,"msg":"ext=need scope: im:message.group_msg"}`))
+	s.mu.Lock()
+	detail := s.detail
+	s.mu.Unlock()
+	if !strings.Contains(detail, "im:message.group_msg") {
+		t.Fatalf("detail 应当点名缺的 scope，实际 %q", detail)
 	}
 }
 

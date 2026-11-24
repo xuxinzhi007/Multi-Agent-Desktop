@@ -11,6 +11,9 @@ type Turn struct {
 	Images    []string
 	Parts     []Part
 	MessageID string
+	// Content 是飞书原始的消息体 JSON。卡片、文件这类不能只看 Text，
+	// 落库时按 MsgType + Content 再解析一次。
+	Content string
 	// ParentID 是被回复的那条消息。飞书事件里只有 id，正文要再取一次。
 	ParentID   string
 	ChatID     string

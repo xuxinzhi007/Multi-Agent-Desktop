@@ -10,6 +10,13 @@ import (
 
 const roomCap = 200
 
+// Media 是消息里带的一张图或一个文件。Key 用来调消息资源接口下载。
+type Media struct {
+	Kind string `json:"kind"`           // image / file / audio / video
+	Key  string `json:"key,omitempty"`  // 图片或文件的 file_key
+	Name string `json:"name,omitempty"` // 文件名
+}
+
 // Line 是飞书某个会话里的一条记录。
 type Line struct {
 	ID     string `json:"id"`
@@ -19,6 +26,10 @@ type Line struct {
 	Text   string `json:"text"`
 	At     int64  `json:"at"`
 	Self   bool   `json:"self,omitempty"`
+	// Kind 是消息类型：text / post / image / file / card / system / unsupported 等。
+	// 界面据此决定怎么画；空表示老数据，按文本处理。
+	Kind  string  `json:"kind,omitempty"`
+	Media []Media `json:"media,omitempty"`
 }
 
 // Room 是一个飞书会话的记录，给界面看。
@@ -29,7 +40,9 @@ type Room struct {
 	AgentID   string `json:"agentId,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
 	BotID     string `json:"botId,omitempty"`
-	Messages  []Line `json:"messages"`
+	// ReadOnly 表示机器人不在这个群里，只能手动读取，不会自动同步也不会回答。
+	ReadOnly bool   `json:"readOnly,omitempty"`
+	Messages []Line `json:"messages"`
 }
 
 // Log 按飞书会话记下消息。同一条 message_id 只留一次。
@@ -41,12 +54,13 @@ type Log struct {
 }
 
 type room struct {
-	Name    string
-	Kind    string
-	AgentID string
-	BotID   string
-	Lines   []Line
-	Seen    map[string]struct{}
+	Name     string
+	Kind     string
+	AgentID  string
+	BotID    string
+	ReadOnly bool
+	Lines    []Line
+	Seen     map[string]struct{}
 }
 
 func NewLog() *Log {
@@ -179,9 +193,11 @@ func (l *Log) load() {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	for _, r := range saved {
 		if r.ID == "" {
+			continue
+		}
+		if emptyRoom(r.Name, len(r.Messages)) {
 			continue
 		}
 		dst := l.room(r.ID)
@@ -197,10 +213,25 @@ func (l *Log) load() {
 		if r.BotID != "" {
 			dst.BotID = r.BotID
 		}
+		if r.ReadOnly {
+			dst.ReadOnly = true
+		}
 		for _, line := range r.Messages {
+			// 旧版本留下的「有发送人、无内容」空行丢掉，也不记进 Seen，
+			// 下次拉取会按新的类型解析重新落库。
+			if strings.TrimSpace(line.Text) == "" && len(line.Media) == 0 {
+				continue
+			}
+			// 旧数据把卡片降级文案当成了正文，丢掉重新拉取，能把标题补回来。
+			if isCardFallback(line.Text) && (line.Kind == "card" || line.Kind == "") {
+				continue
+			}
 			l.addLocked(line)
 		}
 	}
+	l.mu.Unlock()
+	// 顺手把文件整理一遍：旧版本留下的空壳房间、空行不会再写回去。
+	l.save()
 }
 
 func (l *Log) room(id string) *room {
@@ -307,6 +338,23 @@ func (l *Log) Agent(id string) string {
 	return r.AgentID
 }
 
+// SetReadOnly 记下这个会话机器人不在群里，只能手动读取。
+func (l *Log) SetReadOnly(id string, v bool) {
+	if l == nil || id == "" {
+		return
+	}
+	l.mu.Lock()
+	r := l.rooms[id]
+	// 没有记录时不建房间：补历史会遍历用户所在的所有群，不能因此灌出一堆空房间。
+	if r == nil || r.ReadOnly == v {
+		l.mu.Unlock()
+		return
+	}
+	r.ReadOnly = v
+	l.mu.Unlock()
+	l.save()
+}
+
 // Add 写入一条。已经有同一 ID 时返回 false。
 func (l *Log) Add(line Line) bool {
 	if l == nil || line.ChatID == "" || line.ID == "" {
@@ -389,9 +437,15 @@ func (l *Log) Rooms() []Room {
 	for _, id := range l.order {
 		r := l.rooms[id]
 		lines := append([]Line(nil), r.Lines...)
-		out = append(out, Room{ID: id, Name: roomTitle(r), Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, Messages: lines})
+		out = append(out, Room{ID: id, Name: roomTitle(r), Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, ReadOnly: r.ReadOnly, Messages: lines})
 	}
 	return out
+}
+
+// emptyRoom 判断一个会话是不是既没名字也没内容。补历史会遍历用户所在的所有群，
+// 这种空壳不该出现在会话列表里。
+func emptyRoom(name string, lines int) bool {
+	return strings.TrimSpace(name) == "" && lines == 0
 }
 
 // Prompt 把这个会话最近的对话拼成给模型的正文。
@@ -463,7 +517,10 @@ func (l *Log) save() {
 	rooms := make([]Room, 0, len(l.order))
 	for _, id := range l.order {
 		r := l.rooms[id]
-		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, Messages: append([]Line(nil), r.Lines...)})
+		if emptyRoom(r.Name, len(r.Lines)) {
+			continue
+		}
+		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, ReadOnly: r.ReadOnly, Messages: append([]Line(nil), r.Lines...)})
 	}
 	l.mu.Unlock()
 	if path == "" {

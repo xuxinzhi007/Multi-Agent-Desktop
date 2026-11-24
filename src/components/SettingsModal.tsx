@@ -444,6 +444,12 @@ function FeishuBoard() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [scopes, setScopes] = useState<Record<string, FeishuScopeView>>({})
+  // 设备授权是两段式的：先拿验证码给用户看，他确认后再取令牌。
+  const [auth, setAuth] = useState<{ id: string; url: string; code: string } | null>(null)
+  // 机器人不在的群，用 chat_id 主动读一次。
+  const [chatID, setChatID] = useState('')
+  const [chatBusy, setChatBusy] = useState(false)
+  const [chatNote, setChatNote] = useState('')
 
   const loadScopes = (list: FeishuView[]) => {
     for (const bot of list) {
@@ -610,6 +616,9 @@ function FeishuBoard() {
       status: b.status,
       hasSecret: b.hasSecret,
       hasUser: b.hasUser,
+      userName: b.userName,
+      userExpire: b.userExpire,
+      userRead: b.userRead,
       saved: true,
     })),
     ...pending.map((b) => ({
@@ -621,6 +630,9 @@ function FeishuBoard() {
       status: 'stopped',
       hasSecret: false,
       hasUser: false,
+      userName: undefined,
+      userExpire: undefined,
+      userRead: undefined,
       saved: false,
     })),
   ]
@@ -720,15 +732,63 @@ function FeishuBoard() {
                     onClick={() => {
                       setSelected(row.id)
                       setErr('')
+                      setAuth(null)
                       setBusy(true)
-                      API.authorizeFeishuUser(row.id)
-                        .then(putBot)
+                      API.beginFeishuUserAuth(row.id)
+                        .then((v) => setAuth({ id: row.id, url: v.url, code: v.code }))
                         .catch((e: unknown) => setErr(errText(e)))
                         .finally(() => setBusy(false))
                     }}
                   >
                     {row.hasUser ? '已授权，重新授权' : '用我的飞书身份授权'}
                   </button>
+                )}
+                {auth?.id === row.id && (
+                  <div className="c-settings__note" role="status">
+                    <p>
+                      浏览器已经打开确认页。确认验证码 <b>{auth.code}</b>，然后点右边的按钮。
+                    </p>
+                    <p style={{ wordBreak: 'break-all', color: 'var(--text-tertiary)' }}>{auth.url}</p>
+                    <button
+                      type="button"
+                      className="c-btn c-btn--ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        setErr('')
+                        setBusy(true)
+                        API.finishFeishuUserAuth(row.id)
+                          .then((view) => {
+                            putBot(view)
+                            setAuth(null)
+                          })
+                          .catch((e: unknown) => setErr(errText(e)))
+                          .finally(() => setBusy(false))
+                      }}
+                    >
+                      {busy ? '正在等授权结果…' : '我已同意，取回身份'}
+                    </button>
+                  </div>
+                )}
+                {row.saved && row.hasUser && (
+                  <span className="c-feishu__user" role="status">
+                    用户身份
+                    {row.userName ? `：${row.userName}` : ''}
+                    {row.userExpire
+                      ? `（${new Date(row.userExpire * 1000).toLocaleString()} 到期，过期会自动续）`
+                      : ''}
+                  </span>
+                )}
+                {row.userRead && (
+                  <p
+                    className={
+                      row.userRead.includes('失败') || row.userRead.includes('缺权限')
+                        ? 'c-settings__note is-bad'
+                        : 'c-settings__note is-ok'
+                    }
+                    role="status"
+                  >
+                    {row.userRead}
+                  </p>
                 )}
                 <span className={`c-providers__badge ${badge}`}>{statusText(state)}</span>
                 <input
@@ -757,28 +817,138 @@ function FeishuBoard() {
             )
           })}
         </div>
-        {bots.map((bot) => {
-          const miss = scopes[bot.id]?.missing ?? []
-          if (miss.length === 0) return null
-          return (
-            <p key={bot.id} className="c-settings__note is-bad" role="status">
-              {botLabel(bot.name, bot.appId)}还缺：{miss.join('、')}。开通后要发布版本，飞书才会放行。
+        {bots.some((b) => b.hasUser) && (
+          <div className="c-settings__card-body" style={{ display: 'grid', gap: 8 }}>
+            <div className="c-settings__card-sub">
+              按 chat_id 手动读一个群。默认只同步机器人在的群，机器人不在的群不会自动读；
+              这里读一次算显式放行，之后只补历史、不自动回答。
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="c-settings__input"
+                aria-label="群 chat_id"
+                placeholder="oc_..."
+                value={chatID}
+                onChange={(e) => setChatID(e.target.value)}
+              />
               <button
                 type="button"
                 className="c-btn c-btn--ghost"
-                disabled={busy}
+                disabled={chatBusy || !chatID.trim()}
                 onClick={() => {
-                  setBusy(true)
-                  setErr('')
-                  API.openFeishuScopes(bot.id)
-                    .then((view) => setScopes((cur) => ({ ...cur, [bot.id]: view })))
-                    .catch((e: unknown) => setErr(errText(e)))
-                    .finally(() => setBusy(false))
+                  const id = chatID.trim()
+                  setChatBusy(true)
+                  setChatNote('')
+                  API.syncFeishuChat(id)
+                    .then((n) => {
+                      setChatNote(
+                        n > 0
+                          ? `读到 ${n} 条新消息，会话列表里已经加上了（只读，不会自动回答）。`
+                          : '没有新消息（这个群已放行，只读同步）。',
+                      )
+                      setChatID('')
+                    })
+                    .catch((e: unknown) => setChatNote(`读取失败：${errText(e)}`))
+                    .finally(() => setChatBusy(false))
                 }}
               >
-                开通缺少的权限
+                {chatBusy ? '读取中…' : '读取'}
               </button>
-            </p>
+            </div>
+            {chatNote && <span className="c-settings__note">{chatNote}</span>}
+          </div>
+        )}
+        {bots.map((bot) => {
+          const view = scopes[bot.id]
+          if (!view) return null
+          const need = (view.items ?? []).filter((it) => !it.ok && !it.optional)
+          const opt = (view.items ?? []).filter((it) => !it.ok && it.optional)
+          const has = (view.items ?? []).filter((it) => it.ok)
+          return (
+            <div key={bot.id} className="c-scope" role="status">
+              <div className="c-scope__head">
+                <b>{botLabel(bot.name, bot.appId)}</b>
+                <span className={view.ok ? 'c-scope__badge is-ok' : 'c-scope__badge is-bad'}>
+                  {view.ok ? '必需权限齐全' : `缺 ${need.length} 项必需权限`}
+                </span>
+                <button
+                  type="button"
+                  className="c-btn c-btn--ghost c-scope__again"
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true)
+                    setErr('')
+                    API.checkFeishuScopes(bot.id)
+                      .then((next) => setScopes((cur) => ({ ...cur, [bot.id]: next })))
+                      .catch((e: unknown) => setErr(errText(e)))
+                      .finally(() => setBusy(false))
+                  }}
+                >
+                  重新检查
+                </button>
+                {view.url && !view.ok && (
+                  <button
+                    type="button"
+                    className="c-btn c-btn--primary c-scope__open"
+                    disabled={busy}
+                    onClick={() => {
+                      setBusy(true)
+                      setErr('')
+                      API.openFeishuScopes(bot.id)
+                        .then((next) => setScopes((cur) => ({ ...cur, [bot.id]: next })))
+                        .catch((e: unknown) => setErr(errText(e)))
+                        .finally(() => setBusy(false))
+                    }}
+                  >
+                    开通缺少的权限
+                  </button>
+                )}
+              </div>
+              {need.length > 0 && (
+                <ul className="c-scope__list">
+                  {need.map((it) => (
+                    <li key={it.ask} className="c-scope__item is-bad">
+                      <span className="c-scope__mark">缺</span>
+                      <span className="c-scope__name">{it.name}</span>
+                      <code className="c-scope__ask">{it.ask}</code>
+                      {it.why && <span className="c-scope__why">{it.why}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {opt.length > 0 && (
+                <ul className="c-scope__list">
+                  {opt.map((it) => (
+                    <li key={it.ask} className="c-scope__item is-opt">
+                      <span className="c-scope__mark">可选</span>
+                      <span className="c-scope__name">{it.name}</span>
+                      <code className="c-scope__ask">{it.ask}</code>
+                      {it.why && <span className="c-scope__why">{it.why}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {has.length > 0 && (
+                <details className="c-scope__have">
+                  <summary>已有 {has.length} 项能力</summary>
+                  <ul className="c-scope__list">
+                    {has.map((it) => (
+                      <li key={it.ask} className="c-scope__item is-ok">
+                        <span className="c-scope__mark">有</span>
+                        <span className="c-scope__name">{it.name}</span>
+                        <code className="c-scope__ask">{it.ask}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {view.granted && view.granted.length > 0 && (
+                <details className="c-scope__have">
+                  <summary>租户已授予的 {view.granted.length} 个 scope</summary>
+                  <p className="c-scope__raw">{view.granted.join('  ')}</p>
+                </details>
+              )}
+            </div>
           )
         })}
         {draft && (

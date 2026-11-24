@@ -2,114 +2,14 @@ package feishu
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
-
-const userRedirect = "http://127.0.0.1:17321/callback"
-
-// AuthorizeUser 打开飞书授权页，等本机回调，换用户令牌。
-// 飞书后台的重定向 URL 要填 http://127.0.0.1:17321/callback。
-func AuthorizeUser(ctx context.Context, appID, secret string, open func(string)) (string, string, time.Time, error) {
-	if appID == "" || secret == "" {
-		return "", "", time.Time{}, fmt.Errorf("先填写 App ID 和 App Secret")
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:17321")
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("授权回调端口被占用：%w", err)
-	}
-	defer ln.Close()
-
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", "", time.Time{}, err
-	}
-	state := hex.EncodeToString(buf)
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/callback" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.URL.Query().Get("state") != state {
-			http.Error(w, "state", http.StatusBadRequest)
-			return
-		}
-		if e := r.URL.Query().Get("error"); e != "" {
-			select {
-			case errCh <- fmt.Errorf("%s", e):
-			default:
-			}
-			http.Error(w, e, http.StatusBadRequest)
-			return
-		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Error(w, "no code", http.StatusBadRequest)
-			return
-		}
-		_, _ = io.WriteString(w, "授权完成，可以回到应用。")
-		select {
-		case codeCh <- code:
-		default:
-		}
-	})}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() {
-		shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shut)
-	}()
-
-	q := url.Values{}
-	q.Set("client_id", appID)
-	q.Set("redirect_uri", userRedirect)
-	q.Set("state", state)
-	if open != nil {
-		open("https://accounts.feishu.cn/open-apis/authen/v1/authorize?" + q.Encode())
-	}
-	select {
-	case <-ctx.Done():
-		return "", "", time.Time{}, ctx.Err()
-	case err := <-errCh:
-		return "", "", time.Time{}, err
-	case code := <-codeCh:
-		return exchangeUserCode(ctx, appID, secret, code)
-	case <-time.After(3 * time.Minute):
-		return "", "", time.Time{}, fmt.Errorf("授权超时")
-	}
-}
-
-func exchangeUserCode(ctx context.Context, appID, secret, code string) (string, string, time.Time, error) {
-	body, _ := json.Marshal(struct {
-		GrantType    string `json:"grant_type"`
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		Code         string `json:"code"`
-		RedirectURI  string `json:"redirect_uri"`
-	}{"authorization_code", appID, secret, code, userRedirect})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, feishuHost+"/open-apis/authen/v2/oauth/token", strings.NewReader(string(body)))
-	if err != nil {
-		return "", "", time.Time{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", time.Time{}, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return parseUserToken(raw)
-}
 
 func parseUserToken(raw []byte) (string, string, time.Time, error) {
 	var out struct {

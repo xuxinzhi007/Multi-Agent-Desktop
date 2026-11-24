@@ -65,6 +65,9 @@ type FeishuBot struct {
 	UserAccess  string `json:"userAccess,omitempty"`
 	UserRefresh string `json:"userRefresh,omitempty"`
 	UserExpire  int64  `json:"userExpire,omitempty"`
+	// AllowChats 是用户手动放行过的群（按 chat_id 主动读过一次）。
+	// 机器人不在的群默认不自动同步，只有这里列出的才会继续补历史。
+	AllowChats []string `json:"allowChats,omitempty"`
 }
 
 // Store 读写配置文件，并发安全。
@@ -251,12 +254,17 @@ func MergeFeishuBot(prev, in FeishuBot) FeishuBot {
 		UserAccess:  in.UserAccess,
 		UserRefresh: in.UserRefresh,
 		UserExpire:  in.UserExpire,
+		AllowChats:  append([]string(nil), in.AllowChats...),
 	}
 	if next.ID == "" {
 		next.ID = prev.ID
 	}
 	if next.AppSecret == "" {
 		next.AppSecret = prev.AppSecret
+	}
+	// 设置页提交的机器人不带放行名单，沿用已保存的，别把用户放行过的群弄丢。
+	if len(next.AllowChats) == 0 && prev.ID != "" {
+		next.AllowChats = append([]string(nil), prev.AllowChats...)
 	}
 	if prev.ID != "" && next.AppID != prev.AppID {
 		next.UserAccess = ""

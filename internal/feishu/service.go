@@ -101,13 +101,48 @@ type Config struct {
 	AgentID   string
 	// MentionOnly 为真时，群里只有被 @ 或被回复才回答。
 	MentionOnly bool
+	// AllowChats 是用户手动放行过的群。机器人不在的群默认不自动同步；
+	// 按 chat_id 主动读过一次、出现在这里的群才会继续补历史（仍然只读）。
+	AllowChats []string
 	// UserAccess 是用户授权后的令牌。空表示还没有授权。
 	UserAccess string
+	// UserRefresh 用来在用户令牌过期时换新的。
+	UserRefresh string
+	// UserExpire 是用户令牌到期时间（Unix 秒）。
+	UserExpire int64
+	// OnUserRefresh 在换到新令牌时回调，把结果写回配置。
+	OnUserRefresh func(access, refresh string, expire int64)
 }
 
 // New 构造服务。Dial 为空时 Apply 不会去连飞书。
 func New(h Hooks) *Service {
 	return &Service{hooks: h, state: "stopped", log: NewLog()}
+}
+
+// cred 返回当前的调用身份。
+//
+// 有用户令牌就用用户身份：它按这个人本人在群里的可见范围读消息，
+// 不需要应用申请（要审核的）im:message.group_msg。
+// 没有就退回应用身份，单聊和发消息都不受影响。
+func (s *Service) cred(appID, secret string) Cred {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	c := Cred{
+		AppID:       appID,
+		Secret:      secret,
+		UserToken:   cfg.UserAccess,
+		UserRefresh: cfg.UserRefresh,
+		UserExpire:  cfg.UserExpire,
+		OnRefresh:   cfg.OnUserRefresh,
+	}
+	if c.AppID == "" {
+		c.AppID = cfg.AppID
+	}
+	if c.Secret == "" {
+		c.Secret = cfg.AppSecret
+	}
+	return c
 }
 
 // SetLog 把飞书会话记录落到 path。
@@ -154,12 +189,28 @@ func (s *Service) Current() Config {
 	return s.cfg
 }
 
+// HasUser 表示这个机器人已经授权过用户身份（能读群消息）。
+func (s *Service) HasUser() bool {
+	return s != nil && s.Current().UserAccess != ""
+}
+
 // Rooms 返回飞书会话记录。
 func (s *Service) Rooms() []Room {
 	if s == nil || s.log == nil {
 		return nil
 	}
 	return s.log.Rooms()
+}
+
+// FetchMedia 用能读消息的身份下载一条消息里的资源（图片/文件）。
+func (s *Service) FetchMedia(ctx context.Context, messageID, key, kind string) ([]byte, string, error) {
+	if s == nil {
+		return nil, "", fmt.Errorf("飞书还没接上")
+	}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	return FetchResource(ctx, s.cred(cfg.AppID, cfg.AppSecret), messageID, key, kind)
 }
 
 // View 是给界面看的连接状态。
@@ -244,6 +295,9 @@ func (s *Service) run(ctx context.Context, gen int, appID, secret string) {
 		s.detail = detail
 		s.mu.Unlock()
 		if state == "connected" {
+			// 先认出自己是谁： spokenTo 判断「群里被 @ 了吗」要用 botID，
+			// 不在这里取的话，第一条消息到的时候它还是空的。
+			go s.ensureBot(ctx, appID, secret)
 			go s.closeStale(appID, secret)
 			go s.watchScopes(ctx, appID, secret)
 		} else {
@@ -403,7 +457,7 @@ func (s *Service) dispatch(t Turn) {
 		if id == "" {
 			id = "self:" + t.MessageID
 		}
-		s.log.Add(Line{ID: id, ChatID: t.ChatID, From: "你", Text: final, At: time.Now().Unix(), Self: true})
+		s.log.Add(Line{ID: id, ChatID: t.ChatID, From: "你", Text: final, At: time.Now().Unix(), Self: true, Kind: "text"})
 	}
 }
 
@@ -541,14 +595,18 @@ func (s *Service) closeHung(appID, secret string, open map[string]bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pull := s.stops
-	if pull == nil {
-		pull = OpenStops
-	}
 	cfg := Config{AppID: appID, AppSecret: secret}
+	cred := s.cred(appID, secret)
 	for _, room := range s.log.Rooms() {
-		ids, err := pull(ctx, appID, secret, room.ID)
+		var ids []string
+		var err error
+		if s.stops != nil {
+			ids, err = s.stops(ctx, appID, secret, room.ID)
+		} else {
+			ids, err = OpenStopsAs(ctx, cred, room.ID)
+		}
 		if err != nil {
+			s.noteGap(err)
 			log.Printf("feishu stuck %s: %v", room.ID, err)
 			continue
 		}
@@ -1030,40 +1088,71 @@ func (s *Service) watchScopes(ctx context.Context, appID, secret string) {
 	}
 	pulled := ""
 	blind := false
+	// failStreak 让连续失败退避。这个接口偶发 token 失效是常态，
+	// 每 20 秒刷一行日志只会把真正的错误淹掉。
+	failStreak := 0
 	for {
 		got, err := s.loadScopes(ctx, appID, secret)
 		if err != nil {
-			log.Printf("feishu scopes: %v", err)
+			failStreak++
+			if failStreak == 1 || failStreak%30 == 0 {
+				log.Printf("feishu scopes: %v", err)
+			}
 			if !blind {
+				// 权限查不出来不代表消息拉不到，反而先补一次。
 				s.catchUp(ctx, appID, secret)
 				blind = true
 			}
-		} else if historyReady(got) {
-			stamp := scopeStamp(got)
-			if stamp != pulled {
-				s.catchUp(ctx, appID, secret)
-				pulled = stamp
-			}
-			s.mu.Lock()
-			miss := MissingScopes(got)
-			if len(miss) == 0 && strings.HasPrefix(s.detail, "还缺这些权限") {
-				s.detail = ""
-			} else if len(miss) > 0 {
-				s.detail = scopeDetail(miss)
-			}
-			s.mu.Unlock()
+			// 接口挂了不能因此清空已经算出来的提示。
 		} else {
-			s.mu.Lock()
-			s.detail = scopeDetail(MissingScopes(got))
-			s.mu.Unlock()
+			failStreak = 0
+			if historyReady(got) {
+				stamp := scopeStamp(got)
+				if stamp != pulled {
+					s.catchUp(ctx, appID, secret)
+					pulled = stamp
+				}
+			}
+			s.setScopeDetail(got)
 		}
-		timer := time.NewTimer(wait)
+		next := wait
+		if failStreak > 3 {
+			// 最多退到 5 分钟一次。
+			if backoff := wait * time.Duration(min(failStreak, 15)); backoff < 5*time.Minute {
+				next = backoff
+			} else {
+				next = 5 * time.Minute
+			}
+		}
+		timer := time.NewTimer(next)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
 		}
+	}
+}
+
+// setScopeDetail 只在「问题出在权限」时改 detail。
+// 之前这里每次都覆盖，会把真实的发消息错误冲掉。
+func (s *Service) setScopeDetail(granted map[string]bool) {
+	miss := MissingScopes(granted)
+	var hard []ScopeGap
+	for _, g := range miss {
+		if !g.Optional {
+			hard = append(hard, g)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(hard) > 0 {
+		s.detail = scopeDetail(hard)
+		return
+	}
+	// 必需项都齐了：只清掉自己写的那条，别的错误原样留着。
+	if strings.HasPrefix(s.detail, "还缺这些权限") {
+		s.detail = ""
 	}
 }
 
@@ -1082,11 +1171,28 @@ func (s *Service) noteFault(err error) {
 	}
 	log.Printf("feishu: %v", err)
 	msg := err.Error()
-	if strings.Contains(msg, "Access denied") || strings.Contains(msg, "权限") {
+	if scope := missingScopeFromError(msg); scope != "" {
+		// 飞书把缺的具体 scope 写在正文里，比任何静态清单都准。
+		msg = "还缺权限 " + scope + "，去设置页的飞书里点「检查权限」开通，然后发布版本。"
+	} else if strings.Contains(msg, "Access denied") || strings.Contains(msg, "权限") {
 		msg = "飞书没给这个应用发消息和标表情的权限。开通「获取与发送单聊、群组消息」并发布版本后，会自己把还没回复的消息拉下来。"
 	}
 	s.mu.Lock()
 	s.detail = msg
+	s.mu.Unlock()
+}
+
+// noteGap 记下「这个群读不到消息」这类能力缺口，别让它只留在日志里。
+func (s *Service) noteGap(err error) {
+	if err == nil {
+		return
+	}
+	scope := missingScopeFromError(err.Error())
+	if scope == "" {
+		return
+	}
+	s.mu.Lock()
+	s.detail = "还缺权限 " + scope + "：补拉群历史失败。开通后要发布版本，飞书才会放行。"
 	s.mu.Unlock()
 }
 
@@ -1102,11 +1208,18 @@ func (s *Service) noteLine(t Turn) {
 	if at == 0 {
 		at = time.Now().Unix()
 	}
-	text := t.Text
-	if text == "" && len(t.Images) > 0 {
-		text = "［图片］"
+	text, kind, media := t.Text, "text", []Media(nil)
+	if t.MsgType != "" && t.MsgType != "text" {
+		// 卡片、图片、文件这些不能只看 Text：按类型再解析一次，落库才有内容。
+		text, kind, media = readMessage(t.MsgType, t.Content, nil)
+	} else if strings.TrimSpace(text) == "" {
+		if len(t.Images) > 0 {
+			text, kind, media = readMessage(t.MsgType, t.Content, nil)
+		} else {
+			text = "[空消息]"
+		}
 	}
-	s.log.Add(Line{ID: t.MessageID, ChatID: t.ChatID, From: from, FromID: t.SenderID, Text: text, At: at})
+	s.log.Add(Line{ID: t.MessageID, ChatID: t.ChatID, From: from, FromID: t.SenderID, Text: text, At: at, Kind: kind, Media: media})
 	s.mu.Lock()
 	owner := s.owner
 	s.mu.Unlock()
@@ -1151,11 +1264,21 @@ func (s *Service) spokenTo(t Turn) bool {
 	}
 	s.mu.Lock()
 	id := s.botID
+	appID, secret := s.cfg.AppID, s.cfg.AppSecret
 	s.mu.Unlock()
+	if id == "" && appID != "" {
+		// 长连接上 ensureBot 是异步的，第一条消息可能赶在它前面。
+		// 这里同步补一次，否则 @ 判断会退化成「见到 bot 就当是在叫我」。
+		s.ensureBot(context.Background(), appID, secret)
+		s.mu.Lock()
+		id = s.botID
+		s.mu.Unlock()
+	}
 	for _, m := range t.Mentions {
 		if !m.Bot {
 			continue
 		}
+		// 认不出自己是谁时，见到 @ 了某个 bot 就当作在叫我。
 		if id == "" || m.OpenID == "" || m.OpenID == id {
 			return true
 		}
@@ -1201,11 +1324,13 @@ func (s *Service) catchUp(ctx context.Context, appID, secret string) {
 			seen[room.ID] = listedChat{ID: room.ID, Name: room.Name, Kind: room.Kind}
 		}
 	}
-	pull := s.listChats
-	if pull == nil {
-		pull = ListChats
+	var more []listedChat
+	var err error
+	if s.listChats != nil {
+		more, err = s.listChats(ctx, appID, secret)
+	} else {
+		more, err = ListChatsAs(ctx, s.cred(appID, secret))
 	}
-	more, err := pull(ctx, appID, secret)
 	if err != nil {
 		log.Printf("feishu chats: %v", err)
 	} else {
@@ -1224,12 +1349,118 @@ func (s *Service) catchUp(ctx context.Context, appID, secret string) {
 		}
 	}
 	now := time.Now().Unix()
+	// 机器人自己在哪些群里。用户身份能读到自己所在的所有群，
+	// 但机器人不在的群只能看、不能答。
+	bots := map[string]bool{}
+	known := true
+	if list, err := ListChatsAs(ctx, Cred{AppID: appID, Secret: secret}); err != nil {
+		// 查不到就别乱猜，保持原来的行为。
+		log.Printf("feishu bot chats: %v", err)
+		known = false
+	} else {
+		for _, c := range list {
+			bots[c.ID] = true
+		}
+	}
+	allowed := map[string]bool{}
+	for _, id := range cfg.AllowChats {
+		if id != "" {
+			allowed[id] = true
+		}
+	}
 	for _, c := range seen {
-		s.replayChat(cfg, c, now)
+		// 权限策略：默认只同步机器人在的群和单聊。
+		// 机器人不在的群不自动同步、不自动建房间；用户按 chat_id 读过一次
+		// 就记进 AllowChats，算显式放行，之后继续补历史，但依然只读。
+		inBot := !known || bots[c.ID]
+		if known && s.log != nil {
+			s.log.SetReadOnly(c.ID, c.Kind != "p2p" && !inBot)
+		}
+		if known && c.Kind != "p2p" && !inBot && !allowed[c.ID] {
+			continue
+		}
+		s.replay(cfg, c, now, inBot || c.Kind == "p2p")
 	}
 }
 
+// replayChat 把历史补进记录；能在这个群里回答时，再把还没答的消息排进队列。
 func (s *Service) replayChat(cfg Config, c listedChat, now int64) {
+	s.replay(cfg, c, now, true)
+}
+
+// syncPages 是手动拉取时翻几页。一页 50 条，最多 150 条，够看清最近的上下文。
+const syncPages = 3
+
+// SyncRoom 按 chat_id 拉一次历史，记进会话记录，返回新增条数。
+//
+// 读历史用当前身份：授权过用户身份就能读到这个人所在的群，
+// 机器人不在群里也不影响。这是「群消息读取」的入口。
+// 第一次读到的群会出现在会话列表里，之后每轮补历史会继续更新它。
+func (s *Service) SyncRoom(ctx context.Context, chatID, name string) (int, error) {
+	if s == nil {
+		return 0, fmt.Errorf("飞书还没接上")
+	}
+	if chatID == "" {
+		return 0, fmt.Errorf("缺少 chat_id")
+	}
+	s.mu.Lock()
+	cfg := s.cfg
+	owner := s.owner
+	s.mu.Unlock()
+	if cfg.AppID == "" {
+		return 0, fmt.Errorf("还没有可用的飞书机器人")
+	}
+	lines, err := HistoryPages(ctx, s.cred(cfg.AppID, cfg.AppSecret), chatID, 0, syncPages)
+	if err != nil {
+		return 0, err
+	}
+	if s.log == nil {
+		return 0, nil
+	}
+	// 只给新会话定性：已有记录可能是单聊，别翻成群。
+	// 注意要先判断再写名字，写名字会把房间创建出来。
+	if !s.log.Known(chatID) {
+		s.log.Kind(chatID, "group")
+	}
+	if name != "" {
+		s.log.Name(chatID, name)
+	}
+	// 机器人不在的群只能手动读：标成只读，界面会说明原因，
+	// 也不会把它当默认同步范围，更不会自动回答。
+	if inBot, ok := s.botInChat(ctx, cfg.AppID, cfg.AppSecret, chatID); ok {
+		s.log.SetReadOnly(chatID, !inBot)
+		if inBot && owner != "" && s.log.Bot(chatID) == "" {
+			s.log.SetBot(chatID, owner)
+		}
+	}
+	added := 0
+	for _, line := range lines {
+		if line.ChatID == "" {
+			line.ChatID = chatID
+		}
+		if s.log.Add(line) {
+			added++
+		}
+	}
+	return added, nil
+}
+
+// botInChat 查机器人自己是否在这个群里。第二个返回值表示这次查没查出来。
+func (s *Service) botInChat(ctx context.Context, appID, secret, chatID string) (bool, bool) {
+	list, err := ListChatsAs(ctx, Cred{AppID: appID, Secret: secret})
+	if err != nil {
+		log.Printf("feishu bot chats: %v", err)
+		return false, false
+	}
+	for _, c := range list {
+		if c.ID == chatID {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func (s *Service) replay(cfg Config, c listedChat, now int64, answer bool) {
 	if c.ID == "" || cfg.AppID == "" {
 		return
 	}
@@ -1237,21 +1468,21 @@ func (s *Service) replayChat(cfg Config, c listedChat, now int64) {
 	if kind == "topic" {
 		kind = "group"
 	}
-	if cfg.MentionOnly && kind == "group" {
-		return
-	}
 	if s.jobs == nil {
 		s.start()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pull := s.history
-	if pull == nil {
-		pull = History
+	var lines []Line
+	var err error
+	if s.history != nil {
+		lines, err = s.history(ctx, cfg.AppID, cfg.AppSecret, c.ID, 0)
+	} else {
+		lines, err = HistoryAs(ctx, s.cred(cfg.AppID, cfg.AppSecret), c.ID, 0)
 	}
-	lines, err := pull(ctx, cfg.AppID, cfg.AppSecret, c.ID, 0)
 	if err != nil {
 		log.Printf("feishu history %s: %v", c.ID, err)
+		s.noteGap(err)
 		return
 	}
 	if s.log != nil {
@@ -1273,6 +1504,16 @@ func (s *Service) replayChat(cfg Config, c listedChat, now int64) {
 	}
 	if kind == "" {
 		kind = "p2p"
+	}
+	// 只在被 @ 才回答的群：补拉回来的历史照旧记进房间，但不主动接话。
+	// 原来这里直接 return，导致群里的记录永远是空的。
+	if cfg.MentionOnly && kind == "group" {
+		return
+	}
+	// 机器人不在群里（用户身份才读得到的群），只能看不能答：
+	// 排进队列只会让回答失败一次，还刷一片报错。
+	if !answer {
+		return
 	}
 	for _, line := range unanswered(lines, now) {
 		t := Turn{

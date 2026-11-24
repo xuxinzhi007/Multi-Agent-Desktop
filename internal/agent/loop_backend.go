@@ -48,9 +48,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	if appr := m.Approvals(); appr != nil {
 		reg.Approver = appr.Approver(a.ID, a.Name)
 	}
-	reg.Register(&listAgentsTool{m: m})
-	reg.Register(&askAgentTool{m: m, fromID: a.ID})
-	reg.Register(&createAgentTool{m: m, fromID: a.ID})
+	registerSpawnTools(reg, m, a, channelID)
 	reg.Register(&listNotesTool{m: m})
 	reg.Register(&saveNoteTool{m: m, agentID: a.ID})
 	reg.Register(&setProfileTool{m: m, id: a.ID})
@@ -401,8 +399,9 @@ func loopSystemPrompt(workDir string, feishuOn bool) string {
 		"你可以调用 bash / read_file / write_file / edit_file 完成任务。",
 		"你也可以和别的会话通信，并自己建助手：",
 		"- list_agents：看现在有哪些会话。",
-		"- create_agent：新建助手。参数 name、role，可选 task。它用和你相同的模型与工作目录。带 task 时会等它做完。",
 		"- ask_agent：把任务交给已有会话并等待回复。参数 name、task。",
+		"- delegate：把当前任务拆成 1-3 块互相独立的活，各建一个子会话在独立工作树里并行做，最后汇总给你。只在真的能切开时用；要改同一批文件、局部修改、一次提问、调试都不要用。子会话看不到你的对话，task 必须写全。",
+		"- create_agent：新建一个闲置助手，之后再 ask_agent 给它派活。只用在你需要一个人长期待命时；一次性并行干活用 delegate。",
 		"- list_notes：看知识库里已有的笔记。",
 		"- save_note：把结论写进知识库并挂到自己身上，后面的轮次会带上。参数 title、body，可选 tags。",
 		"- set_profile：改自己的名字、简介或工作目录。参数 name、role、dir 至少填一个。简介用来记住你现在负责什么。",

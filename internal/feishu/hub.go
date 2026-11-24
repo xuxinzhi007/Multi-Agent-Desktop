@@ -1,6 +1,10 @@
 package feishu
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // Bot 是一个要维持长连接的机器人。
 type Bot struct {
@@ -51,7 +55,7 @@ func (h *Hub) Sync(list []Bot) {
 			svc.Apply(b.Config)
 			continue
 		}
-		if svc.Current() != b.Config {
+		if !sameConfig(svc.Current(), b.Config) {
 			svc.Apply(b.Config)
 		}
 	}
@@ -62,6 +66,32 @@ func (h *Hub) Sync(list []Bot) {
 		svc.Apply(Config{})
 		delete(h.bots, id)
 	}
+}
+
+// sameConfig 比较两份配置。Config 里带函数字段，不能直接用 ==。
+// 函数字段只影响回调，不影响连接参数，比较时跳过。
+func sameConfig(a, b Config) bool {
+	return a.Enabled == b.Enabled &&
+		a.AppID == b.AppID &&
+		a.AppSecret == b.AppSecret &&
+		a.AgentID == b.AgentID &&
+		a.MentionOnly == b.MentionOnly &&
+		a.UserAccess == b.UserAccess &&
+		a.UserRefresh == b.UserRefresh &&
+		a.UserExpire == b.UserExpire &&
+		sameList(a.AllowChats, b.AllowChats)
+}
+
+func sameList(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Status 返回这个机器人的连接状态。
@@ -76,6 +106,41 @@ func (h *Hub) Status(id string) View {
 		return View{State: "stopped"}
 	}
 	return svc.Status()
+}
+
+// SyncRoom 按 chat_id 拉一次群历史，返回新增条数。
+// 优先用已经授权用户身份的那个机器人：群消息本来就得靠用户身份才读得到。
+func (h *Hub) SyncRoom(ctx context.Context, chatID string) (int, error) {
+	if h == nil {
+		return 0, fmt.Errorf("飞书还没接上")
+	}
+	list := h.snapshot()
+	for _, svc := range list {
+		if svc.HasUser() {
+			return svc.SyncRoom(ctx, chatID, "")
+		}
+	}
+	if len(list) == 0 {
+		return 0, fmt.Errorf("还没有飞书机器人")
+	}
+	return list[0].SyncRoom(ctx, chatID, "")
+}
+
+// FetchMedia 用能读消息的身份下载一条消息里的资源（图片/文件）。
+func (h *Hub) FetchMedia(ctx context.Context, messageID, key, kind string) ([]byte, string, error) {
+	if h == nil {
+		return nil, "", fmt.Errorf("飞书还没接上")
+	}
+	list := h.snapshot()
+	for _, svc := range list {
+		if svc.HasUser() {
+			return svc.FetchMedia(ctx, messageID, key, kind)
+		}
+	}
+	if len(list) == 0 {
+		return nil, "", fmt.Errorf("还没有飞书机器人")
+	}
+	return list[0].FetchMedia(ctx, messageID, key, kind)
 }
 
 // Rooms 返回飞书会话记录。

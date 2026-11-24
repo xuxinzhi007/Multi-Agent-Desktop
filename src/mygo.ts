@@ -88,6 +88,8 @@ export interface AgentView {
   proposal?: string;
   /** ParentID 是创建它的会话。空表示用户自己建的。 */
   parentId?: string;
+  /** Depth 是派活的嵌套层数。用户自己建的会话为 0。 */
+  depth?: number;
   /** Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。 */
   worktree?: string;
   worktreeBranch?: string;
@@ -210,6 +212,16 @@ export interface ErrorEvent {
   error: string;
 }
 
+/**
+ * FeishuAuthView 是一次设备授权要展示给用户的东西。
+ * 用户在浏览器里确认 user_code 之后，才能把令牌取回来。
+ */
+export interface FeishuAuthView {
+  url: string;
+  code: string;
+  expiresIn: number;
+}
+
 /** FeishuSave 是设置页提交的一个机器人。AppSecret 为空表示沿用已保存的值。ID 为空表示新建。 */
 export interface FeishuSave {
   id: string;
@@ -221,12 +233,29 @@ export interface FeishuSave {
   mentionOnly: boolean;
 }
 
-/** FeishuScopeView 是这个机器人还缺的飞书权限。 */
+/**
+ * FeishuScopeView 是这个机器人还缺的飞书权限。
+ * FeishuScopeItem 是一项权限的检查结果，界面上逐条列出来。
+ */
+export interface FeishuScopeItem {
+  name: string;
+  ask: string;
+  why?: string;
+  ok: boolean;
+  optional?: boolean;
+}
+
 export interface FeishuScopeView {
   ok: boolean;
   missing?: string[];
   url?: string;
   detail?: string;
+  /** Granted 是已经拿到的全部权限名，「当前有哪些」用它。 */
+  granted?: string[];
+  /** Items 是逐项检查结果，界面上按必需/可选分组显示。 */
+  items?: FeishuScopeItem[];
+  /** MissingWhy 和 Missing 一一对应，说明缺了会出现什么现象。 */
+  missingWhy?: string[];
 }
 
 /** FeishuView 是设置页看到的一个飞书机器人。Secret 不回传。 */
@@ -241,6 +270,12 @@ export interface FeishuView {
   mentionOnly: boolean;
   status: string;
   detail?: string;
+  /** UserName 是用户身份授权后问到的人名。 */
+  userName?: string;
+  /** UserExpire 是用户令牌到期时间（Unix 秒），0 表示没授权过。 */
+  userExpire?: number;
+  /** UserRead 是「用户身份现在能读到什么」的一次实测结论。 */
+  userRead?: string;
 }
 
 export interface ImageFile {
@@ -261,6 +296,8 @@ export interface Line {
   text: string;
   at: number;
   self?: boolean;
+  kind?: string;
+  media?: Media[];
 }
 
 /** LoopDiag 是某个 agent 的循环检查点状态，用于判断「停在哪一轮、为什么停」。 */
@@ -272,6 +309,12 @@ export interface LoopDiag {
   usedTools: number;
   stopReason?: string;
   checkpointAt: number;
+}
+
+export interface Media {
+  kind: string;
+  key?: string;
+  name?: string;
 }
 
 export interface Message {
@@ -388,6 +431,7 @@ export interface Room {
   agentId?: string;
   agentName?: string;
   botId?: string;
+  readOnly?: boolean;
   messages: Line[];
 }
 
@@ -484,9 +528,12 @@ export const API = {
   auditPath(): Promise<string> {
     return call("API.AuditPath");
   },
-  /** AuthorizeFeishuUser 打开飞书授权页，把这个机器人的用户令牌留在本机配置里。 */
-  authorizeFeishuUser(id: string): Promise<FeishuView> {
-    return call("API.AuthorizeFeishuUser", id);
+  /**
+   * BeginFeishuUserAuth 申请设备授权码，并把确认页打开。
+   * 用户点「同意」之后，前端再调 FinishFeishuUserAuth 把令牌取回来。
+   */
+  beginFeishuUserAuth(id: string): Promise<FeishuAuthView> {
+    return call("API.BeginFeishuUserAuth", id);
   },
   /** BlockAgent 把 agent 标记为「在等人」（工具审批等）。 */
   blockAgent(id: string, reason: string): Promise<void> {
@@ -552,6 +599,17 @@ export const API = {
    */
   diagnose(): Promise<Diagnostics> {
     return call("API.Diagnose");
+  },
+  /**
+   * FeishuMedia 下载一条消息里的图片，返回可以直接放进 img 的 data URL。
+   * 前端只在要显示缩略图时调用；失败时把飞书的原因原样带出去。
+   */
+  feishuMedia(messageID: string, key: string): Promise<string> {
+    return call("API.FeishuMedia", messageID, key);
+  },
+  /** FinishFeishuUserAuth 等用户确认，把用户令牌留在本机配置里。 */
+  finishFeishuUserAuth(id: string): Promise<FeishuView> {
+    return call("API.FinishFeishuUserAuth", id);
   },
   /** GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。 */
   getAgentConfig(agentId: string): Promise<Config> {
@@ -780,6 +838,15 @@ export const API = {
   /** StopAllAgents 停止所有未完成的 agent。 */
   stopAllAgents(): Promise<number> {
     return call("API.StopAllAgents");
+  },
+  /**
+   * SyncFeishuChat 按 chat_id 拉一次群历史，返回新增条数。
+   *
+   * 这是「显式放行」入口：默认只同步机器人在的群，机器人不在的群不会自动读；
+   * 手动读一次之后，这个群会被记进配置的放行名单，之后继续补历史（仍然只读）。
+   */
+  syncFeishuChat(chatID: string): Promise<number> {
+    return call("API.SyncFeishuChat", chatID);
   },
   /** UnblockAgent 解除「在等人」状态。 */
   unblockAgent(id: string): Promise<void> {

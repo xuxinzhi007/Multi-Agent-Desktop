@@ -20,8 +20,11 @@ func TestPromptStoresImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := m.Create("", "甲", "后端")
+	// Create 之后 goSave 已经在后台跑，写字段要走锁。
+	a.mu.Lock()
 	a.Backend = "mock"
 	a.LLMCfg = &llm.Config{Provider: "mock", Model: "gpt-4o"}
+	a.mu.Unlock()
 	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1}
 	err := m.Prompt(context.Background(), PromptRequest{
 		AgentID: a.ID,

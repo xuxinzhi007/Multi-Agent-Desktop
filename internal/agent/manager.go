@@ -48,6 +48,9 @@ type Agent struct {
 	BlockedReason string `json:"blockedReason,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的，侧栏里和别人平级。
 	ParentID string `json:"parentId,omitempty"`
+	// Depth 是派活的嵌套层数。用户自己建的会话为 0，被派出去的子会话是父会话 +1。
+	// 到 maxDelegateDepth 就不再提供 ask_agent / create_agent / delegate 工具。
+	Depth int `json:"depth,omitempty"`
 	// Worktree 是这个会话的独立工作树路径。空表示和主仓库共用目录。
 	// 有值时 WorkDir 指向它，工具和 shell 都在里面跑。
 	Worktree       string `json:"worktree,omitempty"`
@@ -267,6 +270,7 @@ func (m *Manager) Save() error {
 				WorkDir:        a.WorkDir,
 				LLMCfg:         a.LLMCfg,
 				ParentID:       a.ParentID,
+				Depth:          a.Depth,
 				Worktree:       a.Worktree,
 				WorktreeBranch: a.WorktreeBranch,
 				WorktreeRepo:   a.WorktreeRepo,
@@ -412,6 +416,7 @@ func (m *Manager) Load() error {
 			WorkDir:        saved.WorkDir,
 			LLMCfg:         saved.LLMCfg,
 			ParentID:       saved.ParentID,
+			Depth:          saved.Depth,
 			Worktree:       saved.Worktree,
 			WorktreeBranch: saved.WorktreeBranch,
 			WorktreeRepo:   saved.WorktreeRepo,
@@ -1657,6 +1662,7 @@ func (a *Agent) Snapshot() *Agent {
 		WorkDir:        a.WorkDir,
 		LLMCfg:         a.LLMCfg,
 		ParentID:       a.ParentID,
+		Depth:          a.Depth,
 		Worktree:       a.Worktree,
 		WorktreeBranch: a.WorktreeBranch,
 		WorktreeRepo:   a.WorktreeRepo,
@@ -1698,6 +1704,7 @@ func (a *Agent) viewMap() map[string]any {
 		"worktree":       a.Worktree,
 		"worktreeBranch": a.WorktreeBranch,
 		"parentId":       a.ParentID,
+		"depth":          a.Depth,
 		"llmCfg":         llm.RedactedPtr(a.LLMCfg), // nil 表示这个会话还没选模型
 		"knowledge":      append([]string(nil), a.Knowledge...),
 		"blockedReason":  a.BlockedReason,

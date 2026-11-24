@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"multi-agent-desktop/internal/llm"
-	"multi-agent-desktop/internal/worktree"
 )
 
 // Supervisor 是「一句话拆成几件事并行做」的会话类型。
@@ -16,15 +15,11 @@ import (
 // 它自己不写代码：先让模型把目标拆成子任务，再为每个子任务建一个子会话，
 // 各自开一份 git 工作树，并行跑完，最后把结果收成一条汇总。
 //
-// 与 create_agent / ask_agent 的区别：那两条是模型在对话里临时决定怎么协作，
+// 与 create_agent / ask_agent / delegate 的区别：那三条是模型在对话里临时决定怎么协作，
 // Supervisor 是用户显式选择的一种会话形态，界面上有入口，结果有固定形状。
-const (
-	maxSubtasks = 4
-	// supervisorTimeout 是一次拆解的总上限。子会话各自的 loop 预算仍然生效，
-	// 这里只防止某个子任务彻底卡死把整轮拖住。
-	supervisorTimeout = 20 * time.Minute
-)
-
+//
+// 拆解和并行执行是分开的：只有下面这一步是 Supervisor 独有的，
+// 其余都走 delegate.go 的 runSpawn。
 // SupTask 是一个被拆出来的子任务。
 type SupTask struct {
 	Name string `json:"name"`
@@ -44,6 +39,9 @@ var supervisorChildBackend = "loop"
 var supervisorPlanner = planWithModel
 
 // executeSupervisor 执行一次拆解。
+//
+// 只有拆解这一步是 Supervisor 独有的（模型先给出子任务列表）。
+// 建子会话、开工作树、并行跑、收汇总都走 runSpawn，和 delegate 工具同一套。
 func (a *Agent) executeSupervisor(m *Manager, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) {
 	if channelID != "" {
 		m.finish(a, StatusError, "Supervisor 只在单聊里使用")
@@ -55,9 +53,6 @@ func (a *Agent) executeSupervisor(m *Manager, runCtx context.Context, text, chan
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(runCtx, supervisorTimeout)
-	defer cancel()
-
 	a.mu.Lock()
 	role := a.Role
 	parentTree := a.Worktree
@@ -68,23 +63,14 @@ func (a *Agent) executeSupervisor(m *Manager, runCtx context.Context, text, chan
 		"id": a.ID, "tool": "supervisor", "phase": "start", "content": "拆解任务",
 	})
 
-	plan, err := supervisorPlanner(ctx, a.EffectiveLLM(m), role, text)
+	planCtx, stopPlan := context.WithTimeout(runCtx, 2*time.Minute)
+	plan, err := supervisorPlanner(planCtx, a.EffectiveLLM(m), role, text)
+	stopPlan()
 	note := ""
 	if err != nil || len(plan.Subtasks) == 0 {
 		// 模型没给出能用的方案时退化成一件任务，而不是让用户面对一条报错。
 		plan = SupPlan{Subtasks: []SupTask{{Name: "执行", Role: role, Task: text}}}
 		note = "拆分没有成功，已按单个任务执行：" + firstNonEmpty(errText(err), "方案为空")
-	}
-
-	plan.Subtasks = trimSubtasks(plan.Subtasks)
-	avail := maxAgents - len(m.List())
-	if avail <= 0 {
-		m.finish(a, StatusError, fmt.Sprintf("会话已经有 %d 个，没有名额再拆子任务", maxAgents))
-		return
-	}
-	if len(plan.Subtasks) > avail {
-		plan.Subtasks = plan.Subtasks[:avail]
-		note = firstNonEmpty(note, fmt.Sprintf("名额只够 %d 个子任务，其余没有派出去", avail))
 	}
 
 	// 子会话应该从主仓库分出来，而不是从父会话自己的工作树再分一层。
@@ -93,131 +79,30 @@ func (a *Agent) executeSupervisor(m *Manager, runCtx context.Context, text, chan
 		baseDir = parentRepo
 	}
 
-	type child struct {
-		agent *Agent
-		task  SupTask
-		info  worktree.Info
-		iso   string
-	}
-	var kids []child
-	for i, t := range plan.Subtasks {
-		name := t.Name
-		if name == "" {
-			name = fmt.Sprintf("子任务 %d", i+1)
-		}
-		created := m.create("", uniqueChildName(m, name, a.Name), t.Role, a.ID)
-		created.mu.Lock()
-		created.Backend = supervisorChildBackend
-		created.mu.Unlock()
-
-		if base := a.Snapshot(); base.LLMCfg != nil {
-			_ = m.SetAgentLLM(created.ID, *base.LLMCfg)
-		}
-		_ = m.SetAgentWorkDir(created.ID, baseDir)
-
-		info, werr := worktree.Add(ctx, baseDir, created.Name)
-		iso := ""
-		if werr == nil {
-			created.mu.Lock()
-			created.Worktree = info.Path
-			created.WorktreeBranch = info.Branch
-			created.WorktreeRepo = info.Repo
-			created.WorktreeFrom = baseDir
-			created.WorkDir = info.Path
-			created.mu.Unlock()
-			iso = info.Branch
-			m.emit("agent.config", created.viewMap())
-			m.goSave()
-		} else {
-			iso = "未隔离：" + errText(werr)
-		}
-		kids = append(kids, child{agent: created, task: t, info: info, iso: iso})
+	tasks := make([]spawnTask, 0, len(plan.Subtasks))
+	for _, t := range plan.Subtasks {
+		tasks = append(tasks, spawnTask{Name: t.Name, Role: t.Role, Task: t.Task})
 	}
 
-	names := make([]string, 0, len(kids))
-	for _, k := range kids {
-		names = append(names, k.agent.Name)
-	}
-	m.emit("agent.tool", map[string]any{
-		"id": a.ID, "tool": "supervisor", "phase": "end", "status": "ok",
-		"content": fmt.Sprintf("拆成 %d 个子任务：%s", len(kids), strings.Join(names, "、")),
+	summary, err := runSpawn(runCtx, m, spawnOpts{
+		parent:      a,
+		tasks:       tasks,
+		baseDir:     baseDir,
+		useWorktree: true,
 	})
-
-	type result struct {
-		idx  int
-		text string
-		err  string
-	}
-	ch := make(chan result, len(kids))
-	for i, k := range kids {
-		go func(i int, k child) {
-			// 让父会话的「停止」能连带停掉子会话。
-			m.noteRoute(a.ID, k.agent.ID)
-			prompt := fmt.Sprintf("子任务：%s\n\n%s\n\n完成后用文字说明你做了什么、改了哪些文件。不要反问，直接做。", k.task.Task, isoHint(k.iso))
-			out, err := m.RunPrompt(ctx, k.agent.ID, prompt)
-			msg := ""
-			if err != nil {
-				msg = errText(err)
-			}
-			ch <- result{idx: i, text: out, err: msg}
-		}(i, k)
-	}
-
-	results := make([]result, len(kids))
-	filled := make([]bool, len(kids))
-	for range kids {
-		select {
-		case <-ctx.Done():
-			// 总时限或用户停止：已经回来的保留，没回来的标成未完成。
-			for i := range kids {
-				if !filled[i] {
-					results[i] = result{idx: i, err: "未完成：" + errText(ctx.Err())}
-				}
-			}
-			goto summarize
-		case r := <-ch:
-			results[r.idx] = r
-			filled[r.idx] = true
+	if err != nil {
+		if runCtx.Err() != nil {
+			a.noteStop("已停止")
+			a.setIdleOrQueued(m)
+			return
 		}
-	}
-
-summarize:
-	var lines []string
-	lines = append(lines, fmt.Sprintf("已拆成 %d 个子任务并行执行。", len(kids)))
-	if note != "" {
-		lines = append(lines, note)
-	}
-	failed := 0
-	for i, k := range kids {
-		r := results[i]
-		status := "完成"
-		body := strings.TrimSpace(r.text)
-		if r.err != "" {
-			status = "失败"
-			failed++
-			body = r.err
-		}
-		if body == "" {
-			body = "（没有文字产出）"
-		}
-		head := fmt.Sprintf("%d. %s（%s）", i+1, k.agent.Name, status)
-		if k.info.Branch != "" {
-			head += " · 分支 " + k.info.Branch
-		} else if k.iso != "" {
-			head += " · " + k.iso
-		}
-		lines = append(lines, "", head, clipResult(body, 900))
-	}
-	if failed > 0 {
-		lines = append(lines, "", fmt.Sprintf("有 %d 个子任务失败，分支和工作树都保留着，可以直接进去看。", failed))
-	}
-
-	summary := strings.Join(lines, "\n")
-	if runCtx.Err() != nil {
-		a.noteStop("已停止")
-		a.setIdleOrQueued(m)
+		m.finish(a, StatusError, errText(err))
 		return
 	}
+	if note != "" {
+		summary = note + "\n\n" + summary
+	}
+
 	msg := llm.Message{Role: "assistant", Content: summary, Timestamp: time.Now().Unix()}
 	a.mu.Lock()
 	a.Messages = append(a.Messages, msg)
@@ -233,12 +118,23 @@ func planWithModel(ctx context.Context, cfg llm.Config, role, goal string) (SupP
 	}
 	model := llm.NewChatModel(cfg)
 	system := strings.Join([]string{
-		"你是任务编排者。把用户的目标拆成 2-" + fmt.Sprint(maxSubtasks) + " 个可以同时进行的子任务。",
+		"你是任务编排者。判断目标能不能拆成 2-" + fmt.Sprint(maxSubtasks) + " 个可以同时进行的子任务。",
+		"",
+		"只有这三种情况值得拆：",
+		"1. 目标包含大量互不依赖的独立调查或查找；",
+		"2. 信息量本身超过一个上下文能装下的量；",
+		"3. 需要分别对接几种不同的工具或外部系统。",
+		"",
+		"不要拆的情况（此时只给一个子任务，整件事交给它）：",
+		"- 任务要改同一批文件，并行会互相覆盖；",
+		"- 是一处局部修改、一次提问、或需要连续上下文的调试；",
+		"- 子任务之间有先后依赖，后一个要等前一个的结果。",
+		"",
 		"每个子任务必须能独立完成，写清要做什么、交付什么；不要互相等待。",
 		"角色写这个子任务需要的能力（例如 前端 / 后端 / 测试 / 文档）。",
 		`只输出一个 JSON 对象，格式：{"subtasks":[{"name":"短名字","role":"角色","task":"具体任务"}]}`,
 		"不要输出解释、不要代码块、不要多余文字。",
-	}, " ")
+	}, "\n")
 	msgs := []llm.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: "我的身份：" + role + "\n目标：" + goal},
@@ -276,22 +172,6 @@ func ParseSupPlan(out string) (SupPlan, error) {
 	return plan, nil
 }
 
-func trimSubtasks(in []SupTask) []SupTask {
-	if len(in) > maxSubtasks {
-		in = in[:maxSubtasks]
-	}
-	out := make([]SupTask, 0, len(in))
-	for _, t := range in {
-		t.Name = strings.TrimSpace(t.Name)
-		t.Task = strings.TrimSpace(t.Task)
-		if t.Task == "" {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
-}
-
 func uniqueChildName(m *Manager, base, parent string) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
@@ -309,9 +189,12 @@ func uniqueChildName(m *Manager, base, parent string) string {
 	return fmt.Sprintf("%s · %s", base, parent)
 }
 
-func isoHint(iso string) string {
-	if strings.HasPrefix(iso, "mad/") {
-		return "你在独立 git 工作树（分支 " + iso + "）里工作，改动只影响这个分支。"
+func isoHint(branch, iso string) string {
+	if branch != "" {
+		return "你在独立 git 工作树（分支 " + branch + "）里工作，改动只影响这个分支。"
+	}
+	if iso != "" {
+		return iso
 	}
 	return "所有会话共用这个工作目录，注意不要和同时进行的其它子任务改同一处。"
 }
