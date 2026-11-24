@@ -125,7 +125,47 @@ func lastAssistantTextSince(sn *Agent, from int) string {
 	return ""
 }
 
-const maxAgents = 8
+// 名额分池。
+//
+// 旧规则是一个 maxAgents=8 算全部会话，包括用户手动建的。
+// 用户自己建满 8 个之后，len(List()) >= 8 永远为真，
+// 于是 create_agent / delegate / 学习子会话 **全部永久失败**。
+// 真实运行记录里 create_agent 的 7 次失败全是这一条。
+//
+// 现在：用户自建不占模型的名额，模型只能在自己建的子会话里配额。
+const (
+	// maxUserAgents 是用户自己建会话的上限。
+	maxUserAgents = 12
+	// maxChildAgents 是模型自建子会话的总上限（派活、助手、学习共用）。
+	maxChildAgents = 6
+)
+
+// childAgents 返回模型自建的子会话快照。用户自建的不算在内。
+func (m *Manager) childAgents() []*Agent {
+	var out []*Agent
+	for _, a := range m.List() {
+		sn := a.Snapshot()
+		if sn.ParentID != "" {
+			out = append(out, sn)
+		}
+	}
+	return out
+}
+
+// idleChild 找一个空闲的子会话来复用，避免「名额满了但人都闲着」。
+// 只复用模型自己建的，绝不动用户自建的会话。
+// exclude 里的 id 本次已经占用，不重复分配。
+func (m *Manager) idleChild(exclude map[string]bool) *Agent {
+	for _, sn := range m.childAgents() {
+		if exclude[sn.ID] || sn.Status != StatusIdle || sn.BusyPlace != "" {
+			continue
+		}
+		if a, ok := m.Get(sn.ID); ok {
+			return a
+		}
+	}
+	return nil
+}
 
 type listAgentsTool struct {
 	m *Manager
@@ -201,9 +241,6 @@ func (t *createAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool
 	if _, err := t.m.FindByName(in.Name); err == nil {
 		return tool.Fail("已经有叫 %s 的会话，直接用 ask_agent", in.Name)
 	}
-	if len(t.m.List()) >= maxAgents {
-		return tool.Fail("会话已经有 %d 个，不再新建", maxAgents)
-	}
 	from, ok := t.m.Get(t.fromID)
 	if !ok {
 		return tool.Fail("当前会话已经不存在")
@@ -216,7 +253,19 @@ func (t *createAgentTool) Execute(ctx context.Context, raw json.RawMessage) tool
 	}
 	from.mu.Unlock()
 	dir := from.EffectiveWorkDir(t.m)
-	created := t.m.create("", in.Name, in.Role, from.ID)
+	// 名额满了先复用空闲子会话，而不是直接失败。
+	// 之前「建 6 个子会话后全部闲置，后面的活一个也派不出去」。
+	var created *Agent
+	if len(t.m.childAgents()) >= maxChildAgents {
+		reuse := t.m.idleChild(map[string]bool{t.fromID: true})
+		if reuse == nil {
+			return tool.Fail("子会话已经有 %d 个且都在忙。先用 ask_agent 找现有会话帮忙，或等它们空下来。", maxChildAgents)
+		}
+		_ = t.m.SetProfile(reuse.ID, in.Name, in.Role)
+		created = reuse
+	} else {
+		created = t.m.create("", in.Name, in.Role, from.ID)
+	}
 	if copyLLM {
 		_ = t.m.SetAgentLLM(created.ID, sessionLLM)
 	}

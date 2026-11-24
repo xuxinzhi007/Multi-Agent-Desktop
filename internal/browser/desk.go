@@ -159,7 +159,12 @@ func (d *Desk) actLocked(ctx context.Context, op Op, observe bool) (Shot, error)
 			shot, _ := d.finish(ctx, w, "", true)
 			return shot, err
 		}
-		return d.finish(ctx, w, "", true)
+		// 被重定向（常见是跳登录页）不是失败：把实际地址说清楚，模型才知道要先登录。
+		shot, err := d.finish(ctx, w, "", true)
+		if cur := payloadURL(shot.Body); cur != "" && !sameDocument(cur, op.URL) {
+			shot.Body = withNote(shot.Body, "已跳转到 "+cur)
+		}
+		return shot, err
 	}
 	w, err := d.ensure("")
 	if err != nil {
@@ -395,6 +400,7 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 		}
 		d.mu.Unlock()
 	})
+	w.SetMenu(browserMenu(w))
 	d.mu.Lock()
 	d.win = w
 	d.mu.Unlock()
@@ -404,6 +410,35 @@ func (d *Desk) ensure(url string) (*mygo.Window, error) {
 	w.Show()
 	w.Focus()
 	return w, nil
+}
+
+// browserMenu 给内置浏览器一个普通浏览器的菜单：刷新、前进后退、复制地址。
+// 没有它时用户只能等会话去点，自己连刷新都做不了。
+func browserMenu(w *mygo.Window) *mygo.Menu {
+	page := func() *mygo.Page { return w.Page() }
+	return mygo.NewMenu([]*mygo.MenuItem{
+		{Role: mygo.RoleAppMenu},
+		{Role: mygo.RoleEditMenu},
+		{Label: "浏览", Submenu: []*mygo.MenuItem{
+			{Label: "刷新", Accelerator: "CmdOrCtrl+R", Click: func(*mygo.MenuItem, *mygo.Window) {
+				page().Reload()
+			}},
+			{Label: "强制刷新", Accelerator: "CmdOrCtrl+Shift+R", Click: func(*mygo.MenuItem, *mygo.Window) {
+				page().ReloadIgnoringCache()
+			}},
+			{Label: "后退", Accelerator: "CmdOrCtrl+[", Click: func(*mygo.MenuItem, *mygo.Window) {
+				page().GoBack()
+			}},
+			{Label: "前进", Accelerator: "CmdOrCtrl+]", Click: func(*mygo.MenuItem, *mygo.Window) {
+				page().GoForward()
+			}},
+			mygo.Separator(),
+			{Label: "复制当前地址", Accelerator: "CmdOrCtrl+Shift+C", Click: func(*mygo.MenuItem, *mygo.Window) {
+				mygo.Clipboard.WriteText(page().URL())
+			}},
+		}},
+		{Role: mygo.RoleWindowMenu},
+	})
 }
 
 func (d *Desk) reopen(want string) (string, []byte) {
@@ -451,6 +486,7 @@ func waitForNavigation(ctx context.Context, page *mygo.Page, want string) error 
 	defer timer.Stop()
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
+	start := time.Now()
 	var watch navWatch
 	for {
 		select {
@@ -463,7 +499,7 @@ func waitForNavigation(ctx context.Context, page *mygo.Page, want string) error 
 			if !ok {
 				continue
 			}
-			if watch.arrived(doc, page.IsLoading(), want) {
+			if watch.arrived(doc, page.IsLoading(), want, time.Since(start)) {
 				return nil
 			}
 		}

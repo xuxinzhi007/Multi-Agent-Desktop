@@ -39,12 +39,12 @@ export default function DiagnosePanel() {
       {d?.staleBuild && (
         <section
           className="c-settings__card"
-          style={{ borderColor: 'var(--c-danger, #ff5a7a)' }}
+          style={{ borderColor: 'var(--danger)' }}
           role="alert"
         >
           <div className="c-settings__card-head">
             <div>
-              <div className="c-settings__card-title" style={{ color: 'var(--c-danger, #ff5a7a)' }}>
+              <div className="c-settings__card-title" style={{ color: 'var(--danger)' }}>
                 ⚠ 后端是旧版本
               </div>
               <div className="c-settings__card-sub">
@@ -75,7 +75,7 @@ export default function DiagnosePanel() {
         </div>
         <div className="c-settings__card-body">
           {err && (
-            <p className="c-settings__prose" style={{ color: 'var(--c-danger, #ff5a7a)' }}>
+            <p className="c-settings__prose" style={{ color: 'var(--danger)' }}>
               检查失败：{err}
             </p>
           )}
@@ -137,7 +137,7 @@ export default function DiagnosePanel() {
                         {a.queueLen > 0 && ` · 队列 ${a.queueLen}`}
                       </div>
                       {a.lastError && (
-                        <div style={{ color: 'var(--c-danger, #ff5a7a)', marginTop: 3 }}>
+                        <div style={{ color: 'var(--danger)', marginTop: 3 }}>
                           {a.lastError}
                         </div>
                       )}
@@ -145,7 +145,7 @@ export default function DiagnosePanel() {
                     <div
                       style={{
                         alignSelf: 'center',
-                        color: stuck ? 'var(--c-danger, #ff5a7a)' : 'var(--text-secondary)',
+                        color: stuck ? 'var(--danger)' : 'var(--text-secondary)',
                         fontWeight: 600,
                         whiteSpace: 'nowrap',
                       }}
@@ -200,16 +200,16 @@ function Row({
 }) {
   const color =
     tone === 'ok'
-      ? 'var(--c-success, #34d399)'
+      ? 'var(--success)'
       : tone === 'bad'
-        ? 'var(--c-danger, #ff5a7a)'
+        ? 'var(--danger)'
         : 'var(--text-primary)'
   return (
     <div>
       <dt>{label}</dt>
       <dd style={{ color }}>{value}</dd>
       {hint && (
-        <dd style={{ color: 'var(--text-disabled)', fontSize: 10 }}>{hint}</dd>
+        <dd style={{ color: 'var(--text-disabled)', fontSize: 'var(--text-xs)' }}>{hint}</dd>
       )}
     </div>
   )

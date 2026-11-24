@@ -167,7 +167,7 @@ export default function AgentRow({
       {age && (
         <span
           className="mono"
-          style={{ fontSize: 10, color: 'var(--text-disabled)', flexShrink: 0 }}
+          style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', flexShrink: 0 }}
         >
           {age}
         </span>
@@ -181,7 +181,7 @@ export default function AgentRow({
             onDelete()
           }}
           title="删除"
-          style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}
+          style={{ opacity: 0.35, width: 20, height: 20, fontSize: 'var(--text-md)' }}
           onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
           onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.35')}
         >

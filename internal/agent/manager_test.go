@@ -541,3 +541,35 @@ func TestConcurrentSaveKeepsFileValid(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateWithBackendInheritsSelectedModel(t *testing.T) {
+	global := llm.Config{Provider: "qoder", Model: "Auto", APIKey: "k"}
+	m := NewManager(global, func(string, any) {})
+	a := m.CreateWithBackend("", "新会话", "通用", "loop")
+	got := a.EffectiveLLM(m)
+	if got.Provider != "qoder" || got.Model != "Auto" {
+		t.Fatalf("新会话该继承当前模型，拿到 %+v", got)
+	}
+	if got.BaseURL == "" {
+		t.Fatal("继承时该补上默认 BaseURL")
+	}
+}
+
+func TestCreateWithBackendWithoutGlobalModelStaysEmpty(t *testing.T) {
+	m := NewManager(llm.Config{}, func(string, any) {})
+	a := m.CreateWithBackend("", "新会话", "通用", "loop")
+	if a.Snapshot().LLMCfg != nil {
+		t.Fatalf("没有全局模型时不该伪造一份：%+v", *a.Snapshot().LLMCfg)
+	}
+}
+
+func TestInternalCreateDoesNotInheritModel(t *testing.T) {
+	global := llm.Config{Provider: "qoder", Model: "Auto", APIKey: "k"}
+	m := NewManager(global, func(string, any) {})
+	// 内部建子会话（delegate / learn / create_agent）由调用方显式设置模型，
+	// create 本身不能悄悄钉住全局配置。
+	a := m.create("", "子会话", "子任务", "")
+	if a.Snapshot().LLMCfg != nil {
+		t.Fatalf("内部 create 不该继承全局模型：%+v", *a.Snapshot().LLMCfg)
+	}
+}

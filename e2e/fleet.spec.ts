@@ -89,9 +89,11 @@ test('舰队卡片先显示最近产出，打开会话后才加载完整历史',
   await page.goto('/')
   await page.waitForSelector('.c-shell')
 
-  // 没打开会话时只拿壳：卡片上不该假装知道这一轮的任务
-  await expect(page.getByText('当前任务')).toBeVisible()
-  await expect(page.getByText('还没有任务')).toBeVisible()
+  // 没打开会话时只拿壳：卡片上不该假装知道这一轮的任务。
+  // 有最近产出时就只展示它，不再摆一个空的「当前任务 / 还没有任务」标题。
+  await expect(page.getByText('最近产出')).toBeVisible()
+  await expect(page.getByText('当前任务')).toHaveCount(0)
+  await expect(page.getByText('把登录接口的错误码统一一下')).toHaveCount(0)
   await expect(page.getByText('好的，我先看现有实现')).toBeVisible()
 
   // 打开对话后才去取历史，用户那句话在转写里

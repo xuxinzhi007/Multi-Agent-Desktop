@@ -37,6 +37,9 @@ type Meta struct {
 	ExitCode   int  `json:"exitCode,omitempty"`
 	Truncated  bool `json:"truncated"`
 	Repeated   bool `json:"repeated,omitempty"`
+	// BadArgs 表示这次失败是参数不合 schema，模型改一下写法就能重试。
+	// 防打转要把它和「页面上真的做不到」分开，否则三次写错参数就把任务判死。
+	BadArgs bool `json:"badArgs,omitempty"`
 	// Path 是这次写操作改的文件（相对工作目录），Diff 是统一 diff 文本。
 	// 只在文件写工具上有值，用来给审批卡和检查器看"到底改了什么"。
 	Path string `json:"path,omitempty"`
@@ -195,7 +198,9 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 
 	if msg := validate(t.Schema(), c.Input); msg != "" {
 		// 参数错误是模型最常犯的错，必须带上具体字段让它自我修正
-		return done(c, Fail("invalid arguments for %s: %s", c.Name, msg), start)
+		res := Fail("invalid arguments for %s: %s", c.Name, msg)
+		res.Meta.BadArgs = true
+		return done(c, res, start)
 	}
 
 	fp := fingerprint(c)

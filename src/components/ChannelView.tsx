@@ -146,7 +146,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             color: 'var(--accent-bright)',
             display: 'grid',
             placeItems: 'center',
-            fontSize: 13,
+            fontSize: 'var(--text-base)',
             fontWeight: 700,
             flexShrink: 0,
           }}
@@ -209,7 +209,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
                 color: 'var(--bg-base)',
                 display: 'grid',
                 placeItems: 'center',
-                fontSize: 9,
+                fontSize: 'var(--text-xs)',
                 fontWeight: 700,
                 marginLeft: -4,
                 border: '1.5px solid var(--bg-chrome)',
@@ -238,6 +238,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
         ref={scrollRef}
         style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6)' }}
       >
+        {/* 和单聊、飞书会话共用同一个阅读宽度 */}
+        <div className="c-transcript">
         {(channel.messages ?? []).length === 0 && (
           <div className="c-empty" style={{ paddingTop: 'var(--space-6)' }}>
             {previewMode() ? '这是预览' : '频道已创建，发第一条消息吧'}
@@ -274,7 +276,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
                     color: 'var(--bg-base)',
                     display: 'grid',
                     placeItems: 'center',
-                    fontSize: 11,
+                    fontSize: 'var(--text-xs)',
                     fontWeight: 700,
                     flexShrink: 0,
                     marginTop: 1,
@@ -295,7 +297,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
                     }}
                   >
                     {a?.name ?? id}
-                    <span className="blink" style={{ color: 'var(--warning)', fontSize: 9 }}>
+                    <span className="blink" style={{ color: 'var(--warning)', fontSize: 'var(--text-xs)' }}>
                       ●
                     </span>
                   </div>
@@ -314,6 +316,7 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               </div>
             )
           })}
+        </div>
       </div>
 
       <div style={{ padding: 'var(--space-3) var(--space-6) var(--space-5)', flexShrink: 0 }}>
@@ -468,7 +471,7 @@ function ChannelBubble({
           color: isUser ? 'var(--text-secondary)' : 'var(--bg-base)',
           display: 'grid',
           placeItems: 'center',
-          fontSize: 11,
+          fontSize: 'var(--text-xs)',
           fontWeight: 700,
           flexShrink: 0,
           marginTop: 1,

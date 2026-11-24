@@ -672,3 +672,44 @@ func (m *recordingModel) Turn(ctx context.Context, msgs []llm.Message, tools []t
 	}
 	return m.onTurn(msgs), nil
 }
+
+// ── 验收 4c：参数写错不该按「原地打转」把任务判死 ──
+func TestBadArgumentsGetMoreRoundsThanRealFailures(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&fakeTool{name: "t"})
+	bad := tool.Call{ID: "1", Name: "t", Input: json.RawMessage(`{"nope":"x"}`)}
+	turns := make([]llm.Turn, 5)
+	for i := range turns {
+		turns[i] = llm.Turn{Calls: []tool.Call{bad}}
+	}
+	m := &scriptedModel{turns: turns}
+	r, _ := newRunner(m, reg)
+	st := r.Run(context.Background(), &State{ID: "s-badargs", Budget: DefaultBudget()})
+
+	if st.Phase != PhaseFailed {
+		t.Fatalf("phase = %q, want failed", st.Phase)
+	}
+	if !strings.Contains(st.StopReason, "invalid tool arguments") {
+		t.Fatalf("reason = %q, want the invalid-arguments stop", st.StopReason)
+	}
+	if st.Budget.UsedIterations <= 3 {
+		t.Fatalf("bad arguments should survive past the no-progress limit, used %d", st.Budget.UsedIterations)
+	}
+}
+
+// 失败理由要带上最后一次错误，界面上才知道为什么停。
+func TestStopReasonCarriesTheLastError(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&fakeTool{name: "t", err: true})
+	m := &scriptedModel{turns: []llm.Turn{
+		{Calls: []tool.Call{tc("t")}},
+		{Calls: []tool.Call{tc("t")}},
+		{Calls: []tool.Call{tc("t")}},
+		{Calls: []tool.Call{tc("t")}},
+	}}
+	r, _ := newRunner(m, reg)
+	st := r.Run(context.Background(), &State{ID: "s-reason", Budget: DefaultBudget()})
+	if !strings.Contains(st.StopReason, "boom") {
+		t.Fatalf("reason = %q, want the tool error in it", st.StopReason)
+	}
+}

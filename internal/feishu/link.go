@@ -852,20 +852,21 @@ func PatchCard(ctx context.Context, appID, secret, messageID, text, stopID strin
 	return nil
 }
 
-// BotOpenID 读取这个机器人自己的 open_id，用来判断群里 @ 的是不是它。
-func BotOpenID(ctx context.Context, appID, secret string) (string, error) {
+// BotInfo 读取这个机器人自己的 open_id 和名字。open_id 用来判断群里 @ 的是不是它，
+// 名字直接用飞书后台配置的那个，界面显示发送人时用它。
+func BotInfo(ctx context.Context, appID, secret string) (string, string, error) {
 	token, err := tenantToken(ctx, appID, secret)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feishuHost+"/open-apis/bot/v3/info", nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("feishu bot: %w", err)
+		return "", "", fmt.Errorf("feishu bot: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -873,19 +874,78 @@ func BotOpenID(ctx context.Context, appID, secret string) (string, error) {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Bot  struct {
-			OpenID string `json:"open_id"`
+			OpenID  string `json:"open_id"`
+			AppName string `json:"app_name"`
 		} `json:"bot"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("feishu bot: %s", strings.TrimSpace(string(raw)))
+		return "", "", fmt.Errorf("feishu bot: %s", strings.TrimSpace(string(raw)))
 	}
 	if out.Code != 0 || out.Bot.OpenID == "" {
 		if out.Msg == "" {
 			out.Msg = "没有 open_id"
 		}
-		return "", fmt.Errorf("feishu bot: %s", out.Msg)
+		return "", "", fmt.Errorf("feishu bot: %s", out.Msg)
 	}
-	return out.Bot.OpenID, nil
+	return out.Bot.OpenID, strings.TrimSpace(out.Bot.AppName), nil
+}
+
+// BotOpenID 读取这个机器人自己的 open_id。@ 判断用，名字另走 BotInfo。
+func BotOpenID(ctx context.Context, appID, secret string) (string, error) {
+	id, _, err := BotInfo(ctx, appID, secret)
+	return id, err
+}
+
+// cardEntityText 凭 token 按 card_id 取卡片实体的真实内容。
+// schema 2.0 的卡片消息体里只有 card_id，正文在卡片实体里；
+// 能解析出文字就返回，拿不到（没权限、版本不支持）返回空，由调用方落占位。
+func cardEntityText(ctx context.Context, token, cardID string) string {
+	if token == "" || cardID == "" {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	u := feishuHost + "/open-apis/cardkit/v1/cards/" + url.PathEscape(cardID)
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out struct {
+		Code int             `json:"code"`
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(raw, &out) != nil || out.Code != 0 || len(out.Data) == 0 {
+		return ""
+	}
+	var body any
+	if json.Unmarshal(out.Data, &body) != nil {
+		return ""
+	}
+	var lines []string
+	collectCard(body, &lines, map[string]bool{})
+	return clipRunes(strings.Join(lines, "\n"), 800)
+}
+
+// resolveCardText 卡片消息只留了占位时，试着按 card_id 把正文换回来。
+func resolveCardText(ctx context.Context, token, text, content string) string {
+	if !strings.Contains(text, cardStatus) {
+		return text
+	}
+	id := cardEntityID(content)
+	if id == "" {
+		return text
+	}
+	if body := cardEntityText(ctx, token, id); body != "" {
+		return body
+	}
+	return text
 }
 
 // History 拉取一个会话里 since 之后的消息。since 为 0 时取最近一页。
@@ -1005,6 +1065,9 @@ func historyPage(ctx context.Context, token, chatID string, since int64, page st
 			mentions = append(mentions, mention{Key: m.Key, Name: m.Name})
 		}
 		text, kind, media := readMessage(it.MsgType, it.Body.Content, mentions)
+		if kind == "card" {
+			text = resolveCardText(ctx, token, text, it.Body.Content)
+		}
 		at, _ := strconv.ParseInt(it.CreateTime, 10, 64)
 		if at > 1_000_000_000_000 {
 			at /= 1000

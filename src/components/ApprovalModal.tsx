@@ -72,7 +72,7 @@ export default function ApprovalModal({
         <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-subtle)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 'var(--text-md)', fontWeight: 600 }}>需要你的批准</span>
-            <span className="c-badge c-badge--warning" style={{ fontSize: 10 }}>
+            <span className="c-badge c-badge--warning" style={{ fontSize: 'var(--text-xs)' }}>
               {item.tool}
             </span>
             {items.length > 1 && (
@@ -137,7 +137,7 @@ export default function ApprovalModal({
             alignItems: 'center',
           }}
         >
-          <span style={{ fontSize: 10, color: 'var(--text-tertiary)', flex: 1, lineHeight: 1.5 }}>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', flex: 1, lineHeight: 1.5 }}>
             允许一次只放行这一次；本会话允许只对「{item.tool}」生效，删除会话后失效。
           </span>
           <button

@@ -97,6 +97,6 @@ function Shot({ block }: { block: Block }) {
       stop = true
     }
   }, [block.id, block.mime])
-  if (!url) return <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>图没拿到</div>
+  if (!url) return <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}>图没拿到</div>
   return <img src={url} alt="" style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8, display: 'block', margin: '4px 0' }} />
 }

@@ -66,7 +66,7 @@ type State = {
 
 const EMPTY: State = {
   connected: true,
-  version: '0.3.0-mygo',
+  version: '',
   workDir: '',
   llm: { provider: '', baseUrl: '', apiKey: '', model: '' },
   agents: [],
@@ -856,6 +856,15 @@ export function useBackend() {
       stop = true
       window.clearInterval(timer)
     }
+  }, [])
+
+  useEffect(() => {
+    // 版本号取自后端打包信息，不在前端写死——写死的那个永远和实际跑的进程对不上。
+    API.info()
+      .then((i) => {
+        if (i?.version) setState((s) => ({ ...s, version: i.version }))
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {

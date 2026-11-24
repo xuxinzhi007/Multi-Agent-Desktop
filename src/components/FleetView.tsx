@@ -236,8 +236,8 @@ function FleetColumn({
             display: 'flex',
             alignItems: 'center',
             gap: 10,
-            fontSize: 10,
-            color: 'var(--text-disabled)',
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-tertiary)',
             fontFamily: 'var(--font-mono)',
           }}
         >
@@ -284,11 +284,18 @@ function FleetColumn({
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', minHeight: 0 }}>
-        <div style={labelStyle}>当前任务</div>
         {task ? (
-          <div className="c-fleet-task">{bodyOf(task.content)}</div>
+          <>
+            <div style={labelStyle}>当前任务</div>
+            <div className="c-fleet-task">{bodyOf(task.content)}</div>
+          </>
         ) : (
-          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>还没有任务</div>
+          !live && !preview && (
+            // 空转的卡片不该摆两个「还没有」的标题：直接告诉用户下一步能做什么。
+            <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
+              还没接活。打开对话交一句任务，它就开工。
+            </div>
+          )
         )}
 
         {live ? (
@@ -376,10 +383,10 @@ const STATUS: Record<string, { icon: string; color: string; label: string }> = {
 }
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 9,
+  fontSize: 'var(--text-xs)',
   fontWeight: 600,
   letterSpacing: '0.06em',
   textTransform: 'uppercase',
-  color: 'var(--text-disabled)',
+  color: 'var(--text-tertiary)',
   marginBottom: 4,
 }

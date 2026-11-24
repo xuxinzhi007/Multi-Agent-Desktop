@@ -121,6 +121,15 @@ export interface Block {
   mime?: string;
 }
 
+/** Capability 是一条能力：工具或技能，以及它现在能不能用。 */
+export interface Capability {
+  name: string;
+  kind: string;
+  detail: string;
+  ready: boolean;
+  why?: string;
+}
+
 export interface Channel {
   id: string;
   name: string;
@@ -431,6 +440,7 @@ export interface Room {
   agentId?: string;
   agentName?: string;
   botId?: string;
+  botName?: string;
   readOnly?: boolean;
   messages: Line[];
 }
@@ -452,6 +462,15 @@ export interface ShellResultEvent {
   agentId: string;
   command: string;
   result: Result;
+}
+
+/** SkillView 是界面上的一条技能。正文只在打开时取。 */
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string;
+  body?: string;
+  updatedAt: number;
 }
 
 /** StatusEvent 是 agent 状态变化。 */
@@ -477,6 +496,8 @@ export interface SystemInfo {
   goVersion: string;
   mygo: boolean;
   buildStamp: string;
+  /** Version 是打包时写进应用的版本号。界面不再写死一个字符串。 */
+  version: string;
   /**
    * StaleBuild 为 true 表示源码比运行中的进程新：
    * 用户的改动还没生效，必须重启，否则看到的现象不代表当前代码。
@@ -513,6 +534,13 @@ export interface WorkDirEvent {
  * 这是单进程应用的后端服务层，所有方法通过 mygo.Bind 直接被前端调用。
  */
 export const API = {
+  /**
+   * AgentCapabilities 列出这个会话此刻真正拥有的能力。
+   * 界面上「它能干什么」不该靠用户猜，也不该把没装上的能力算进去。
+   */
+  agentCapabilities(agentID: string): Promise<Capability[]> {
+    return call("API.AgentCapabilities", agentID);
+  },
   /** AgentMessages 返回这个会话最近的一页。磁盘上的历史不在这里截断。 */
   agentMessages(id: string, limit: number): Promise<Message[]> {
     return call("API.AgentMessages", id, limit);
@@ -588,6 +616,10 @@ export const API = {
   /** DeleteNote 删除一条笔记。 */
   deleteNote(id: string): Promise<boolean> {
     return call("API.DeleteNote", id);
+  },
+  /** DeleteSkill 删掉一条技能。 */
+  deleteSkill(id: string): Promise<void> {
+    return call("API.DeleteSkill", id);
   },
   /** DetachNoteFromAgent 从 agent 移除知识笔记。 */
   detachNoteFromAgent(noteId: string, agentId: string): Promise<AgentView> {
@@ -693,6 +725,10 @@ export const API = {
   listProviderEndpoints(): Promise<ProviderEndpoint[]> {
     return call("API.ListProviderEndpoints");
   },
+  /** ListSkills 返回全部技能（不含正文）和它们所在的目录。 */
+  listSkills(): Promise<SkillView[]> {
+    return call("API.ListSkills");
+  },
   /** LoginQoder 用 Qoder 自己的浏览器授权。本机已经登录过就直接用，否则打开浏览器等用户确认。 */
   loginQoder(): Promise<ProviderEndpoint> {
     return call("API.LoginQoder");
@@ -740,6 +776,10 @@ export const API = {
   queryNotes(q: Query): Promise<Note[]> {
     return call("API.QueryNotes", q);
   },
+  /** ReadSkill 取一条技能的全文。 */
+  readSkill(id: string): Promise<SkillView> {
+    return call("API.ReadSkill", id);
+  },
   /** RecentAudit 返回最近的副作用操作记录（只读）。 */
   recentAudit(limit: number): Promise<Entry[]> {
     return call("API.RecentAudit", limit);
@@ -766,6 +806,10 @@ export const API = {
   /** SaveProvider 保存一个厂商的地址和 Key，然后检查它现在是否生效。 */
   saveProvider(cfg: Config): Promise<ProviderEndpoint> {
     return call("API.SaveProvider", cfg);
+  },
+  /** SaveSkill 新建或改写一条技能。同名覆盖。 */
+  saveSkill(name: string, description: string, body: string): Promise<SkillView> {
+    return call("API.SaveSkill", name, description, body);
   },
   /** SearchNotes 全文搜索笔记。 */
   searchNotes(text: string, limit: number): Promise<Note[]> {
@@ -830,6 +874,10 @@ export const API = {
   /** SettingsPath 返回配置文件路径。 */
   settingsPath(): Promise<string> {
     return call("API.SettingsPath");
+  },
+  /** SkillDir 返回技能文件所在目录，用户可以直接用编辑器改。 */
+  skillDir(): Promise<string> {
+    return call("API.SkillDir");
   },
   /** StopAgent 停止一个 agent 的推理并清空队列。 */
   stopAgent(id: string): Promise<boolean> {

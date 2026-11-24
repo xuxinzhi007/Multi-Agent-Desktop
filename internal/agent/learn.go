@@ -113,10 +113,24 @@ func studyWith(m *Manager, a *Agent, by string, model chatter) {
 	}
 }
 
+// isLearner 判断这个会话是不是学习助手。学习助手只做摘要，不是干活的手，
+// 它自己再建学习助手会無限套下去（学习的学习的学习…）。
+// 以角色文本为准，重启后旧数据也能识别。
+func (a *Agent) isLearner() bool {
+	a.mu.Lock()
+	role, marked := a.Role, a.learnRole
+	a.mu.Unlock()
+	return marked || strings.Contains(role, learnerRoleMark)
+}
+
 func ensureLearner(m *Manager, parent *Agent) (string, llm.Config) {
 	cfg := parent.EffectiveLLM(m)
 	if cfg.Provider == "" {
 		cfg = m.LLMConfig()
+	}
+	// 学习助手自身不再建学习助手：它没有可学的新对话，只会无意义地套娃。
+	if parent.isLearner() {
+		return "", cfg
 	}
 	var idleName string
 	var idleCfg llm.Config
@@ -141,14 +155,17 @@ func ensureLearner(m *Manager, parent *Agent) (string, llm.Config) {
 		}
 		return idleName, cfg
 	}
-	if anyChild || len(m.List()) >= maxAgents {
+	if anyChild || len(m.childAgents()) >= maxChildAgents {
 		return "", cfg
 	}
 	parent.mu.Lock()
 	pname := parent.Name
 	own := parent.LLMCfg
 	parent.mu.Unlock()
-	created := m.create("", pname+"的学习", "把父会话更早的对话压成摘要，交回父会话", parent.ID)
+	created := m.create("", pname+"的学习", learnRole, parent.ID)
+	created.mu.Lock()
+	created.learnRole = true
+	created.mu.Unlock()
 	if own != nil && own.Provider != "" {
 		_ = m.SetAgentLLM(created.ID, *own)
 	}
@@ -157,6 +174,11 @@ func ensureLearner(m *Manager, parent *Agent) (string, llm.Config) {
 	}
 	return created.Name, cfg
 }
+
+const learnRole = "把父会话更早的对话压成摘要，交回父会话"
+
+// learnerRoleMark 出现在学习助手的角色文本里。靠它识别旧数据里已经存在的学习助手。
+const learnerRoleMark = "压成摘要"
 
 const learnSystem = "你替父会话整理更早的对话。只输出摘要正文，不要标题。保留决定、约定、没做完的事和用户的偏好。不超过 400 字。已有摘要和新片段冲突时，以新片段为准，删除、没建过、已经不在的不要再写成还在。只写已有摘要或新片段里出现过的路径和大小，没有写出的文件不要补。不要自己写学了多少条。"
 

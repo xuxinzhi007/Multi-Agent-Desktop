@@ -140,8 +140,11 @@ func TestSupervisorRespectsAgentCap(t *testing.T) {
 	m := newTestManager(t)
 	m.CreateWithBackend("sp", "编排", "", "supervisor")
 	_ = m.SetAgentWorkDir("sp", t.TempDir())
-	for i := 0; i < maxAgents-1; i++ {
-		m.Create("", "填充", "")
+	for i := 0; i < maxChildAgents; i++ {
+		c := m.create("", "填充"+string(rune('A'+i)), "", "sp")
+		c.mu.Lock()
+		c.Status = StatusRunning
+		c.mu.Unlock()
 	}
 	withChildBackend(t, "mock")
 	withPlanner(t, func(context.Context, llm.Config, string, string) (SupPlan, error) {
@@ -155,10 +158,10 @@ func TestSupervisorRespectsAgentCap(t *testing.T) {
 		t.Fatalf("满了应当明确拒绝，实际 %v", err)
 	}
 	// 名额不够时整个派活失败，不静默少派。
-	if strings.Contains(err.Error(), "重试") == false {
-		t.Fatalf("错误信息应当叫模型别重试，实际 %v", err)
+	if !strings.Contains(err.Error(), "ask_agent") {
+		t.Fatalf("错误信息应当给出下一步办法，实际 %v", err)
 	}
-	if len(m.List()) != maxAgents {
+	if len(m.List()) != maxChildAgents+1 {
 		t.Fatalf("不该再建会话，实际 %d", len(m.List()))
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // navWatch 记住这次跳转有没有真正开始过。
@@ -12,7 +13,11 @@ type navWatch struct {
 	sawLoading bool
 }
 
-func (w *navWatch) arrived(cur string, loading bool, want string) bool {
+// settleGrace 是「等跳转开始」的宽限期。超过它还没看到 loading，
+// 就当页面已经停在别处（重定向早已完成、或根本没跳），不再干等到超时。
+const settleGrace = 2 * time.Second
+
+func (w *navWatch) arrived(cur string, loading bool, want string, waited time.Duration) bool {
 	if loading {
 		w.sawLoading = true
 		return false
@@ -23,7 +28,7 @@ func (w *navWatch) arrived(cur string, loading bool, want string) bool {
 	if sameDocument(cur, want) {
 		return true
 	}
-	return w.sawLoading
+	return w.sawLoading || waited >= settleGrace
 }
 
 func sameDocument(cur, want string) bool {

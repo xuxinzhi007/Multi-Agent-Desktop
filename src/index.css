@@ -21,9 +21,9 @@
   /* --- 氛围层（暗色）---
      暗色下光斑要克制：过强会把深色变得浑浊。
      网格用微弱的白线，暗角压回底色。 */
-  --ambient-grid: rgba(255, 255, 255, 0.028);
+  --ambient-grid: rgba(255, 255, 255, 0.02);
   --ambient-vignette: var(--bg-base);
-  --ambient-opacity: 0.62;
+  --ambient-opacity: 0.42;
 
   /* --- 玻璃层：让背景柔光透上来，界面才有纵深 --- */
   --bg-glass: rgba(16, 19, 24, 0.72);
@@ -52,6 +52,10 @@
   --accent-bright: #7bb0ff;
   --accent-dim: rgba(77, 140, 240, 0.12);
   --accent-border: rgba(77, 140, 240, 0.4);
+  /* 别名：组件里历史写法用的是 --accent / --accent-soft。
+     不定义它们时 color-mix 整条失效，用户气泡会变成全透明。 */
+  --accent: var(--accent-primary);
+  --accent-soft: var(--accent-dim);
 
   /* --- 语义色 --- */
   --success: #3ecf8e;
@@ -86,27 +90,7 @@
   --agent-5: #e5575d;
   --agent-6: #4dc9e0;
 
-  /* --- 间距（4px 基准）--- */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-
-  /* --- 字号 --- */
-  --text-xs: 10.5px;
-  --text-sm: 11.5px;
-  --text-base: 12.5px;
-  --text-md: 13.5px;
-  --text-lg: 15px;
-  --text-xl: 18px;
-
-  /* --- 行高 --- */
-  --leading-tight: 1.4;
-  --leading-normal: 1.65;
-  --leading-relaxed: 1.8;
+  /* --- 间距 / 字号 / 行高与主题无关，统一定义在下面的 :root 块 --- */
 }
 
 /* ============ 亮色主题 ============ */
@@ -146,6 +130,8 @@
   --accent-bright: #2a5eb0;
   --accent-dim: rgba(59, 125, 224, 0.1);
   --accent-border: rgba(59, 125, 224, 0.35);
+  --accent: var(--accent-primary);
+  --accent-soft: var(--accent-dim);
 
   /* --- 玻璃层（亮色）---
      之前没定义，直接继承了暗色的 rgba(16,19,24,.72) ——
@@ -157,11 +143,11 @@
   --glass-highlight: rgba(255, 255, 255, 0.7);
 
   /* --- 氛围层（亮色）---
-     亮色下光斑必须更明显才看得出层次，但不能变成脏色块。
-     暗角用极淡的冷灰（而不是 bg-base），避免四周蒙灰。 */
-  --ambient-grid: rgba(15, 23, 42, 0.045);
-  --ambient-vignette: rgba(226, 232, 240, 0.55);
-  --ambient-opacity: 0.72;
+     亮色下氛围只能是「几乎看不见」：网格、光斑、暗角三样叠加
+     会把白底染成蓝紫渐变，界面立刻显得脏。这里只留一层极淡的光。 */
+  --ambient-grid: rgba(15, 23, 42, 0.016);
+  --ambient-vignette: transparent;
+  --ambient-opacity: 0.16;
 
   /* --- 语义色（亮主题下加深）--- */
   --success: #1a9e66;
@@ -215,13 +201,15 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  /* --- 字号 --- */
-  --text-xs: 10.5px;
-  --text-sm: 11.5px;
-  --text-base: 12.5px;
-  --text-md: 13.5px;
-  --text-lg: 15px;
-  --text-xl: 18px;
+  /* --- 字号 ---
+     桌面应用正文不该小于 13px，次要信息不该小于 11px。
+     旧刻度（10.5 / 11.5 / 12.5）在 macOS 上偏小，是「看着廉价」的主因。 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
 
   /* --- 行高 --- */
   --leading-tight: 1.4;
@@ -484,32 +472,12 @@ textarea::placeholder {
   font-weight: 600;
 }
 
-/* ===== 滚动条更细 + 自动隐藏 ===== */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-default);
-  border-radius: 3px;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--border-focus);
-  opacity: 1;
-}
-
-/* 自动隐藏：非 hover 时透明 */
+/* ===== 滚动条：细、平时淡、悬停才清楚 =====
+   之前这里重复定义了两遍，后一遍把 thumb 设成 opacity:0 ——
+   而 ::-webkit-scrollbar-thumb 上的 opacity 并不生效，等于白写。 */
 * {
   scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
 *:hover {

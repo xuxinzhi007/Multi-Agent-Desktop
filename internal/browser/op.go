@@ -27,7 +27,23 @@ type Op struct {
 }
 
 func Normalize(op Op) (Op, error) {
+	rawText := op.Text
 	op.Op = strings.ToLower(strings.TrimSpace(op.Op))
+	// 模型常写其他工具的动词，同义的就直接接下来，别为一字之差耗掉一轮。
+	switch op.Op {
+	case "goto", "navigate", "visit":
+		op.Op = "open"
+	case "fill", "input", "set_text", "type_text":
+		op.Op = "type"
+	case "screenshot", "observe", "look":
+		op.Op = "snapshot"
+	case "refresh":
+		op.Op = "reload"
+	case "hover":
+		op.Op = "move"
+	case "doubleclick":
+		op.Op = "double_click"
+	}
 	op.Text = clip(strings.TrimSpace(op.Text), 80)
 	op.Value = clip(op.Value, 2000)
 	op.Key = strings.TrimSpace(op.Key)
@@ -75,8 +91,13 @@ func Normalize(op Op) (Op, error) {
 		}
 		return op, nil
 	case "type":
+		// 只给了 text 且没指定输入框时，text 就是要输的内容（往当前焦点写），
+		// 而不是报错：这是模型最常见的写法。
+		if strings.TrimSpace(op.Value) == "" && op.Ref == "" && !hasPoint(op) && strings.TrimSpace(rawText) != "" {
+			op.Value, op.Text = clip(rawText, 2000), ""
+		}
 		if strings.TrimSpace(op.Value) == "" {
-			return Op{}, errors.New("type 需要 value")
+			return Op{}, errors.New("type 需要 value（要输入的内容），定位输入框用 ref 或 text")
 		}
 		return op, nil
 	case "key", "press":
@@ -435,20 +456,23 @@ func snapshotJS() string {
   if (placeholder) placeholder.click();
   const host = document.querySelector("flt-semantics-host");
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  document.querySelectorAll("[data-mad-ref]").forEach((n) => n.removeAttribute("data-mad-ref"));
-  const sel = 'a,button,input,textarea,select,option,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="radio"],[contenteditable="true"]';
-  const all = document.querySelectorAll(sel);
-  const nodes = [];
-  for (let i = 0; i < all.length && nodes.length < 80; i++) {
-    const n = all[i];
-    const r = n.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) continue;
-    nodes.push(n);
+  const sel = 'a,button,input,textarea,select,option,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemradio"],[role="option"],[role="checkbox"],[role="radio"],[role="combobox"],[role="switch"],[contenteditable="true"]';
+  const overlay = '[role="dialog"],[role="listbox"],[role="menu"],[role="alertdialog"],[aria-modal="true"],[data-radix-popper-content-wrapper],[data-floating-ui-portal]';
+  const visible = (n) => { const r = n.getBoundingClientRect(); return r.width >= 1 && r.height >= 1; };
+  // 弹出的下拉、对话框优先：它们挂在 DOM 末尾，按页面顺序取前 80 个会把选项挤掉。
+  const front = [], rest = [];
+  for (const n of document.querySelectorAll(sel)) {
+    if (!visible(n)) continue;
+    (n.closest(overlay) ? front : rest).push(n);
   }
+  const nodes = front.concat(rest).slice(0, 100);
+  // 编号跟着节点走，不每次重排：页面重渲一次就把模型手里的 e34 换掉，
+  // 它只能再 snapshot 重试，一轮就没了。
+  window.__madRefSeq = window.__madRefSeq || 0;
   const elements = [];
-  nodes.forEach((n, i) => {
-    const ref = "e" + (i + 1);
-    n.setAttribute("data-mad-ref", ref);
+  nodes.forEach((n) => {
+    let ref = n.getAttribute("data-mad-ref");
+    if (!ref) { ref = "e" + (++window.__madRefSeq); n.setAttribute("data-mad-ref", ref); }
     const name = norm(n.getAttribute("aria-label") || n.value || n.getAttribute("placeholder") || n.getAttribute("name") || n.textContent || "");
     elements.push({ref, role: n.getAttribute("role") || n.tagName.toLowerCase(), name: name.slice(0, 80)});
   });

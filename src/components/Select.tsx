@@ -97,7 +97,7 @@ export default function Select({
         >
           {current?.label ?? placeholder}
         </span>
-        <span style={{ opacity: 0.5, fontSize: 9, flexShrink: 0 }}>▾</span>
+        <span style={{ opacity: 0.5, fontSize: 'var(--text-xs)', flexShrink: 0 }}>▾</span>
       </button>
 
       {open && (
@@ -166,7 +166,7 @@ export default function Select({
                   {o.label}
                 </span>
                 {o.hint && (
-                  <span style={{ fontSize: 9, color: 'var(--text-disabled)', flexShrink: 0 }}>
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', flexShrink: 0 }}>
                     {o.hint}
                   </span>
                 )}

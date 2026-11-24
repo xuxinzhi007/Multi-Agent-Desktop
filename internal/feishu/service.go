@@ -77,6 +77,7 @@ type Service struct {
 	holds      map[string]held
 	log        *Log
 	botID      string
+	botName    string
 	owner      string
 	history    func(ctx context.Context, appID, secret, chatID string, since int64) ([]Line, error)
 	listChats  func(ctx context.Context, appID, secret string) ([]listedChat, error)
@@ -187,6 +188,16 @@ func (s *Service) Current() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cfg
+}
+
+// HasBotName 返回从飞书问到的机器人名字。空表示还没问到。
+func (s *Service) BotName() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.botName
 }
 
 // HasUser 表示这个机器人已经授权过用户身份（能读群消息）。
@@ -369,7 +380,7 @@ func (s *Service) dispatch(t Turn) {
 		return
 	}
 	fresh := s.log != nil && t.ChatID != "" && !s.log.Known(t.ChatID)
-	s.noteLine(t)
+	s.noteLine(cfg, t)
 	if fresh && !strings.HasPrefix(t.EventID, "catch-") {
 		go s.replayChat(cfg, listedChat{ID: t.ChatID, Name: t.ChatName, Kind: t.ChatType}, time.Now().Unix())
 	}
@@ -1196,7 +1207,7 @@ func (s *Service) noteGap(err error) {
 	s.mu.Unlock()
 }
 
-func (s *Service) noteLine(t Turn) {
+func (s *Service) noteLine(cfg Config, t Turn) {
 	if s.log == nil || t.ChatID == "" || t.MessageID == "" {
 		return
 	}
@@ -1218,6 +1229,16 @@ func (s *Service) noteLine(t Turn) {
 		} else {
 			text = "[空消息]"
 		}
+	}
+	if kind == "card" {
+		// 实体卡片的事件体里只有 card_id。凭当前身份把正文取回来，
+		// 取不到就照旧落占位，不阻塞这条消息。
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c := s.cred(cfg.AppID, cfg.AppSecret)
+		if token, err := c.token(cctx); err == nil {
+			text = resolveCardText(cctx, token, text, t.Content)
+		}
+		cancel()
 	}
 	s.log.Add(Line{ID: t.MessageID, ChatID: t.ChatID, From: from, FromID: t.SenderID, Text: text, At: at, Kind: kind, Media: media})
 	s.mu.Lock()
@@ -1581,12 +1602,15 @@ func (s *Service) ensureBot(ctx context.Context, appID, secret string) {
 	if have != "" || appID == "" {
 		return
 	}
-	id, err := BotOpenID(ctx, appID, secret)
+	id, name, err := BotInfo(ctx, appID, secret)
 	if err != nil {
 		log.Printf("feishu bot: %v", err)
 		return
 	}
 	s.mu.Lock()
 	s.botID = id
+	if name != "" {
+		s.botName = name
+	}
 	s.mu.Unlock()
 }

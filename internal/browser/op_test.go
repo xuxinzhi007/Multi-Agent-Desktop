@@ -124,3 +124,48 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestTypeTakesTextAsTheValueWhenNoTargetGiven(t *testing.T) {
+	op, err := Normalize(Op{Op: "type", Text: "job-dduxcvryl6qc2roe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Value != "job-dduxcvryl6qc2roe" || op.Text != "" {
+		t.Fatalf("%#v", op)
+	}
+}
+
+func TestTypeKeepsTextAsTheTargetWhenValueGiven(t *testing.T) {
+	op, err := Normalize(Op{Op: "type", Text: "关键词", Value: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Value != "abc" || op.Text != "关键词" {
+		t.Fatalf("%#v", op)
+	}
+}
+
+func TestCommonVerbAliasesNormalize(t *testing.T) {
+	for in, want := range map[string]string{"goto": "open", "fill": "type", "refresh": "reload", "screenshot": "snapshot"} {
+		op := Op{Op: in, URL: "https://example.com", Value: "x"}
+		got, err := Normalize(op)
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if got.Op != want {
+			t.Fatalf("%s -> %s, want %s", in, got.Op, want)
+		}
+	}
+}
+
+func TestSnapshotKeepsRefsAndPutsOverlaysFirst(t *testing.T) {
+	js := snapshotJS()
+	if contains(js, "removeAttribute(\"data-mad-ref\")") {
+		t.Fatal("snapshot still renumbers every element")
+	}
+	for _, want := range []string{"__madRefSeq", `[role="listbox"]`, "front.concat(rest)"} {
+		if !contains(js, want) {
+			t.Fatalf("snapshot script missing %s", want)
+		}
+	}
+}

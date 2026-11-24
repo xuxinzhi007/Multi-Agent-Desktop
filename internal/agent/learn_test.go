@@ -102,3 +102,42 @@ func TestStudySkipsShortHistory(t *testing.T) {
 		t.Fatalf("at=%d text=%q", parent.LearnAt, parent.LearnText)
 	}
 }
+
+func TestLearnerDoesNotSpawnAnotherLearner(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock", Model: "x"}, func(string, any) {})
+	parent := m.create("p", "测试工程师", "测试和验收", "")
+	name, _ := ensureLearner(m, parent)
+	if name == "" {
+		t.Fatal("父会话该拿到一个学习助手")
+	}
+	learner, err := m.FindByName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !learner.isLearner() {
+		t.Fatalf("新建的学习助手没被标记: role=%q", learner.Snapshot().Role)
+	}
+	// 学习助手自己跑完摘要后也会走 studyHistory，不能再套一层。
+	before := len(m.List())
+	for i := 0; i < 3; i++ {
+		got, _ := ensureLearner(m, learner)
+		if got != "" {
+			t.Fatalf("学习助手不该再建学习助手，拿到了 %q", got)
+		}
+	}
+	if after := len(m.List()); after != before {
+		t.Fatalf("套娃了：%d -> %d", before, after)
+	}
+}
+
+func TestExistingLearnerRecognizedByRole(t *testing.T) {
+	// 旧数据里已经套出来的子会话没有 learnRole 标记，靠角色文本识别。
+	m := NewManager(llm.Config{Provider: "mock", Model: "x"}, func(string, any) {})
+	old := m.create("old", "测试工程师的学习的学习", "把父会话更早的对话压成摘要，交回父会话", "x")
+	if !old.isLearner() {
+		t.Fatalf("旧学习助手没被识别: role=%q", old.Snapshot().Role)
+	}
+	if got, _ := ensureLearner(m, old); got != "" {
+		t.Fatalf("旧学习助手也不该继续套娃，拿到 %q", got)
+	}
+}

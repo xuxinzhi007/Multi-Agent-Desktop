@@ -318,7 +318,7 @@ function NoteCard({
       )}
       <button
         className="c-icon-btn c-icon-btn--danger c-compact-card__x"
-        style={{ width: 18, height: 18, fontSize: 12 }}
+        style={{ width: 18, height: 18, fontSize: 'var(--text-sm)' }}
         onClick={(e) => {
           e.stopPropagation()
           onDelete()
@@ -381,7 +381,7 @@ function NoteCard({
                 title={onDetach ? `${a.name}，点击取消引用` : a.name}
                 onClick={onDetach ? () => onDetach(note.id, a.id) : undefined}
                 style={{
-                  fontSize: 10,
+                  fontSize: 'var(--text-xs)',
                   color: a.color,
                   border: `1px solid color-mix(in srgb, ${a.color} 40%, transparent)`,
                   background: `color-mix(in srgb, ${a.color} 10%, transparent)`,

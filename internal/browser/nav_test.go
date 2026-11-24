@@ -1,17 +1,20 @@
 package browser
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNavigationArrivedDoesNotAcceptBlank(t *testing.T) {
 	watch := navWatch{}
-	if watch.arrived("about:blank", false, "https://chat.flaiapp.com/welcome") {
+	if watch.arrived("about:blank", false, "https://chat.flaiapp.com/welcome", 0) {
 		t.Fatal("about:blank counted as the opened page")
 	}
-	if watch.arrived("https://example.com/", false, "https://chat.flaiapp.com/welcome") {
+	if watch.arrived("https://example.com/", false, "https://chat.flaiapp.com/welcome", 0) {
 		t.Fatal("a page already on screen counted as the new navigation")
 	}
-	watch.arrived("https://example.com/", true, "https://chat.flaiapp.com/welcome")
-	if !watch.arrived("https://chat.flaiapp.com/login", false, "https://chat.flaiapp.com/welcome") {
+	watch.arrived("https://example.com/", true, "https://chat.flaiapp.com/welcome", 0)
+	if !watch.arrived("https://chat.flaiapp.com/login", false, "https://chat.flaiapp.com/welcome", 0) {
 		t.Fatal("a committed redirect was not accepted")
 	}
 }
@@ -36,10 +39,10 @@ func TestReopenRestoresTheSameLogsPage(t *testing.T) {
 
 func TestNavigationArrivedTreatsTrailingSlashAsSameDocument(t *testing.T) {
 	watch := navWatch{}
-	if !watch.arrived("https://chat.flaiapp.com/welcome/", false, "https://chat.flaiapp.com/welcome") {
+	if !watch.arrived("https://chat.flaiapp.com/welcome/", false, "https://chat.flaiapp.com/welcome", 0) {
 		t.Fatal("trailing slash was treated as a different page")
 	}
-	if watch.arrived("https://chat.flaiapp.com/welcome/extra", false, "https://chat.flaiapp.com/welcome") {
+	if watch.arrived("https://chat.flaiapp.com/welcome/extra", false, "https://chat.flaiapp.com/welcome", 0) {
 		t.Fatal("a longer path counted as the same document")
 	}
 }
@@ -77,5 +80,15 @@ func TestReadPayloadReadyRejectsBlankDocument(t *testing.T) {
 	}
 	if !readPayloadReady(`{"url":"https://api.aa1.cn/doc/man.html","title":"随机动漫图片","text":"请求参数","flutter":false}`) {
 		t.Fatal("server rendered html was held back")
+	}
+}
+
+func TestNavigationSettlesOnRedirectWithoutWaiting(t *testing.T) {
+	watch := navWatch{}
+	if watch.arrived("https://devops.x2robot.com/login", false, "https://devops.x2robot.com/logs", time.Second) {
+		t.Fatal("settled too early, the page may not have started navigating")
+	}
+	if !watch.arrived("https://devops.x2robot.com/login", false, "https://devops.x2robot.com/logs", settleGrace) {
+		t.Fatal("a redirect that already finished kept waiting for the wanted url")
 	}
 }

@@ -88,7 +88,17 @@ function AgentLine({
 }) {
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-current={active ? 'true' : undefined}
+      aria-label={`会话 ${a.name}`}
       onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect()
+        }
+      }}
       style={{
         position: 'relative',
         display: 'flex',
@@ -131,7 +141,7 @@ function AgentLine({
             e.stopPropagation()
             onToggle?.()
           }}
-          style={{ width: 16, height: 16, fontSize: 10, flexShrink: 0 }}
+          style={{ width: 16, height: 16, fontSize: 'var(--text-xs)', flexShrink: 0 }}
         >
           {folded ? '▸' : '▾'}
         </button>
@@ -217,15 +227,14 @@ function AgentLine({
         </div>
       </div>
       <button
-        className="c-icon-btn c-icon-btn--danger"
+        className="c-icon-btn c-icon-btn--danger c-row-delete"
         onClick={(e) => {
           e.stopPropagation()
           if (confirm(`删除 agent「${a.name}」？\n\n历史消息将一并清除，不可恢复。`)) onDelete()
         }}
         title="删除"
-        style={{ opacity: 0.35, width: 20, height: 20, fontSize: 14 }}
-        onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
-        onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.35')}
+        aria-label={`删除会话 ${a.name}`}
+        style={{ width: 20, height: 20, fontSize: 'var(--text-md)' }}
       >
         ×
       </button>
@@ -308,7 +317,63 @@ function sessionLine(a: Agent): string {
   return `${model} · ${folder}`
 }
 
+/** 分组折叠状态记在本机：下次打开还是上次收起的样子。 */
+const GROUP_KEY = 'mad.sidebar.groups'
+
+function readGroups(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(GROUP_KEY) || '{}') as Record<string, boolean>
+  } catch {
+    return {}
+  }
+}
+
+/** GroupHead 是可折叠的分组标题：名字 + 条数 + 折叠箭头。 */
+function GroupHead({
+  label,
+  count,
+  folded,
+  onToggle,
+  action,
+}: {
+  label: string
+  count: number
+  folded: boolean
+  onToggle: () => void
+  action?: React.ReactNode
+}) {
+  return (
+    <div className="c-group-head">
+      <button
+        type="button"
+        className="c-group-head__toggle"
+        onClick={onToggle}
+        aria-expanded={!folded}
+        aria-label={`${folded ? '展开' : '收起'}${label}`}
+      >
+        <span className={`c-group-head__caret ${folded ? 'is-folded' : ''}`} aria-hidden>
+          ▾
+        </span>
+        {label}
+        <span className="c-group-head__count">{count}</span>
+      </button>
+      {action}
+    </div>
+  )
+}
+
 export default function Sidebar(p: Props) {
+  const [groups, setGroups] = useState<Record<string, boolean>>(readGroups)
+  const toggleGroup = (key: string) =>
+    setGroups((s) => {
+      const next = { ...s, [key]: !s[key] }
+      try {
+        localStorage.setItem(GROUP_KEY, JSON.stringify(next))
+      } catch {
+        /* 隐私模式下写不进去，不影响本次使用 */
+      }
+      return next
+    })
   const [showChannelModal, setShowChannelModal] = useState(false)
   const [supOpen, setSupOpen] = useState(false)
   const [folded, setFolded] = useState<Record<string, boolean>>({})
@@ -382,9 +447,18 @@ export default function Sidebar(p: Props) {
         </span>
         <span
           className="mono"
-          style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', marginTop: 1 }}
+          title={`v${p.version || '—'}`}
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-disabled)',
+            marginTop: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
         >
-          v{p.version || '—'}
+          {p.version ? `v${p.version}` : ''}
         </span>
         <button
           className="c-icon-btn"
@@ -426,40 +500,49 @@ export default function Sidebar(p: Props) {
           </span>
         )}
         <span style={{ marginLeft: 'auto', color: 'var(--text-disabled)' }}>
-          {p.agents.filter((a) => a.llm?.model && a.llm.provider !== 'mock').length} 个已选模型
+          {(() => {
+            const n = p.agents.filter((a) => a.llm?.model && a.llm.provider !== 'mock').length
+            return n === 0 ? '未配模型' : `${n} 个已配模型`
+          })()}
         </span>
       </div>
 
       {/* 列表 */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-2)' }}>
         {/* 频道分组 */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            padding: '4px 2px 5px',
-            fontSize: 'var(--text-xs)',
-            color: 'var(--text-disabled)',
-            fontWeight: 500,
-            letterSpacing: '0.04em',
-          }}
-        >
-          频道
-          <button
-            className="c-icon-btn"
-            style={{ marginLeft: 'auto', width: 18, height: 18, fontSize: 12 }}
-            onClick={() => setShowChannelModal(true)}
-            title="新建频道"
-          >
-            +
-          </button>
-        </div>
-        {p.channels.map((ch) => {
+        <GroupHead
+          label="频道"
+          count={p.channels.length}
+          folded={!!groups.channel}
+          onToggle={() => toggleGroup('channel')}
+          action={
+            <button
+              className="c-icon-btn"
+              style={{ width: 18, height: 18, fontSize: 'var(--text-sm)' }}
+              onClick={() => setShowChannelModal(true)}
+              title="新建频道"
+              aria-label="新建频道"
+            >
+              +
+            </button>
+          }
+        />
+        {!groups.channel && p.channels.map((ch) => {
           const active = p.activeKind === 'channel' && ch.id === p.activeId
           return (
             <div
               key={ch.id}
+              role="button"
+              tabIndex={0}
+              aria-current={active ? 'true' : undefined}
+              aria-label={`频道 ${ch.name}`}
               onClick={() => p.onSelect('channel', ch.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  p.onSelect('channel', ch.id)
+                }
+              }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -486,7 +569,7 @@ export default function Sidebar(p: Props) {
                   color: active ? 'var(--accent-bright)' : 'var(--text-tertiary)',
                   display: 'grid',
                   placeItems: 'center',
-                  fontSize: 11,
+                  fontSize: 'var(--text-xs)',
                   fontWeight: 700,
                   flexShrink: 0,
                 }}
@@ -515,24 +598,30 @@ export default function Sidebar(p: Props) {
         })}
 
         {p.feishuRooms.length > 0 && (
-          <div
-            style={{
-              padding: '10px 2px 5px',
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-disabled)',
-              fontWeight: 500,
-              letterSpacing: '0.04em',
-            }}
-          >
-            飞书
-          </div>
+          <GroupHead
+            label="飞书"
+            count={p.feishuRooms.length}
+            folded={!!groups.feishu}
+            onToggle={() => toggleGroup('feishu')}
+          />
         )}
-        {p.feishuRooms.map((room) => {
+        {!groups.feishu && p.feishuRooms.map((room) => {
           const active = p.activeKind === 'feishu' && room.id === p.activeId
           return (
             <div
               key={room.id}
+              className={`c-feishu-room ${active ? 'is-active' : ''}`}
+              role="button"
+              tabIndex={0}
+              aria-current={active ? 'true' : undefined}
+              aria-label={`飞书会话 ${room.name || '未命名'}`}
               onClick={() => p.onSelect('feishu', room.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  p.onSelect('feishu', room.id)
+                }
+              }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -562,6 +651,7 @@ export default function Sidebar(p: Props) {
                 {p.onBindFeishu && p.agents.length > 0 && (
                   <select
                     aria-label={`${room.name}由谁回答`}
+                    className="c-feishu-room__bind"
                     value={room.agentId || ''}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => {
@@ -583,18 +673,13 @@ export default function Sidebar(p: Props) {
           )
         })}
 
-        {p.channels.length > 0 && (
-          <div
-            style={{
-              padding: '10px 2px 5px',
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-disabled)',
-              fontWeight: 500,
-              letterSpacing: '0.04em',
-            }}
-          >
-            AGENTS
-          </div>
+        {p.agents.length > 0 && (
+          <GroupHead
+            label="会话"
+            count={p.agents.length}
+            folded={!!groups.agent}
+            onToggle={() => toggleGroup('agent')}
+          />
         )}
 
         {/* 视图切换：舰队总览（并排监控） / 单个对话 */}
@@ -635,7 +720,7 @@ export default function Sidebar(p: Props) {
           </div>
         )}
 
-        {tree.map((node) => (
+        {!groups.agent && tree.map((node) => (
           <AgentBranch
             key={node.agent.id}
             node={node}
@@ -656,14 +741,14 @@ export default function Sidebar(p: Props) {
           className="c-btn c-btn--secondary c-btn--full"
           onClick={() => p.onCreateOpenChange(true)}
         >
-          <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> 新建 Agent
+          <span style={{ fontSize: 'var(--text-base)', lineHeight: 1 }}>+</span> 新建 Agent
         </button>
         <button
           className="c-btn c-btn--ghost c-btn--full"
           title="输入目标，自动拆成子任务并行执行"
           onClick={() => setSupOpen(true)}
         >
-          <span style={{ fontSize: 12, lineHeight: 1 }}>⑂</span> 自动拆任务
+          <span style={{ fontSize: 'var(--text-sm)', lineHeight: 1 }}>⑂</span> 自动拆任务
         </button>
       </div>
 
@@ -812,14 +897,14 @@ function CreateChannelModal({
                           color: 'var(--bg-base)',
                           display: 'grid',
                           placeItems: 'center',
-                          fontSize: 9,
+                          fontSize: 'var(--text-xs)',
                           fontWeight: 700,
                         }}
                       >
                         {a.name.slice(0, 1).toUpperCase()}
                       </span>
                       {a.name}
-                      {on && <span style={{ marginLeft: 'auto', fontSize: 11 }}>✓</span>}
+                      {on && <span style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)' }}>✓</span>}
                     </button>
                   )
                 })}

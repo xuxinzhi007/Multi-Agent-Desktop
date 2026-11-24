@@ -339,8 +339,10 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
 
   const user = page.locator('.c-user-bubble')
   const userBg = await user.evaluate((el) => getComputedStyle(el).backgroundColor)
-  // 窄栏设计：用户消息也不铺底色，靠缩进和头像区分，不是靠色块
-  expect(userBg).toBe('rgba(0, 0, 0, 0)')
+  // 用户消息靠右侧 + 淡强调色气泡区分。
+  // 这里曾经断言背景必须全透明，而那是因为 CSS 引了不存在的 --accent，
+  // color-mix 整条失效——把一个 bug 当成了规范。现在 token 补齐，气泡回来了。
+  expect(userBg).not.toBe('rgba(0, 0, 0, 0)')
   const userBox = await user.boundingBox()
   const streamBox = await stream.boundingBox()
   expect(userBox).not.toBeNull()

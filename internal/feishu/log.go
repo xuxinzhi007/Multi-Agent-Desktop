@@ -40,6 +40,8 @@ type Room struct {
 	AgentID   string `json:"agentId,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
 	BotID     string `json:"botId,omitempty"`
+	// BotName 是飞书后台配置的机器人名字，界面显示发送人时用它。
+	BotName string `json:"botName,omitempty"`
 	// ReadOnly 表示机器人不在这个群里，只能手动读取，不会自动同步也不会回答。
 	ReadOnly bool   `json:"readOnly,omitempty"`
 	Messages []Line `json:"messages"`

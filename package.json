@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "mygo dev",
+    "dev:signed": "mygo dev -sign 'multi-agent-desktop dev'",
     "build": "mygo build",
     "build:app": "mygo build -skip-installer",
     "generate": "mygo generate",

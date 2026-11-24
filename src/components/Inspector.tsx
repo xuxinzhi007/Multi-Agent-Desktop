@@ -14,7 +14,7 @@ const TOOL_META = {
   waiting: { icon: '!', color: 'var(--accent-primary)', label: '待批准' },
 } as const
 
-type Tab = 'tools' | 'knowledge'
+type Tab = 'tools' | 'knowledge' | 'caps'
 
 export default function Inspector({
   tab,
@@ -22,6 +22,7 @@ export default function Inspector({
   tools,
   onClose,
   knowledge,
+  caps,
 }: {
   tab: Tab
   onTab: (t: Tab) => void
@@ -29,6 +30,8 @@ export default function Inspector({
   onClose: () => void
   /** 知识库面板内容；不传则不显示该 Tab */
   knowledge?: { count: number; node: React.ReactNode }
+  /** 能力面板：这个会话有哪些工具与技能，哪些现在用不了 */
+  caps?: { node: React.ReactNode }
 }) {
   return (
     <aside
@@ -86,11 +89,15 @@ export default function Inspector({
             onClick={() => onTab('knowledge')}
           />
         )}
+        {caps && (
+          <TabBtn label="能力" count="" active={tab === 'caps'} onClick={() => onTab('caps')} />
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {tab === 'tools' && <ToolList tools={tools} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
+        {tab === 'caps' && caps && caps.node}
       </div>
     </aside>
   )
@@ -172,7 +179,7 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
               <span
-                style={{ color: meta.color, fontSize: 10, flexShrink: 0 }}
+                style={{ color: meta.color, fontSize: 'var(--text-xs)', flexShrink: 0 }}
                 className={t.status === 'running' ? 'blink' : ''}
               >
                 {meta.icon}

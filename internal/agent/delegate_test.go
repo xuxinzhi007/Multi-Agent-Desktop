@@ -86,12 +86,16 @@ func TestDelegateRejectsTooManyTasks(t *testing.T) {
 
 // 名额不够时整个派活失败，不悄悄少派两个。
 // 静默降级会让父会话以为活干全了（调研 §7.5）。
+// 名额只算「在忙的子会话」，用户自建的和空闲子会话都不占。
 func TestDelegateRejectsWhenNoCapacity(t *testing.T) {
 	m := newTestManager(t)
 	parent := m.Create("", "主会话", "")
 	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
-	for len(m.List()) < maxAgents {
-		m.Create("", "填充", "")
+	for i := 0; i < maxChildAgents; i++ {
+		c := m.create("", "子"+string(rune('A'+i)), "", parent.ID)
+		c.mu.Lock()
+		c.Status = StatusRunning
+		c.mu.Unlock()
 	}
 	withChildBackend(t, "mock")
 
@@ -105,8 +109,26 @@ func TestDelegateRejectsWhenNoCapacity(t *testing.T) {
 	if !strings.Contains(res.Content, "装不下") {
 		t.Fatalf("错误信息要说清装不下：%s", res.Content)
 	}
-	if got := len(m.List()); got != maxAgents {
+	if got := len(m.List()); got != maxChildAgents+1 {
 		t.Fatalf("不该再建会话，实际 %d", got)
+	}
+}
+
+// 用户自己建满会话，不该把模型派活的路堵死。
+// 旧实现用一个总数上限算所有会话，用户建满后 create_agent 永久失败
+// （真实运行记录里 7/7 次失败都是这一条）。
+func TestUserSessionsDoNotBlockDelegation(t *testing.T) {
+	m := newTestManager(t)
+	parent := m.Create("", "主会话", "")
+	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
+	for i := 0; i < maxUserAgents; i++ {
+		m.Create("", "用户自建"+string(rune('A'+i)), "")
+	}
+	withChildBackend(t, "mock")
+
+	res := callDelegate(t, m, parent.ID, "", delegateInput(map[string]string{"task": "a"}))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("用户自建会话不该占用派活名额：%s", res.Content)
 	}
 }
 

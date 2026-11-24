@@ -183,7 +183,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
             paddingTop: 8,
           }}
         >
-          <div style={{ fontSize: 9, letterSpacing: '0.08em', color: 'var(--text-disabled)', marginBottom: 10 }}>
+          <div style={{ fontSize: 'var(--text-xs)', letterSpacing: '0.08em', color: 'var(--text-disabled)', marginBottom: 10 }}>
             预览
           </div>
 
@@ -220,7 +220,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 4,
-                fontSize: 10,
+                fontSize: 'var(--text-xs)',
                 color: 'var(--success)',
               }}
             >
@@ -231,7 +231,7 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
           <div
             style={{
               marginTop: 12,
-              fontSize: 10,
+              fontSize: 'var(--text-xs)',
               color: 'var(--text-disabled)',
               textAlign: 'center',
               lineHeight: 1.7,

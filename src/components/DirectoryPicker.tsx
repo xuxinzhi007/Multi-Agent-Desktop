@@ -36,7 +36,7 @@ export default function DirectoryPicker({
           <span
             aria-hidden
             className="mono"
-            style={{ fontSize: 11, color: 'var(--text-disabled)', flexShrink: 0 }}
+            style={{ fontSize: 'var(--text-xs)', color: 'var(--text-disabled)', flexShrink: 0 }}
           >
             📁
           </span>
@@ -60,7 +60,7 @@ export default function DirectoryPicker({
             <button
               type="button"
               className="c-icon-btn"
-              style={{ width: 18, height: 18, fontSize: 11, flexShrink: 0 }}
+              style={{ width: 18, height: 18, fontSize: 'var(--text-xs)', flexShrink: 0 }}
               title="清除"
               onClick={(e) => {
                 e.stopPropagation()

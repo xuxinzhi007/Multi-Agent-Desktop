@@ -71,6 +71,9 @@ type Agent struct {
 	LearnBy string `json:"learnBy,omitempty"`
 	// LearnBusy 为真时，摘要还在写。不落盘。
 	LearnBusy bool `json:"-"`
+	// learnRole 标记这是学习助手。学习助手不会再给自己建学习助手。
+	// 从角色文本推导，不单存字段：重启后旧的套娃会话也能识别。
+	learnRole bool `json:"-"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
@@ -123,6 +126,7 @@ type Manager struct {
 	imageDir  string // 图片字节目录，与 json 分开
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
+	skills    SkillStore
 	feed      Feed
 	feishuOn  bool
 	// approvals 是写操作审批中心；nil 表示不审批（测试/无界面）。
@@ -654,7 +658,16 @@ func (m *Manager) Create(id, name, role string) *Agent {
 	return m.create(id, name, role, "")
 }
 
+// CreateInheriting 新建一个继承当前选中模型的会话。用户手动新建走这里。
+func (m *Manager) CreateInheriting(id, name, role string) *Agent {
+	return m.createWith(id, name, role, "", true)
+}
+
 func (m *Manager) create(id, name, role, parentID string) *Agent {
+	return m.createWith(id, name, role, parentID, false)
+}
+
+func (m *Manager) createWith(id, name, role, parentID string, inheritLLM bool) *Agent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -682,6 +695,18 @@ func (m *Manager) create(id, name, role, parentID string) *Agent {
 		ParentID: parentID,
 		queue:    make(chan PromptRequest, 32),
 		done:     make(chan struct{}),
+	}
+	// 新会话直接继承当前选中的模型，不留在「没选模型」的空档。
+	// 空档下 EffectiveLLM 返回零值配置，会话跑不起来，用户还得手动再选一次。
+	// 只在用户显式新建时继承；程序内部建的子会话由调用方自己定（见 delegate / learn / create_agent）。
+	if inheritLLM {
+		if cfg := m.llmCfg; cfg.Provider != "" {
+			cfg = llm.ApplyDefaults(cfg)
+			a.LLMCfg = &cfg
+			if cfg.Provider == llm.DoubaoCLIProvider {
+				a.Backend = "doubao"
+			}
+		}
 	}
 
 	m.agents[id] = a
@@ -728,7 +753,7 @@ func (m *Manager) Assist(parentID string, busy map[string]bool) (string, error) 
 			return sn.ID, nil
 		}
 	}
-	if helpers >= assistCap || len(m.List()) >= maxAgents {
+	if helpers >= assistCap || len(m.childAgents()) >= maxChildAgents {
 		return "", ErrAssistBusy
 	}
 	from := parent.Snapshot()
@@ -772,9 +797,13 @@ func helperName(m *Manager, parentName string) string {
 
 // CreateWithBackend 新建一个指定 backend 的 agent。
 func (m *Manager) CreateWithBackend(id, name, role, backend string) *Agent {
-	a := m.Create(id, name, role)
+	a := m.CreateInheriting(id, name, role)
 	a.mu.Lock()
-	a.Backend = backend
+	// 继承了豆包 CLI 的会话，后端必须是 doubao：它的工具循环在 CLI 进程里，
+	// 不能再按 loop 拼我们自己的工具注册表。调用方传的 backend 只在不是 doubao 时生效。
+	if a.Backend != "doubao" {
+		a.Backend = backend
+	}
 	a.mu.Unlock()
 	return a
 }

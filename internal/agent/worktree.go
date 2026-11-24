@@ -47,6 +47,10 @@ func (m *Manager) EnableWorktree(ctx context.Context, id string) error {
 // DisableWorktree 收掉工作树，把会话还原到原来的目录。
 // 分支保留：里面可能还有没合并的提交。正在跑的一轮不会被主动打断，
 // 下一轮开始前工具就会回到原目录。
+//
+// 解绑和物理删除分开：删目录失败（被占用、权限、仓库已移走）时，
+// 会话仍须能回到原目录，否则用户被永久卡在隔离状态里关不掉。
+// 删不掉的路径作为提示交回去，不吞掉。
 func (m *Manager) DisableWorktree(ctx context.Context, id string) error {
 	a, ok := m.Get(id)
 	if !ok {
@@ -57,9 +61,7 @@ func (m *Manager) DisableWorktree(ctx context.Context, id string) error {
 		return nil
 	}
 	info := worktree.Info{Repo: sn.WorktreeRepo, Path: sn.Worktree, Branch: sn.WorktreeBranch}
-	if err := worktree.Remove(ctx, info); err != nil {
-		return err
-	}
+	removeErr := worktree.Remove(ctx, info)
 
 	a.mu.Lock()
 	from := a.WorktreeFrom
@@ -75,6 +77,9 @@ func (m *Manager) DisableWorktree(ctx context.Context, id string) error {
 
 	m.emit("agent.config", a.viewMap())
 	m.goSave()
+	if removeErr != nil {
+		return fmt.Errorf("已回到原目录，但工作树没能自动删除：%w（路径 %s，可手动删）", removeErr, info.Path)
+	}
 	return nil
 }
 

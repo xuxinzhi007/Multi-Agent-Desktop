@@ -54,6 +54,10 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	reg.Register(&setProfileTool{m: m, id: a.ID})
 	reg.Register(&deleteAgentTool{m: m, id: a.ID})
 	reg.Register(web.New())
+	if m.Skills() != nil {
+		reg.Register(&readSkillTool{m: m})
+		reg.Register(&saveSkillTool{m: m})
+	}
 
 	a.mu.Lock()
 	history := append([]llm.Message(nil), a.Messages...)
@@ -71,6 +75,10 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	llm.LoadImages(m.ImageDir(), history)
 
 	system := loopSystemPrompt(workDir, m.FeishuOn())
+	// 技能清单只放名字和描述，正文按需 read_skill 取。
+	if cat := m.skillCatalog(); cat != "" {
+		system = cat + "\n\n" + system
+	}
 	if block := learnBlock(learnAt, learnText, learnSource(history)); block != "" {
 		system = block + "\n\n" + system
 	}
@@ -402,7 +410,7 @@ func loopSystemPrompt(workDir string, feishuOn bool) string {
 		"- ask_agent：把任务交给已有会话并等待回复。参数 name、task。",
 		"- delegate：把当前任务拆成 1-3 块互相独立的活，各建一个子会话在独立工作树里并行做，最后汇总给你。只在真的能切开时用；要改同一批文件、局部修改、一次提问、调试都不要用。子会话看不到你的对话，task 必须写全。",
 		"- create_agent：新建一个闲置助手，之后再 ask_agent 给它派活。只用在你需要一个人长期待命时；一次性并行干活用 delegate。",
-		"- list_notes：看知识库里已有的笔记。",
+		"- list_notes：查知识库。不带参数列出全部笔记，带 query 时按关键词只返回命中的。确认项目约定、术语、以前的结论用它，比凭印象猜可靠。",
 		"- save_note：把结论写进知识库并挂到自己身上，后面的轮次会带上。参数 title、body，可选 tags。",
 		"- set_profile：改自己的名字、简介或工作目录。参数 name、role、dir 至少填一个。简介用来记住你现在负责什么。",
 		"- delete_agent：删除自己，或删除你创建的子会话。参数 name，不填就是删除自己。不能删除别人的会话。",
@@ -414,6 +422,7 @@ func loopSystemPrompt(workDir string, feishuOn bool) string {
 	}
 	lines = append(lines,
 		"没有用工具查过这个工作目录之前，不要说某项能力、接口或集成不存在。",
+		"不确定项目约定、术语或以前的结论时，先 list_notes 查。不要凭印象断言。",
 		"沉淀知识必须调用 save_note。不要直接修改 knowledge.jsonl，那样只改了磁盘，打开着的页面不会变。",
 	)
 	lines = append(lines,

@@ -172,6 +172,29 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       }),
       'API.ProvidersStatus': () => [],
       // 审批：启动时补状态返回空队列；点击决定后记录调用即可。
+      'API.ListSkills': () => [
+        { id: '排查慢SQL', name: '排查慢SQL', description: '生产慢 SQL 的定位顺序', updatedAt: 1 },
+      ],
+      'API.ReadSkill': (id: unknown) => ({
+        id: String(id ?? ''),
+        name: '排查慢SQL',
+        description: '生产慢 SQL 的定位顺序',
+        body: '1. 先按租户收窄\n2. 再看索引命中',
+        updatedAt: 1,
+      }),
+      'API.SaveSkill': (name: unknown, description: unknown, body: unknown) => ({
+        id: String(name ?? ''),
+        name: String(name ?? ''),
+        description: String(description ?? ''),
+        body: String(body ?? ''),
+        updatedAt: 2,
+      }),
+      'API.SkillDir': () => '/tmp/skills',
+      'API.AgentCapabilities': () => [
+        { name: 'bash', kind: '工具', detail: '在工作目录执行命令', ready: true },
+        { name: 'web', kind: '工具', detail: '操作内置浏览器', ready: false, why: '内置浏览器还没打开' },
+        { name: '排查慢SQL', kind: '技能', detail: '生产慢 SQL 的定位顺序', ready: true },
+      ],
       'API.ListApprovals': () => [],
       'API.DecideApproval': () => undefined,
     }

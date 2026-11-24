@@ -101,7 +101,7 @@ export default function MentionPicker({
                       background: a.color,
                       display: 'grid',
                       placeItems: 'center',
-                      fontSize: 9,
+                      fontSize: 'var(--text-xs)',
                       fontWeight: 700,
                       color: 'var(--bg-base)',
                     }}

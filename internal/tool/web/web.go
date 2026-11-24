@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/tool"
@@ -19,7 +20,8 @@ func (*Tool) Description() string {
 	return "操作应用内置浏览器。登录留在这个窗口里，不使用用户的 Chrome。" +
 		"先 snapshot 看控件编号，再用编号操作。没有 DOM 的区域用 x、y。" +
 		"op 可以是 snapshot、open、back、forward、reload、move、click、double_click、right_click、down、up、scroll、type、key、wait。" +
-		"定位页面上的结果时，用 steps 一次做完，不要每点一下就停。每步用 text 写页面上能看见的文字，例如先点「环境」再点「test」，输入用 text 指定输入框、value 写内容。下拉打开后的选项写在下一步，浏览器会自己等到它出现。最多 12 步，只有最后的页面会返回。编号过期就改用 text，不要为了试错连着 snapshot。"
+		"定位页面上的结果时，用 steps 一次做完，不要每点一下就停。每步用 text 写页面上能看见的文字，例如先点「环境」再点「test」，输入用 text 指定输入框、value 写内容。下拉打开后的选项写在下一步，浏览器会自己等到它出现。最多 12 步，只有最后的页面会返回。编号过期就改用 text，不要为了试错连着 snapshot。" +
+		"引擎是 Safari/WebKit，不是 Chrome：只支持 Chrome 的页面特性这里可能没有，遇到就换路径。open 后若被重定向（如跳登录页），返回的 url 就是实际地址，先处理登录再重试。"
 }
 
 func (*Tool) Writes() bool { return true }
@@ -28,7 +30,7 @@ func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"op": {"type": "string", "enum": ["snapshot", "read", "open", "back", "forward", "reload", "move", "click", "double_click", "right_click", "down", "up", "scroll", "type", "key", "wait"]},
+			"op": {"type": "string", "enum": ["snapshot", "read", "open", "back", "forward", "reload", "move", "click", "double_click", "right_click", "down", "up", "scroll", "type", "key", "press", "wait"]},
 			"url": {"type": "string"},
 			"ref": {"type": "string"},
 			"x": {"type": "number"},
@@ -53,6 +55,11 @@ func (*Tool) Schema() json.RawMessage {
 						"text": {"type": "string"},
 						"value": {"type": "string"},
 						"key": {"type": "string"},
+						"mods": {"type": "array", "items": {"type": "string", "enum": ["ctrl", "shift", "alt", "cmd", "meta"]}},
+						"dx": {"type": "number"},
+						"dy": {"type": "number"},
+						"urlContains": {"type": "string"},
+						"timeoutMs": {"type": "integer"},
 						"x": {"type": "number"},
 						"y": {"type": "number"}
 					},
@@ -60,7 +67,6 @@ func (*Tool) Schema() json.RawMessage {
 				}
 			}
 		},
-		"required": ["op"],
 		"additionalProperties": false
 	}`)
 }
@@ -74,11 +80,16 @@ func stepsOf(raw json.RawMessage) ([]browser.Op, error) {
 		return nil, err
 	}
 	if len(wrap.Steps) == 0 {
+		if strings.TrimSpace(wrap.Op.Op) == "" {
+			return nil, errors.New("给 op（单步）或 steps（多步），例如 {\"op\":\"snapshot\"}")
+		}
 		return []browser.Op{wrap.Op}, nil
 	}
 	if len(wrap.Steps) > 12 {
 		wrap.Steps = wrap.Steps[:12]
 	}
+	// 顶层又写了 op 时以 steps 为准：那一句通常是模型把单步写法和多步写法抄在了一起，
+	// 接在前面会把同一个动作做两次。
 	return wrap.Steps, nil
 }
 

@@ -238,6 +238,8 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 	}
 
 	noProgress := 0
+	badArgs := 0
+	lastFail := ""
 
 	for {
 		// ── 1. 停止信号。放在最前面，保证任何阶段被打断都能立刻退出。
@@ -373,6 +375,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		// ── 7. 执行工具
 		st.Phase = PhaseActing
 		anySuccess := false
+		allBadArgs := len(turn.Calls) > 0
 		for _, c := range turn.Calls {
 			if runCtx.Err() != nil {
 				break
@@ -389,6 +392,12 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			if res.Status == tool.StatusOK || res.Status == tool.StatusTruncated {
 				anySuccess = true
 			}
+			if !res.Meta.BadArgs {
+				allBadArgs = false
+			}
+			if res.Status != tool.StatusOK && res.Status != tool.StatusTruncated {
+				lastFail = c.Name + ": " + clipReason(res.Content)
+			}
 
 			st.Messages = append(st.Messages, toolMessage(c, res, r.SaveImage))
 			keepLatestImage(st.Messages)
@@ -401,20 +410,48 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		// ── 8. 防打转。连续多轮没有任何成功的工具调用、也没有最终答案，
 		// 说明模型在原地绕圈。再跑下去只是烧预算。
-		if anySuccess {
-			noProgress = 0
-		} else {
+		// 参数写错不算绕圈：那是写法问题，改一下就能继续，单独给一个更宽的额度。
+		switch {
+		case anySuccess:
+			noProgress, badArgs = 0, 0
+		case allBadArgs:
+			badArgs++
+			if badArgs >= r.MaxRoundsWithoutProgress*2 {
+				st.Phase = PhaseFailed
+				st.StopReason = fmt.Sprintf(
+					"%d rounds of invalid tool arguments; last: %s", badArgs, lastFail)
+				r.emit(Event{Kind: "failed", Phase: st.Phase, Iter: st.Iteration, Reason: st.StopReason})
+				r.checkpoint(runCtx, st)
+				return st
+			}
+		default:
+			badArgs = 0
 			noProgress++
 			if noProgress >= r.MaxRoundsWithoutProgress {
 				st.Phase = PhaseFailed
 				st.StopReason = fmt.Sprintf(
-					"no progress for %d consecutive rounds; last tool results all failed", noProgress)
+					"no progress for %d consecutive rounds; last: %s", noProgress, lastFail)
 				r.emit(Event{Kind: "failed", Phase: st.Phase, Iter: st.Iteration, Reason: st.StopReason})
 				r.checkpoint(runCtx, st)
 				return st
 			}
 		}
 	}
+}
+
+// clipReason 把失败原因压成一行，终止理由要能直接摆在界面上。
+func clipReason(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len([]rune(s)) > 160 {
+		s = string([]rune(s)[:160]) + "…"
+	}
+	if s == "" {
+		return "(无说明)"
+	}
+	return s
 }
 
 // promptBudget 是这一轮请求的上限。

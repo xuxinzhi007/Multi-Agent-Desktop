@@ -83,12 +83,26 @@ func Add(ctx context.Context, dir, name string) (Info, error) {
 // Remove 删掉一份工作树。分支不删：里面可能还有没合并的提交。
 // 路径不存在时只做 prune，让 git 的登记也清掉。
 func Remove(ctx context.Context, info Info) error {
-	if info.Repo == "" || info.Path == "" {
+	if info.Path == "" {
 		return nil
 	}
+	// Repo 丢了（旧数据、手动改过配置）时从路径反推：
+	// 工作树固定在 <仓库父目录>/.mad-worktrees/<仓库名>/<slug>。
+	// 不反推就直接 return nil 的话，界面显示已关闭，目录却永远留在那。
+	if info.Repo == "" {
+		root := filepath.Dir(filepath.Clean(info.Path))
+		if filepath.Base(filepath.Dir(root)) == worktreeDirName {
+			info.Repo = filepath.Join(filepath.Dir(filepath.Dir(root)), filepath.Base(root))
+		}
+	}
 	if _, err := os.Stat(info.Path); os.IsNotExist(err) {
-		_, _ = git(ctx, info.Repo, "worktree", "prune")
+		if info.Repo != "" {
+			_, _ = git(ctx, info.Repo, "worktree", "prune")
+		}
 		return nil
+	}
+	if info.Repo == "" {
+		return fmt.Errorf("不知道这份工作树属于哪个仓库，无法自动删除")
 	}
 	if _, err := git(ctx, info.Repo, "worktree", "remove", "--force", info.Path); err != nil {
 		return fmt.Errorf("git worktree remove 失败：%w", err)

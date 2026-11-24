@@ -137,24 +137,66 @@ func TestSubAgentParallelFanOutNoCrossTalk(t *testing.T) {
 }
 
 // 会话数上限必须生效，否则模型可以无限自我复制。
-func TestCreateAgentRespectsMaxAgents(t *testing.T) {
+// 子会话有上限，但用户自建的会话不占这个名额。
+func TestCreateAgentCapsChildrenNotUserSessions(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
 	t.Cleanup(m.waitSaves)
 	parent := m.Create("p", "主", "统筹")
 	ctx := context.Background()
 
-	// maxAgents 是总数上限，父会话已经占一个
-	for i := 0; i < maxAgents-1; i++ {
+	for i := 0; i < 20; i++ {
+		m.Create("", "用户自建"+string(rune('A'+i)), "")
+	}
+	for i := 0; i < maxChildAgents; i++ {
 		name := "h" + string(rune('A'+i))
 		if r := (&createAgentTool{m: m, fromID: parent.ID}).Execute(ctx, mustAsk(name, "")); r.Status != tool.StatusOK {
-			t.Fatalf("第 %d 个创建失败：%s", i+1, r.Content)
+			t.Fatalf("第 %d 个子会话创建失败：%s", i+1, r.Content)
 		}
 	}
-	if got := len(m.List()); got != maxAgents {
-		t.Fatalf("会话数 = %d, want %d", got, maxAgents)
+	if got := len(m.childAgents()); got != maxChildAgents {
+		t.Fatalf("子会话数 = %d, want %d", got, maxChildAgents)
+	}
+}
+
+// 名额满且都空闲时，复用而不是失败——「空着的一直空着」就是这么来的。
+func TestCreateAgentReusesIdleChildWhenFull(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	t.Cleanup(m.waitSaves)
+	parent := m.Create("p", "主", "统筹")
+	ctx := context.Background()
+	for i := 0; i < maxChildAgents; i++ {
+		(&createAgentTool{m: m, fromID: parent.ID}).Execute(ctx, mustAsk("h"+string(rune('A'+i)), ""))
+	}
+	before := len(m.List())
+	r := (&createAgentTool{m: m, fromID: parent.ID}).Execute(ctx, mustAsk("复用我", ""))
+	if r.Status != tool.StatusOK {
+		t.Fatalf("空闲子会话应当被复用：%s", r.Content)
+	}
+	if len(m.List()) != before {
+		t.Fatalf("复用不该新增会话：%d -> %d", before, len(m.List()))
+	}
+	if _, err := m.FindByName("复用我"); err != nil {
+		t.Fatalf("复用后应当能用新名字找到：%v", err)
+	}
+}
+
+// 都在忙时才拒绝，并告诉模型改用 ask_agent。
+func TestCreateAgentFailsWhenAllChildrenBusy(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	t.Cleanup(m.waitSaves)
+	parent := m.Create("p", "主", "统筹")
+	ctx := context.Background()
+	for i := 0; i < maxChildAgents; i++ {
+		c := m.create("", "h"+string(rune('A'+i)), "", parent.ID)
+		c.mu.Lock()
+		c.Status = StatusRunning
+		c.mu.Unlock()
 	}
 	r := (&createAgentTool{m: m, fromID: parent.ID}).Execute(ctx, mustAsk("溢出", ""))
 	if r.Status == tool.StatusOK {
-		t.Fatal("超过上限仍然创建成功")
+		t.Fatal("子会话都在忙时应当拒绝")
+	}
+	if !strings.Contains(r.Content, "ask_agent") {
+		t.Fatalf("要给出下一步办法：%s", r.Content)
 	}
 }

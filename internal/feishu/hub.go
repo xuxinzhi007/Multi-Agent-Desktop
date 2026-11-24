@@ -151,6 +151,20 @@ func (h *Hub) Rooms() []Room {
 	return h.log.Rooms()
 }
 
+// BotName 返回从飞书问到的机器人名字。问不到时退回配置名，再退空。
+func (h *Hub) BotName(botID, fallback string) string {
+	if h == nil {
+		return fallback
+	}
+	h.mu.Lock()
+	svc := h.bots[botID]
+	h.mu.Unlock()
+	if name := svc.BotName(); name != "" {
+		return name
+	}
+	return fallback
+}
+
 // BindRoom 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。
 func (h *Hub) BindRoom(chatID, agentID string) {
 	if h == nil {

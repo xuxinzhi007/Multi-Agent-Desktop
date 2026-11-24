@@ -10,6 +10,8 @@ import ApprovalModal from './components/ApprovalModal'
 import KnowledgePanel from './components/KnowledgePanel'
 import SettingsModal from './components/SettingsModal'
 import ToastContainer from './components/Toast'
+import QuickSwitch from './components/QuickSwitch'
+import CapabilityPanel from './components/CapabilityPanel'
 import { useBackend } from './lib/useBackend'
 import type { AgentView as Agent } from './mygo'
 import { API } from './mygo'
@@ -231,6 +233,7 @@ export default function App() {
           onTab={setTab}
           tools={s.tools}
           onClose={() => setInspectorOpen(false)}
+          caps={{ node: <CapabilityPanel agentId={activeAgent?.id ?? null} /> }}
           knowledge={{
             count: s.notes.length,
             node: (
@@ -258,6 +261,16 @@ export default function App() {
       <ApprovalModal items={s.approvals} onDecide={s.decideApproval} />
 
       <ToastContainer />
+
+      <QuickSwitch
+        agents={s.agents}
+        channels={s.channels}
+        rooms={s.feishuRooms}
+        onSelect={(kind, id) => {
+          setActive({ kind, id })
+          setView('chat')
+        }}
+      />
       </div>
     </>
   )

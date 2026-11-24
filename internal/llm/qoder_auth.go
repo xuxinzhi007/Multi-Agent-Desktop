@@ -26,6 +26,13 @@ var (
 // qoderAuthPath 为空时用 ~/.pi/agent/auth.json，和 Qoder 自己的登录文件是同一份。
 var qoderAuthPath string
 
+// qoderRefreshHook 在 access token 刷新后回调，把新 Key 交回上层写进配置。
+// 不接这个钩子时，config 里会一直躺着刷新前的旧 Key。
+var qoderRefreshHook func(access string)
+
+// SetQoderRefreshHook 注册刷新回调。只在启动时接一次。
+func SetQoderRefreshHook(fn func(access string)) { qoderRefreshHook = fn }
+
 type qoderCreds struct {
 	Access    string
 	Refresh   string
@@ -200,6 +207,9 @@ func qoderIdentity(apiKey string) (qoderCreds, error) {
 		if next, err := refreshQoder(context.Background(), c); err == nil {
 			c = next
 			_ = writeQoderCreds(c)
+			if qoderRefreshHook != nil && c.Access != "" {
+				qoderRefreshHook(c.Access)
+			}
 		}
 	}
 	if c.UserID == "" {
@@ -224,17 +234,29 @@ func qoderIdentityMiss(apiKey string) (qoderCreds, error) {
 	return qoderCreds{}, fmt.Errorf("qoder: 当前 Key 没有对应的登录信息，请重新授权或保存 Key")
 }
 
-// QoderAccountStatus 确认这把 Key 就是当前登录，并尽量读出剩余额度。
+// QoderAccountStatus 确认这把 Key 能用，并尽量读出剩余额度。
 // 额度接口失败时 quota 为空，登录本身仍然算成功。
+//
+// 判定必须和真正发请求时走同一套（qoderIdentity）。
+// 这里曾经额外加了一道 apiKey == c.Access 的严格相等，
+// 而 access token 会自动刷新：刷新后 config 里存的旧 key 永远对不上，
+// 于是「对话能用，连接检查却报红」。检查不能比执行更严。
 func QoderAccountStatus(ctx context.Context, apiKey string) (string, error) {
 	c, err := qoderIdentity(apiKey)
 	if err != nil {
 		return "", err
 	}
-	if apiKey != "" && apiKey != c.Access {
-		return "", fmt.Errorf("qoder: 当前 Key 没有对应的登录信息，请重新授权或保存 Key")
-	}
 	return qoderQuotaText(ctx, c), nil
+}
+
+// QoderCurrentAccess 返回登录文件里当前的 access token。
+// 刷新后谁拿着旧 key，谁就该把它换掉，否则配置里会长期躺着一把废 token。
+func QoderCurrentAccess() string {
+	c, ok := readQoderCreds()
+	if !ok {
+		return ""
+	}
+	return c.Access
 }
 
 type qoderQuotaBucket struct {

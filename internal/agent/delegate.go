@@ -87,11 +87,18 @@ func runSpawn(ctx context.Context, m *Manager, opts spawnOpts) (string, error) {
 			"一次最多派 %d 个子任务，给了 %d 个。请合并到 %d 个以内再试。",
 			maxSubtasks, len(tasks), maxSubtasks)}
 	}
-	avail := maxAgents - len(m.List())
-	if avail < len(tasks) {
+	// 名额只算模型自建的子会话，用户手动建的不占。
+	// 空闲子会话可复用，所以真正的上限是「忙的 + 本次要的」。
+	busy := 0
+	for _, sn := range m.childAgents() {
+		if sn.Status != StatusIdle || sn.BusyPlace != "" {
+			busy++
+		}
+	}
+	if busy+len(tasks) > maxChildAgents {
 		return "", spawnError{fmt.Sprintf(
-			"会话已经有 %d 个（上限 %d），只剩 %d 个名额，装不下 %d 个子任务。不要再重试，先删掉不用的会话或直接自己做。",
-			len(m.List()), maxAgents, max(avail, 0), len(tasks))}
+			"子会话上限 %d 个，已有 %d 个在忙，装不下 %d 个子任务。合并到 %d 个以内，或改用 ask_agent 找现有会话。",
+			maxChildAgents, busy, len(tasks), max(maxChildAgents-busy, 0))}
 	}
 	if opts.baseDir == "" {
 		return "", spawnError{"这个会话还没有文件夹"}

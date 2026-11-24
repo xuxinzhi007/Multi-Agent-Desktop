@@ -29,6 +29,7 @@ import (
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/privacy"
 	"multi-agent-desktop/internal/pty"
+	"multi-agent-desktop/internal/skill"
 	"multi-agent-desktop/internal/workdir"
 )
 
@@ -1501,6 +1502,11 @@ func (s *API) ListFeishuRooms() []feishu.Room {
 		}
 		rooms[i].AgentID = id
 		rooms[i].AgentName = name
+		botName := ""
+		if b, ok := byID[rooms[i].BotID]; ok {
+			botName = b.Name
+		}
+		rooms[i].BotName = s.bot.BotName(rooms[i].BotID, botName)
 	}
 	return rooms
 }
@@ -1826,6 +1832,9 @@ func persistUserToken(botID string) func(string, string, int64) {
 
 // botRefresher 由 API 初始化时接上，避免 feishuConfig 依赖整个 API。
 var botRefresher func(botID, access, refresh string, expire int64)
+
+// skillStore 是技能库，界面和 agent 工具共用同一份。
+var skillStore *skill.Store
 
 // FeishuAuthView 是一次设备授权要展示给用户的东西。
 // 用户在浏览器里确认 user_code 之后，才能把令牌取回来。
@@ -2230,6 +2239,8 @@ type SystemInfo struct {
 	GoVersion  string `json:"goVersion"`
 	MyGo       bool   `json:"mygo"`
 	BuildStamp string `json:"buildStamp"`
+	// Version 是打包时写进应用的版本号。界面不再写死一个字符串。
+	Version string `json:"version"`
 	// StaleBuild 为 true 表示源码比运行中的进程新：
 	// 用户的改动还没生效，必须重启，否则看到的现象不代表当前代码。
 	StaleBuild bool  `json:"staleBuild"`
@@ -2331,6 +2342,7 @@ func (s *API) Info() SystemInfo {
 		GoVersion:  runtime.Version(),
 		MyGo:       true,
 		BuildStamp: stamp,
+		Version:    mygo.App.Version(),
 		StaleBuild: stale,
 		SourceTime: srcTime,
 	}
@@ -3115,6 +3127,25 @@ func main() {
 	mgr.SetApprovals(approval.New(func(event string, data any) { emit(event, data) }))
 	mgr.SetAudit(audit.Open(filepath.Join(dataDir, "audit.jsonl")))
 	mgr.SetProviders(effective.Providers)
+	// Qoder 的 access token 会自动刷新。刷新后把新 Key 写回已保存的厂商配置，
+	// 否则 config 里长期躺着旧 Key，连接页和实际执行看到的是两把不同的 Key。
+	llm.SetQoderRefreshHook(func(access string) {
+		if access == "" {
+			return
+		}
+		prev, ok := mgr.SavedProvider("qoder")
+		if !ok || prev.APIKey == access || strings.HasPrefix(prev.APIKey, "pt-") {
+			return
+		}
+		prev.APIKey = access
+		if settings != nil {
+			if saved, err := settings.UpsertProvider(prev); err == nil {
+				mgr.SetProviders(saved)
+				return
+			}
+		}
+		mgr.SetProviders(upsertProviderList(mgr.Providers(), prev))
+	})
 	workDir := defaultWorkDir(dataDir)
 	if effective.WorkDir != "" && !workdir.TooBroad(effective.WorkDir) {
 		workDir = effective.WorkDir
@@ -3149,6 +3180,12 @@ func main() {
 		kbStore = knowledge.NewMemoryStore()
 	}
 	mgr.SetKnowledge(&knowledgeProvider{store: kbStore})
+	if sk, err := skill.NewStore(filepath.Join(dataDir, "skills")); err != nil {
+		log.Printf("load skills: %v", err)
+	} else {
+		skillStore = sk
+		mgr.SetSkills(sk)
+	}
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
 	mgr.SetFeed(&channelFeed{ch: channels, api: api})
@@ -3367,4 +3404,125 @@ func (k *knowledgeProvider) View(agentID, role string, knowledgeIDs []string, re
 	}
 	v := knowledge.ViewFromNotes(picked, agentID, role, knowledgeIDs, recentText, budget)
 	return v.Block, v.IDs
+}
+
+// SkillView 是界面上的一条技能。正文只在打开时取。
+type SkillView struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Body        string `json:"body,omitempty"`
+	UpdatedAt   int64  `json:"updatedAt"`
+}
+
+// ListSkills 返回全部技能（不含正文）和它们所在的目录。
+func (s *API) ListSkills() []SkillView {
+	if skillStore == nil {
+		return nil
+	}
+	list := skillStore.List()
+	out := make([]SkillView, 0, len(list))
+	for _, sk := range list {
+		out = append(out, SkillView{ID: sk.ID, Name: sk.Name, Description: sk.Description, UpdatedAt: sk.UpdatedAt})
+	}
+	return out
+}
+
+// ReadSkill 取一条技能的全文。
+func (s *API) ReadSkill(id string) (SkillView, error) {
+	if skillStore == nil {
+		return SkillView{}, fmt.Errorf("技能库还没准备好")
+	}
+	sk, ok := skillStore.Read(id)
+	if !ok {
+		return SkillView{}, fmt.Errorf("没有这条技能")
+	}
+	return SkillView{ID: sk.ID, Name: sk.Name, Description: sk.Description, Body: sk.Body, UpdatedAt: sk.UpdatedAt}, nil
+}
+
+// SaveSkill 新建或改写一条技能。同名覆盖。
+func (s *API) SaveSkill(name, description, body string) (SkillView, error) {
+	if skillStore == nil {
+		return SkillView{}, fmt.Errorf("技能库还没准备好")
+	}
+	sk, err := skillStore.Save(name, description, body)
+	if err != nil {
+		return SkillView{}, err
+	}
+	return SkillView{ID: sk.ID, Name: sk.Name, Description: sk.Description, Body: sk.Body, UpdatedAt: sk.UpdatedAt}, nil
+}
+
+// DeleteSkill 删掉一条技能。
+func (s *API) DeleteSkill(id string) error {
+	if skillStore == nil {
+		return fmt.Errorf("技能库还没准备好")
+	}
+	return skillStore.Delete(id)
+}
+
+// SkillDir 返回技能文件所在目录，用户可以直接用编辑器改。
+func (s *API) SkillDir() string {
+	if skillStore == nil {
+		return ""
+	}
+	return skillStore.Dir()
+}
+
+// Capability 是一条能力：工具或技能，以及它现在能不能用。
+type Capability struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Detail string `json:"detail"`
+	Ready  bool   `json:"ready"`
+	Why    string `json:"why,omitempty"`
+}
+
+// AgentCapabilities 列出这个会话此刻真正拥有的能力。
+// 界面上「它能干什么」不该靠用户猜，也不该把没装上的能力算进去。
+func (s *API) AgentCapabilities(agentID string) []Capability {
+	a, ok := s.mgr.Get(agentID)
+	if !ok {
+		return nil
+	}
+	sn := a.Snapshot()
+	dir := a.EffectiveWorkDir(s.mgr)
+	hasDir := dir != "" && !workdir.TooBroad(dir)
+	hasModel := sn.LLMCfg != nil && sn.LLMCfg.Provider != "" && sn.LLMCfg.Provider != "mock"
+	if !hasModel {
+		base := s.mgr.LLMConfig()
+		hasModel = base.Provider != "" && base.Provider != "mock"
+	}
+
+	fileWhy := "这个会话还没有可用的文件夹"
+	out := []Capability{}
+	add := func(name, kind, detail string, ready bool, why string) {
+		if !ready && why == "" {
+			why = fileWhy
+		}
+		out = append(out, Capability{Name: name, Kind: kind, Detail: detail, Ready: ready, Why: why})
+	}
+	add("read_file", "工具", "读工作目录内的文件", hasDir, "")
+	add("write_file", "工具", "写文件，写前给 diff 并等审批", hasDir, "")
+	add("edit_file", "工具", "按片段改文件，写前给 diff", hasDir, "")
+	add("bash", "工具", "在工作目录执行命令，60 秒上限，危险命令前置拦截", hasDir, "")
+	add("web", "工具", "操作内置浏览器（WebKit 引擎，不是 Chrome）", browser.CurrentDesk() != nil, "内置浏览器还没打开")
+	add("list_agents", "工具", "看现在有哪些会话", true, "")
+	add("ask_agent", "工具", "把任务交给已有会话并等回复", hasModel, "这个会话还没有模型")
+	add("create_agent", "工具", "建子会话；名额满时复用空闲子会话", hasModel, "这个会话还没有模型")
+	add("delegate", "工具", "把任务切成 1-3 块并行做，各自独立工作树", hasDir && sn.Depth < 2, "没有文件夹，或已到嵌套上限")
+	add("list_notes", "工具", "查知识库", true, "")
+	add("save_note", "工具", "把结论写进知识库", true, "")
+	add("set_profile", "工具", "改自己的名字、简介、目录", true, "")
+	if skillStore != nil {
+		add("read_skill", "工具", "取技能全文", true, "")
+		add("save_skill", "工具", "把可复用步骤沉淀成技能", true, "")
+		for _, sk := range skillStore.List() {
+			d := sk.Description
+			if d == "" {
+				d = "（没有描述）"
+			}
+			add(sk.Name, "技能", d, true, "")
+		}
+	}
+	return out
 }

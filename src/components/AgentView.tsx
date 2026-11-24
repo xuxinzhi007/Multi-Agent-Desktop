@@ -653,7 +653,7 @@ export default function AgentView(p: Props) {
             color: 'var(--bg-base)',
             display: 'grid',
             placeItems: 'center',
-            fontSize: 12,
+            fontSize: 'var(--text-sm)',
             fontWeight: 700,
             flexShrink: 0,
           }}
@@ -1166,8 +1166,8 @@ function WorkDirChip({
                 <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>独立 git worktree</div>
                 <div style={hintStyle}>
                   {agent.worktree
-                    ? `分支 ${agent.worktreeBranch}，改动只落在这份检出里。`
-                    : '开启后这个会话用自己的分支，改代码不和别的会话抢同一份检出。'}
+                    ? `分支 ${agent.worktreeBranch}，改动只落在这份检出里。关闭后下一轮回到原目录。`
+                    : '开启后立即建好工作树并切过去；正在跑的那一轮不受影响，下一轮生效。'}
                 </div>
                 {agent.worktree && (
                   <div

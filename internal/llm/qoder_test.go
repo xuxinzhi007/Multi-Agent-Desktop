@@ -206,8 +206,13 @@ func TestQoderIdentityUsesSavedLoginWhenKeyIsStale(t *testing.T) {
 	if err != nil || quota != "剩余 12 / 100 Credits" {
 		t.Fatalf("quota = %q err=%v", quota, err)
 	}
-	if _, err := QoderAccountStatus(context.Background(), "dt-old"); err == nil {
-		t.Fatal("stale key should not count as the saved account")
+	// 检查必须和执行同源：qoderIdentity 能用旧 key 配新登录跑通，
+	// 连接检查就不能单独报红——否则就是「对话能用，设置页说未生效」。
+	if _, err := qoderIdentity("dt-old"); err != nil {
+		t.Fatalf("stale key should still run: %v", err)
+	}
+	if _, err := QoderAccountStatus(context.Background(), "dt-old"); err != nil {
+		t.Fatalf("连接检查比执行更严，会把能用的账号报成未生效：%v", err)
 	}
 }
 

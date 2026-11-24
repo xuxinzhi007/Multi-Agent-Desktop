@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { API, type Line, type Media, type Room } from '../mygo'
 
 // 图片地址在页面生命周期内缓存一份，滚动或重渲染不必重复下载。
@@ -63,6 +65,17 @@ function LineBody({ line }: { line: Line }) {
   const media = line.media ?? []
   const images = media.filter((m) => m.kind === 'image' && m.key)
 
+  // 机器人自己发的回复和卡片正文都是 markdown，用 markdown 渲染；
+  // 用户的普通消息保持纯文本，免得把 ** 之类当排版吞掉。
+  const md = (text: string, color = 'var(--text-secondary)') => (
+    <div
+      className="markdown-body"
+      style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color }}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  )
+
   const muted = (
     <div
       style={{
@@ -90,9 +103,10 @@ function LineBody({ line }: { line: Line }) {
   }
 
   if (kind === 'card') {
-    // 降级卡片只有标题能读；正文拿不到，单独标一行状态，不把占位文案当内容。
+    // 降级卡片拿不到正文时单独标一行状态，不把占位文案当内容；
+    // 能从卡片实体取回正文就直接渲染，标题和正文按 markdown 排。
     const missing = line.text.includes('[卡片内容需在飞书客户端查看]')
-    const body = line.text.replace(/\n?\[卡片内容需在飞书客户端查看\]/g, '').trim()
+    const body = line.text.replace(/\n?\[卡片内容需在飞书客户端查看（card_id: [^)]+）?\]/g, '').trim()
     return (
       <div
         style={{
@@ -104,7 +118,7 @@ function LineBody({ line }: { line: Line }) {
       >
         <div
           style={{
-            fontSize: 10,
+            fontSize: 'var(--text-xs)',
             fontWeight: 700,
             letterSpacing: 0.6,
             color: 'var(--accent-bright)',
@@ -113,19 +127,7 @@ function LineBody({ line }: { line: Line }) {
         >
           卡片
         </div>
-        {body && (
-          <div
-            style={{
-              fontSize: 'var(--text-sm)',
-              lineHeight: 1.65,
-              color: 'var(--text-secondary)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {body}
-          </div>
-        )}
+        {body && md(body)}
         {missing && (
           <div
             style={{
@@ -181,7 +183,7 @@ function LineBody({ line }: { line: Line }) {
   }
 
   if (kind === 'text') {
-    return (
+    return line.self ? md(line.text) : (
       <div
         style={{
           fontSize: 'var(--text-md)',
@@ -243,7 +245,7 @@ export default function FeishuRoomView({ room }: { room: Room }) {
             color: 'var(--accent-bright)',
             display: 'grid',
             placeItems: 'center',
-            fontSize: 12,
+            fontSize: 'var(--text-sm)',
             fontWeight: 700,
             flexShrink: 0,
           }}
@@ -257,7 +259,7 @@ export default function FeishuRoomView({ room }: { room: Room }) {
               <span
                 style={{
                   marginLeft: 8,
-                  fontSize: 10,
+                  fontSize: 'var(--text-xs)',
                   fontWeight: 600,
                   color: 'var(--text-tertiary)',
                   border: '1px solid var(--border-subtle)',
@@ -289,11 +291,13 @@ export default function FeishuRoomView({ room }: { room: Room }) {
         </button>
       </header>
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4)' }}>
+        {/* 和主对话用同一个阅读宽度：行太长时眼睛回不了行。 */}
+        <div className="c-transcript">
         {lines.length === 0 ? (
           <div className="c-empty">还没有记下消息</div>
         ) : (
           lines.map((line) => {
-            const name = line.self ? '机器人' : line.from || '有人'
+            const name = line.self ? room.botName || '机器人' : line.from || '有人'
             return (
               <div key={line.id} style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
                 <span
@@ -305,7 +309,7 @@ export default function FeishuRoomView({ room }: { room: Room }) {
                     color: line.self ? 'var(--bg-base)' : 'var(--text-secondary)',
                     display: 'grid',
                     placeItems: 'center',
-                    fontSize: 11,
+                    fontSize: 'var(--text-xs)',
                     fontWeight: 700,
                     flexShrink: 0,
                     marginTop: 1,
@@ -341,6 +345,7 @@ export default function FeishuRoomView({ room }: { room: Room }) {
             )
           })
         )}
+        </div>
       </div>
     </div>
   )
