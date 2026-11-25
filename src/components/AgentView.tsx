@@ -677,6 +677,7 @@ export default function AgentView(p: Props) {
             className={`c-icon-btn ${p.inspectorOpen ? 'c-icon-btn--active' : ''}`}
             onClick={p.onToggleInspector}
             title={p.inspectorOpen ? '收起检查器' : '展开检查器'}
+            aria-label={p.inspectorOpen ? '收起检查器' : '展开检查器'}
           >
             ◫
           </button>

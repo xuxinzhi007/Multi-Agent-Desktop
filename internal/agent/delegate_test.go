@@ -121,7 +121,7 @@ func TestUserSessionsDoNotBlockDelegation(t *testing.T) {
 	m := newTestManager(t)
 	parent := m.Create("", "主会话", "")
 	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
-	for i := 0; i < maxUserAgents; i++ {
+	for i := 0; i < 20; i++ {
 		m.Create("", "用户自建"+string(rune('A'+i)), "")
 	}
 	withChildBackend(t, "mock")

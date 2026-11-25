@@ -183,10 +183,15 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(page.locator('.markdown-body').first()).toBeVisible()
     await shot(page, `${theme}-2-chat`)
 
-    // 3. 检查器（工具页）
-    const inspectorBtn = page.getByRole('button', { name: /检查器|工具/ }).first()
-    if (await inspectorBtn.count()) await inspectorBtn.click().catch(() => {})
+    // 3. 检查器（进对话时已自动展开）
     await shot(page, `${theme}-3-inspector`)
+
+    // 3b. 能力页
+    const capsTab = page.getByRole('button', { name: /^能力/ }).first()
+    if (await capsTab.count()) {
+      await capsTab.click().catch(() => {})
+      await shot(page, `${theme}-3b-capabilities`)
+    }
 
     // 4. 频道
     await page.getByRole('button', { name: '频道 发布评审' }).click()
@@ -204,6 +209,11 @@ for (const theme of ['dark', 'light'] as const) {
       await feishuTab.click().catch(() => {})
       await shot(page, `${theme}-7-settings-feishu`)
     }
+    await page.keyboard.press('Escape')
+
+    // 6b. ⌘K 快速跳转
+    await page.keyboard.press('Meta+k')
+    await shot(page, `${theme}-9-quickswitch`)
     await page.keyboard.press('Escape')
 
     // 7. 新建会话弹窗

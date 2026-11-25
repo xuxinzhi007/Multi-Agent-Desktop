@@ -36,7 +36,7 @@ test.beforeEach(async ({ page }) => {
 
 test('知识标签变多时收成一行，笔记保持紧凑卡片', async ({ page }) => {
   await page.locator('aside').getByText('前端', { exact: true }).click()
-  await page.getByTitle('展开检查器').click()
+  // 进对话时检查器已经自动展开，这里直接切页签
   await page.getByRole('button', { name: /知识/ }).click()
 
   const row = page.locator('.c-kb-tags')

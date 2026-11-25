@@ -23,7 +23,7 @@ test('技能能展开看正文，也能新建', async ({ page }) => {
   await page.getByRole('button', { name: /排查慢SQL/ }).first().click()
   await expect(page.getByText(/先按租户收窄/)).toBeVisible()
 
-  await page.getByRole('button', { name: '新建' }).click()
+  await page.getByRole('button', { name: '新建', exact: true }).click()
   await page.getByLabel('技能名').fill('值班排障')
   await page.getByLabel('步骤正文').fill('1. 先看日志\n2. 再对代码')
   await page.getByRole('button', { name: '保存技能' }).click()

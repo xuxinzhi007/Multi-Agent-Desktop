@@ -273,8 +273,11 @@ func TestAPISessionConfig(t *testing.T) {
 	if got := s.GetAgentConfig(a1.ID); got.Model != "agent-m" {
 		t.Errorf("GetAgentConfig(%q).Model = %q, want %q", a1.ID, got.Model, "agent-m")
 	}
-	if got := s.GetAgentConfig(a2.ID); got.Model != "" || got.Provider != "" {
-		t.Errorf("GetAgentConfig(%q) = %+v, want empty", a2.ID, got)
+	// 要守的不变量是「a1 的会话级覆盖不泄漏给 a2」。
+	// a2 继承全局默认模型是对的（否则新会话开出来就没模型，第一轮必失败），
+	// 所以这里断言的是「不等于 a1 那份」，而不是「必须为空」。
+	if got := s.GetAgentConfig(a2.ID); got.Model == "agent-m" {
+		t.Errorf("GetAgentConfig(%q) = %+v，a1 的会话级模型泄漏给了兄弟会话", a2.ID, got)
 	}
 
 	keyed := LLMConfig{Provider: "openai", BaseURL: "http://x", APIKey: "sk-live", Model: "agent-m"}

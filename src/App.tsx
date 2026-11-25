@@ -114,6 +114,8 @@ export default function App() {
         onSelect={(kind, id) => {
           setActive({ kind, id })
           setView('chat')
+          // 和「对话」tab 一致：进对话就展开检查器，别让用户再点一次
+          setInspectorOpen(true)
         }}
         view={view}
         onViewChange={(v) => {

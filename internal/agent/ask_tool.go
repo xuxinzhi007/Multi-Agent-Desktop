@@ -133,12 +133,10 @@ func lastAssistantTextSince(sn *Agent, from int) string {
 // 真实运行记录里 create_agent 的 7 次失败全是这一条。
 //
 // 现在：用户自建不占模型的名额，模型只能在自己建的子会话里配额。
-const (
-	// maxUserAgents 是用户自己建会话的上限。
-	maxUserAgents = 12
-	// maxChildAgents 是模型自建子会话的总上限（派活、助手、学习共用）。
-	maxChildAgents = 6
-)
+// maxChildAgents 是模型自建子会话的总上限（派活、助手、学习共用）。
+// 用户自己建的会话不设这个限制，也不占这个名额——用户想开几个工作台是他的事，
+// 需要约束的是模型自动繁殖出来的那些。
+const maxChildAgents = 6
 
 // childAgents 返回模型自建的子会话快照。用户自建的不算在内。
 func (m *Manager) childAgents() []*Agent {
