@@ -199,9 +199,9 @@ export default function App() {
       {view === 'gateway' ? (
         <GatewayPage />
       ) : view === 'memory' ? (
-        <MemoryPage onOpenKnowledge={openKnowledge} />
+        <MemoryPage agents={s.agents} onOpenKnowledge={openKnowledge} />
       ) : view === 'plan' ? (
-        <PlanPage />
+        <PlanPage agents={s.agents} />
       ) : view === 'fleet' && !activeChannel && !activeFeishu ? (
         <FleetView
           agents={s.agents}

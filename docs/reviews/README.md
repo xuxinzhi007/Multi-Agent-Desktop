@@ -13,6 +13,9 @@
 | [`knowledge-plan.md`](knowledge-plan.md) | 知识库修复实施计划 | 已执行 |
 | [`collaboration-plan.md`](collaboration-plan.md) | 协作/讨论/主动派活 | 已落地（Route / ask_agent / delegate / Supervisor） |
 | [`floating-window-review.html`](floating-window-review.html) | 悬浮窗拖动/点击/动画 | ⚫ **已废弃**：`src/mini.tsx` / `mini.html` / `API.MiniStatus` 均已移除 |
+| [`code-review-gateway-m3-2026-11-26.md`](code-review-gateway-m3-2026-11-26.md) | 内嵌网关 M3 + 记忆/调度/前端 | **评审快照**；§4.1 的 #1/#2 仍未修，见 [`status-2026-11-26.md`](status-2026-11-26.md) |
+| [`status-2026-11-26.md`](status-2026-11-26.md) | 当前收工状态、验证结果、已知风险 | **当前有效**，优先于 11-25 的上下文与待办 |
+| [`final-acceptance-2026-11-25.md`](final-acceptance-2026-11-25.md) | 全量验收命令与清单 | 带有 11-26 收尾更新，历史清单保留 |
 | [`review-recheck-2026-11-25.md`](review-recheck-2026-11-25.md) | 三份评审对当前代码的逐条复核 | 当前有效 |
 
 ## 直接读纯文本

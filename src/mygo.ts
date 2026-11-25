@@ -413,6 +413,41 @@ export interface Media {
   name?: string;
 }
 
+/** MemoryItemView 是合并检索后的单条记忆视图。 */
+export interface MemoryItemView {
+  id: number;
+  /** message | note | fact */
+  kind: string;
+  source: string;
+  agentId?: string;
+  title?: string;
+  snippet: string;
+  createdAt: number;
+}
+
+/** MemoryNoteView 是一条记忆笔记的完整视图。 */
+export interface MemoryNoteView {
+  id: number;
+  title: string;
+  body: string;
+  tags: string;
+  source: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** MemoryStatusView 是记忆库状态卡的数据视图。 */
+export interface MemoryStatusView {
+  available: boolean;
+  path: string;
+  dbBytes: number;
+  events: number;
+  notes: number;
+  facts: number;
+  lastWriteAt: number;
+  error?: string;
+}
+
 export interface Message {
   role: string;
   content: string;
@@ -464,6 +499,46 @@ export interface Note {
   related?: string[];
   at: number;
   updatedAt?: number;
+}
+
+/** PlanRequest 是新建 / 更新计划任务的入参。 */
+export interface PlanRequest {
+  id?: string;
+  type: string;
+  intervalSec: number;
+  cron?: string;
+  agentId: string;
+  prompt: string;
+  channel?: string;
+  enabled: boolean;
+}
+
+/** PlanStatusView 是调度器整体状态。 */
+export interface PlanStatusView {
+  available: boolean;
+  running: boolean;
+  count: number;
+  enabled: number;
+  quiet: string;
+  lastTickAt: number;
+  error?: string;
+}
+
+/** PlanView 是一条计划任务的视图。 */
+export interface PlanView {
+  id: string;
+  type: string;
+  intervalSec: number;
+  cron: string;
+  agentId: string;
+  prompt: string;
+  channel: string;
+  enabled: boolean;
+  createdAt: number;
+  lastRunAt: number;
+  nextRunAt: number;
+  failures: number;
+  lastError?: string;
 }
 
 /** PrivacyGrant 是一项系统权限现在的状态。state 为 yes、no 或 unknown。 */
@@ -866,6 +941,30 @@ export const API = {
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
   },
+  /** MemoryDeleteNote 按 id 删除一条记忆笔记。 */
+  memoryDeleteNote(id: number): Promise<void> {
+    return call("API.MemoryDeleteNote", id);
+  },
+  /** MemoryNotes 列出记忆笔记，按更新时间倒序。 */
+  memoryNotes(limit: number): Promise<MemoryNoteView[]> {
+    return call("API.MemoryNotes", limit);
+  },
+  /** MemoryRecent 返回最近的记忆，空查询走合并检索的最近记录。 */
+  memoryRecent(limit: number): Promise<MemoryItemView[]> {
+    return call("API.MemoryRecent", limit);
+  },
+  /** MemorySearch 跨事件 / 笔记 / 事实检索记忆；agentID 非空时只过滤事件归属。 */
+  memorySearch(query: string, agentID: string, limit: number): Promise<MemoryItemView[]> {
+    return call("API.MemorySearch", query, agentID, limit);
+  },
+  /** MemoryStatus 返回记忆库状态；未启用时给出中文空态。 */
+  memoryStatus(): Promise<MemoryStatusView> {
+    return call("API.MemoryStatus");
+  },
+  /** MemoryUpsertNote 新增或覆盖一条记忆笔记；同 (source, title) 复用同一行。 */
+  memoryUpsertNote(title: string, body: string, tags: string): Promise<number> {
+    return call("API.MemoryUpsertNote", title, body, tags);
+  },
   /** OpenFeishuScopes 打开飞书开通页，一次带上还缺的全部权限，并向管理员补一次申请。 */
   openFeishuScopes(id: string): Promise<FeishuScopeView> {
     return call("API.OpenFeishuScopes", id);
@@ -888,6 +987,34 @@ export const API = {
   /** PickDirectory 弹出原生目录选择对话框。 */
   pickDirectory(): Promise<string> {
     return call("API.PickDirectory");
+  },
+  /** PlanCreate 新建一条计划任务。 */
+  planCreate(req: PlanRequest): Promise<PlanView> {
+    return call("API.PlanCreate", req);
+  },
+  /** PlanDelete 删除一条任务。 */
+  planDelete(id: string): Promise<void> {
+    return call("API.PlanDelete", id);
+  },
+  /** PlanList 返回全部计划任务；未启用时返回空切片。 */
+  planList(): Promise<PlanView[]> {
+    return call("API.PlanList");
+  },
+  /** PlanPause 暂停（paused=true）或恢复（paused=false）一条任务。 */
+  planPause(id: string, paused: boolean): Promise<void> {
+    return call("API.PlanPause", id, paused);
+  },
+  /** PlanRunNow 无视静默 / 限频 / 退避立即执行一次。 */
+  planRunNow(id: string): Promise<void> {
+    return call("API.PlanRunNow", id);
+  },
+  /** PlanStatus 返回调度器状态；未启用时给出空态。 */
+  planStatus(): Promise<PlanStatusView> {
+    return call("API.PlanStatus");
+  },
+  /** PlanUpdate 全量替换一条计划任务。 */
+  planUpdate(req: PlanRequest): Promise<PlanView> {
+    return call("API.PlanUpdate", req);
   },
   /** PrivacyStatus 读取屏幕录制、辅助功能和自动化是否已经允许。不弹授权框。 */
   privacyStatus(): Promise<PrivacyGrant[]> {

@@ -38,7 +38,7 @@
 - **飞书审批卡**：写操作要批准时，卡片直接发在飞书那条对话里（拒绝 / 允许一次 / 本会话允许），点完就地改写成结果；应用内先处理过时飞书上的按钮会收起。飞书侧另有 `/help` `/stop` `/status` `/use 名字` 四条指令
 - **多根工作区**：会话可以设主目录 + 附加目录，文件工具能读写全部根，**命令仍在主目录跑**。用来「改这个仓库、同时读隔壁那个」，不必换会话或搬目录。附加目录同样不能是主目录/桌面/文稿/下载，且不从那边加载技能或知识
 - **技能（skill）**：`<数据目录>/skills/*.md`，带 name / description。系统提示里只放名字和一句话描述，正文用 `read_skill` 按需取；会话走通一套流程后能用 `save_skill` 自己沉淀。和知识库的分工是「note 存这个项目的事实，skill 存跨项目复用的步骤」
-- **⌘K 快速跳转**：会话 / 频道 / 飞书群在同一个列表里，输入名字直达。侧栏按「工作区 / 助手」分组，可折叠、带条数，删除按钮悬停才出现。顶部状态条常驻显示 运行中 / 待审批 / 队列，待审批可点开队列；网关页已接真实数据（进程/wired/绑定/Agent/待审批/SSE），记忆与计划两页后端未接入的部分明确禁用并写明「未接入」，不会伪造在线或延迟
+- **⌘K 快速跳转**：会话 / 频道 / 飞书群在同一个列表里，输入名字直达。侧栏按「工作区 / 助手」分组，可折叠、带条数，删除按钮悬停才出现。顶部状态条常驻显示 运行中 / 待审批 / 队列，待审批可点开队列；网关 / 记忆 / 计划三页都已接真实数据（进程/wired/绑定、记忆状态/搜索/笔记、计划 CRUD/暂停/立即运行），不会伪造在线、延迟或假计划
 - **检查器**：工具、知识、**能力**三页。工具行来自真实的 `agent.tool` 事件；能力页列出这个会话此刻的工具与技能，不可用的直接写明原因（没文件夹 / 没模型 / 浏览器没开）。没有「改动 / 任务」页
 - 主窗口只在当前会话里放最近一页消息（默认 40 条，最多要 80 条）。切走的会话在界面上只留名单和最后一句，磁盘上的 `agents.json` 仍是完整历史
 - 开发时如果 `.go` 源码比正在跑的进程新，诊断面板会标 `StaleBuild`。`mygo dev` 只热重载前端，Go 改动要重启进程
@@ -107,8 +107,8 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 │  internal/browser     内置浏览器窗口                      │
 │  internal/pty         手动执行的 shell                    │
 │  internal/gateway     网关端口抽象、HTTP/SSE（嵌入式，随桌面启动）  │
-│  internal/memory      记忆：SQLite FTS5（未装配）          │
-│  internal/scheduler   心跳调度、静默、限频（未装配）        │
+│  internal/memory      记忆：SQLite FTS5 + 自动写入 + memory_search │
+│  internal/scheduler   心跳调度、持久化、静默、限频、退避          │
 ├──────────────────────────────────────────────────────────┤
 │ React 19 前端（Vite）                                     │
 │  src/mygo.ts          生成的 typed client                 │
@@ -127,7 +127,7 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 | 业务层 | `internal/agent`、`internal/loop`、`internal/channel`、`internal/knowledge`、`internal/feishu` | 会话、循环、回合、知识、飞书 |
 | 运行时层 | `internal/runtime`、`internal/runtime/acp` | 统一事件协议；native loop 与外部 ACP Agent 共用同一个 `Session` |
 | 边界层 | `internal/gateway` + `internal/gateway/host` | 嵌入式 HTTP/SSE；默认只接管 `web`，接 Manager / approval.Center / 桌面数据目录 Binder；飞书仍走 `feishu.Hub`，不重复回复 |
-| 辅助包 | `internal/memory`、`internal/scheduler` | SQLite FTS5 记忆检索；心跳调度、静默时段、限频与退避（均未进程装配） |
+| 辅助包 | `internal/memory`、`internal/scheduler` | SQLite FTS5 记忆（自动写 agent.message、去重/限流、`memory_search`）；30s 心跳调度、interval/cron、持久化、静默/限频/退避 |
 | 基础设施 | `internal/llm`、`internal/tool`、`internal/browser`、`internal/pty` | 外部依赖 |
 
 运行时协议单独成文：**[docs/runtime-protocol.md](docs/runtime-protocol.md)**。
@@ -196,7 +196,10 @@ MAD_WORK_DIR=/path/to/project
 ### 配置存在哪
 
 ```
-<用户数据目录>/config.json     ← 全局模型配置与默认目录，权限 600
+<用户数据目录>/config.json       ← 全局模型配置与默认目录，权限 600
+<用户数据目录>/memory.db         ← 记忆：SQLite + FTS5（自动写入、去重、限流）
+<用户数据目录>/schedules.json    ← 计划任务：原子写，重启恢复运行态
+<用户数据目录>/gateway-bindings.json ← 网关渠道绑定
 ```
 
 | 平台 | 路径 |
@@ -286,7 +289,7 @@ multi-agent-desktop/
 - **shell 不读登录脚本**。macOS / Linux 用 `zsh -dfc`（没有 zsh 时用 `sh -c`）；Windows 用 `powershell.exe -NoProfile -NonInteractive`，模型应写 PowerShell，不要写 bash。登录脚本会去碰桌面、文稿、下载，macOS 就按文件夹反复弹权限。工作目录不能是主目录、盘符根（如 `C:\`）、`/`，也不能是桌面、文稿、下载、图片、影片、音乐这些文件夹本身；放在其中的项目子目录可以
 - **危险命令拦截是最小规则集**，不是沙箱。变量拼接、脚本内部绕过的写法覆盖不到；审批卡是最后一道人工闸门
 - **网关已内嵌进桌面（仅接管 `web`）**。应用启动即起 HTTP/SSE（默认 `127.0.0.1:8780`，`MAD_GATEWAY_ADDR` / `MAD_GATEWAY_TOKEN` 可改），退出即关；Session/Approval/Sender/Binder 四项已接真实实现，端口占用只记日志不阻断桌面。飞书聊天与审批仍走现有 `feishu.Hub`，网关对 feishu 入站返回 409、对飞书绑定回复跳过，避免重复。
-- **记忆 / 调度目前只有包，没有进程装配**。记忆与调度还没被对话和界面调用，记忆 / 计划两页仍显示「未接入」，要等主进程接线后才算可用；`cmd/mad-gateway` 独立常驻形态也留到网关验收之后。
+- **记忆 / 调度已内嵌进桌面**。记忆库是 `<数据目录>/memory.db`（SQLite + FTS5），只自动写入 `agent.message` 的 user/assistant 文本（跳过 delta/工具/思考，8000 字截断、按 agent 每分钟 60 条限流、哈希去重）；`memory_search` 查的是跨会话记忆，不是知识库。计划任务持久化在 `<数据目录>/schedules.json`，30s 心跳，支持 interval 与 5 字段 cron-lite；默认 23:00–08:00 静默，失败指数退避；任务只入队 `Manager.Prompt`，不自动批准工具，审批超时/只读模式 fail-closed。`cmd/mad-gateway` 独立常驻形态仍留到后续。
 - **审计只落文件**，界面还没有只读的审计页。日志在用户数据目录的 `audit.jsonl`
 - **worktree 只在 git 仓库里生效**。不是仓库的文件夹开不了隔离，Supervisor 会自动退回共用目录，并在汇总里写明
 - **豆包 CLI 一次只能跑一件任务**。同一个账号已经有任务在跑时（比如正在用豆包办公本身），新的 `doubao -p` 会排队或等不到结果；停止按钮会杀掉整组进程。装 CLI 用 `npm i -g @bytedance/doubao-cli`，找不到原生命令时可用 `MAD_DOUBAO_BIN` 指定路径

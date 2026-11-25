@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -108,6 +110,163 @@ func (s *Store) queryFacts(ctx context.Context, query string, limit int) (*sql.R
 		ftsPhrase(query), pat, pat, pat, limit)
 }
 
+// SearchEvents 检索流水事件：FTS5 trigram 召回 + LIKE 兜底，按时间倒序。
+// agentID 非空时只看归属该 agent 的事件；空查询返回最近事件。limit <= 0 默认 20。
+func (s *Store) SearchEvents(ctx context.Context, query, agentID string, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	query = strings.TrimSpace(query)
+
+	rows, err := s.queryEvents(ctx, query, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]Event, 0, limit)
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Source, &e.AgentID,
+			&e.Content, &e.CreatedAt, &e.Meta); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) queryEvents(ctx context.Context, query, agentID string, limit int) (*sql.Rows, error) {
+	agentMatch := `(? = '' OR agent_id = ?)`
+	args := []any{agentID, agentID}
+	if query == "" {
+		return s.db.QueryContext(ctx,
+			`SELECT id, kind, source, agent_id, content, created_at, meta
+			 FROM events WHERE `+agentMatch+`
+			 ORDER BY created_at DESC, id DESC LIMIT ?`,
+			append(args, limit)...)
+	}
+	pat := likePattern(query)
+	return s.db.QueryContext(ctx,
+		`SELECT id, kind, source, agent_id, content, created_at, meta
+		 FROM events
+		 WHERE (`+agentMatch+`)
+		   AND (id IN (SELECT rowid FROM events_fts WHERE events_fts MATCH ?)
+			    OR content LIKE ? ESCAPE '\')
+		 ORDER BY created_at DESC, id DESC LIMIT ?`,
+		append(args, ftsPhrase(query), pat, limit)...)
+}
+
+// SearchAll 合并检索 events / notes / facts，按时间倒序去重后返回。
+// agentID 只过滤事件（笔记与事实没有会话归属字段）。limit <= 0 默认 20，上限 30。
+func (s *Store) SearchAll(ctx context.Context, query, agentID string, limit int) ([]Item, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 30 {
+		limit = 30
+	}
+
+	events, err := s.SearchEvents(ctx, query, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	notes, err := s.SearchNotes(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := s.SearchFacts(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]Item, 0, len(events)+len(notes)+len(facts))
+	seen := map[string]struct{}{}
+	add := func(it Item) {
+		key := it.Kind + ":" + strings.TrimSpace(it.Source) + ":" + it.AgentID + ":" +
+			it.Title + ":" + strings.TrimSpace(it.Snippet)
+		if _, hit := seen[key]; hit {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, it)
+	}
+
+	for _, e := range events {
+		add(Item{
+			ID:        e.ID,
+			Kind:      "message",
+			Source:    e.Source,
+			AgentID:   e.AgentID,
+			Title:     eventTitle(e),
+			Snippet:   excerpt(e.Content, 160),
+			CreatedAt: e.CreatedAt,
+		})
+	}
+	for _, n := range notes {
+		add(Item{
+			ID:        n.ID,
+			Kind:      "note",
+			Source:    n.Source,
+			Title:     n.Title,
+			Snippet:   excerpt(n.Body, 160),
+			CreatedAt: n.UpdatedAt,
+		})
+	}
+	for _, f := range facts {
+		title := strings.TrimSpace(f.Subject + " " + f.Predicate)
+		add(Item{
+			ID:        f.ID,
+			Kind:      "fact",
+			Source:    "",
+			Title:     title,
+			Snippet:   excerpt(f.Object, 160),
+			CreatedAt: f.CreatedAt,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt > out[j].CreatedAt
+		}
+		return out[i].ID > out[j].ID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// eventTitle 从事件 meta 里取角色作为标题；取不到就用事件类型兜底。
+func eventTitle(e Event) string {
+	var meta struct {
+		Role string `json:"role"`
+	}
+	if e.Meta != "" && json.Unmarshal([]byte(e.Meta), &meta) == nil && meta.Role != "" {
+		switch meta.Role {
+		case "user":
+			return "用户消息"
+		case "assistant":
+			return "助手回复"
+		}
+		return meta.Role
+	}
+	if e.Kind != "" {
+		return e.Kind
+	}
+	return "消息"
+}
+
+// excerpt 把多行正文压成单行摘要，按 rune 截断。
+func excerpt(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // countNotes / countFacts 仅用于测试断言幂等性。
 func (s *Store) countNotes(ctx context.Context) (int, error) {
 	var n int
@@ -118,5 +277,11 @@ func (s *Store) countNotes(ctx context.Context) (int, error) {
 func (s *Store) countFacts(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM facts`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) countEvents(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&n)
 	return n, err
 }

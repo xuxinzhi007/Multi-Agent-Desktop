@@ -1,5 +1,8 @@
 # 最终验收清单（2026-11-25）
 
+> **2026-11-26 收尾更新**：网关已嵌入主进程并接真实 Session/Approval；记忆与计划调度已接入；全量 Playwright **133 passed**。
+> 本文保留为命令清单与审计清单，当前状态与已知风险以 [`status-2026-11-26.md`](status-2026-11-26.md) 为准。
+
 分支：`fix/p0-correctness-stopgap`。本轮**不 commit、不 push**，由主 Agent 审计后决定提交。
 本清单覆盖本轮五条并行线的合并验收；每条线先各自跑构建/测试，全量验证在 C（前端）完成后统一执行。
 
@@ -36,14 +39,14 @@ npx playwright test                     # C 完成后跑全量
 | ACP 进程回收 | 停止/删除/轮末 Close 杀进程组，无残留 | 待端到端自查 |
 | 工具面 | grep/glob/apply_patch 已注册；grep 带行号与 include/exclude；apply_patch 陈旧锚点整批拒绝 | 已由单测覆盖 |
 | 前端 IA | 状态条只显示真实数据；导航分组；三页面四态；无假数据 | 已完成；typecheck/build 通过，相关 e2e 48 通过 |
-| 全量 e2e | `npx playwright test` 107 例全绿 | 第 2 轮（隔离产物目录）**107 passed（4.3m，0 failed）**；第 1 轮 105/107，两例单跑均通过（trace ENOENT + 帧率抖动） |
+| 全量 e2e | `npx playwright test` 全绿 | **133 passed**（网关 5 + 记忆/计划 21 + 既有 107） |
 | 前端运行时 UI | 新建/编辑可选 native/ACP；徽标与连接状态真实；审批复用 | 已完成：`CreateAgentModal` + `RuntimeChip` + `RuntimeBadge`；typecheck/build 通过，runtime e2e 6/6，全量 e2e 覆盖 |
 | 飞书白名单 UI | ownerOpenId 只读、approverOpenIds 每行一个、保存回显 | 已完成：SettingsModal FeishuBoard；feishu-whitelist e2e 2/2 |
 | 飞书审批 P0 | 陌生人不能消费/决定他人的卡；owner 自动补写 | 主 Agent 已验证 |
 | 子会话审批卡 | 父会话可见、不误关；子会话结束不残留 | 主 Agent 已落盘：`feishu.Hooks.Root` + `Manager.RootID`；approval/feishu/agent 测试通过 |
 | 审批超时 | 跟随会话生命周期，长任务不被固定 5 分钟误杀 | 主 Agent 已落盘：`defaultTimeout` 5m→30m，超时仍拒绝、ctx 取消优先；有 > Supervisor 10m 的测试 |
-| 网关 M3 | 入站幂等、绑定、回执、出站、审批转发、SSE、token | 包级完成：`go build`/`go vet`/13 用例通过；进程装配延后 |
-| 记忆/调度 | SQLite FTS5 中文可搜、迁移幂等；静默/限频/退避有测试 | 包级完成：`go build ./...`、两包测试与 vet 通过；装配延后 |
+| 网关 M3 | 入站幂等、绑定、回执、出站、审批转发、SSE、token | **已完成并接入**：host 嵌入 main；`/api/status` 四项 wired true；`feishu` 入站 409；GatewayPage 真实数据；5 条 e2e |
+| 记忆/调度 | SQLite FTS5 中文可搜、迁移幂等；静默/限频/退避有测试 | **已完成并接入**：`memory.db` 自动写入 + `memory_search`；`schedules.json` + 30s 心跳；Memory/Plan 页真实数据；21 条 e2e |
 
 ## 3. diff 审计（提交前逐条过）
 
@@ -63,16 +66,17 @@ npx playwright test                     # C 完成后跑全量
 
 ## 4. 已知延后（本轮不做，交付时明确写）
 
-- 网关的进程装配（`cmd/mad-gateway` 与桌面 Manager/飞书的接线）由主 Agent 后续完成。
-- 网关/记忆/计划页接真实后端数据；当前为明确的「未接入」禁用态。
+- 独立常驻网关；当前是桌面内嵌形态。
+- 网关/记忆/计划页已经接真实数据，不再是禁用占位。
 - ACP 附件/图片、ACP `plan` / `usage` 的 UI 呈现。
 - 回合时间线折叠、失败恢复三动作（`§6.4`）。
+- 记忆摘要/遗忘曲线、计划编辑表单与 UI 静默配置。
 - Windows 本地 `go test -race`。
 
 ## 5. 风险
 
 - `modernc.org/sqlite` 首次编译体积/耗时明显高于纯手写包；若后续要瘦身可换外部服务，但当前不引入 cgo。
-- 网关只有包级闭环，未进主进程前不可对外承诺「可用」。
+- 网关已进主进程，但评审指出的 Broker 关闭通道 panic 与 `main.go` gw 竞态仍未修；稳定使用前优先处理，详见 `status-2026-11-26.md`。
 - 前端 e2e 依赖 mock 运行时的字段扩展；契约变更时要同步 `e2e/mock-runtime.ts`。
 
 ## 6. `docs/ccc..md` 结论

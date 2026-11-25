@@ -14,6 +14,28 @@ type Event struct {
 	Content   string `json:"content"`        // 正文，FTS 可检索
 	CreatedAt int64  `json:"createdAt"`      // Unix 秒（UTC）
 	Meta      string `json:"meta,omitempty"` // JSON 串，默认 "{}"
+	// DedupeKey 非空时参与部分唯一索引：同一键重复写入被忽略，不新增行。
+	// 空串表示不参与去重。
+	DedupeKey string `json:"dedupeKey,omitempty"`
+}
+
+// Stats 是记忆库的粗粒度统计，供状态卡展示。
+type Stats struct {
+	Events      int   `json:"events"`
+	Notes       int   `json:"notes"`
+	Facts       int   `json:"facts"`
+	LastWriteAt int64 `json:"lastWriteAt"` // 三类记录里最新的写入时间，Unix 秒
+}
+
+// Item 是跨 events / notes / facts 合并检索后的统一视图，工具与 IPC 共用。
+type Item struct {
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"` // message | note | fact
+	Source    string `json:"source"`
+	AgentID   string `json:"agentId,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Snippet   string `json:"snippet"`
+	CreatedAt int64  `json:"createdAt"`
 }
 
 // Note 是一条可覆盖更新的笔记，(source, title) 是自然键，重复 Upsert 不产生重复行。

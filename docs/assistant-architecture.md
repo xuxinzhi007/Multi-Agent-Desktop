@@ -104,20 +104,23 @@
 - **不重复回复**：`agent.message`(assistant) / `agent.channel.reply` 只会发往绑定渠道；
   飞书绑定由 Hub 负责，网关看到非接管渠道只记 `gateway.reply.skipped`。
 
-### 3.2 主动任务
+### 3.2 主动任务（计划）
 
 ```
-scheduler（cron / interval / 一次性）
-  → 创建系统回合（system turn），带任务说明
-  → Manager.Prompt（复用同一队列与审批）
-  → 结果：发到绑定渠道 / 写记忆 / 只落审计
+scheduler.Service（30s 心跳，interval / cron-lite）
+  → 到期的任务：静默 / 限频 / 退避检查
+  → Runner: Manager.Prompt(PromptRequest{AgentID, Text=任务 prompt})
+  → 复用同一 Queue、工具与审批
+  → 回复照常走 agent.message；同时被记忆桥写入 memory.db
 ```
 
 约束：
 
-- 静默时段（默认 23:00–08:00）不发消息，只记录。
-- 每个任务有「上次运行 / 下次运行 / 连续失败次数」，连续失败自动降频。
-- 主动任务默认只读工具；要让 cron 改文件，必须显式配置 `allowWrite`。
+- 静默时段（默认 23:00–08:00）不触发；「立即运行」显式绕过静默与限频。
+- 每个任务持久化「上次运行 / 下次运行 / 连续失败次数 / 最近错误」，失败按 30s 起指数退避（上限 30 分钟）。
+- **不自动批准工具**：仍走 `approval.Center`；审批超时 / 只读模式按 fail-closed 拒绝，计划任务不会绕过审批。
+- 任务只发 prompt，不额外注入系统指令；需要「这是定时任务」的上下文就写进 prompt。
+- 当前只支持 interval 与 5 字段 cron-lite，不支持一次性任务。
 
 ### 3.3 审批
 
@@ -142,8 +145,8 @@ scheduler（cron / interval / 一次性）
 |---|---|---|
 | `Agent` | id、name、role、runtime(native/acp)、acp{command,args}、workDir、permissionMode | `agents.json` |
 | `SessionBinding` | agentId、channel、externalChatId、policy(mentionOnly/allowAll)、createdAt | `gateway-bindings.json`（桌面数据目录） |
-| `MemoryNote` | id、kind(daily/fact/decision)、text、source、confidence、createdAt、expiresAt | `memory/*.jsonl` |
-| `Schedule` | id、cron/interval、agentId、prompt、channel、quietHours、lastRun、failCount | `schedules.json` |
+| `MemoryEvent` / `MemoryNote` / `MemoryFact` | kind、source、agentId、content、title/body/tags、createdAt、dedupeKey | `memory.db`（SQLite + FTS5） |
+| `Schedule` | id、type(interval/cron)、intervalSec/cron、agentId、prompt、channel、enabled、lastRun、nextRun、failures、lastError | `schedules.json`（原子写） |
 | `Approval` | id、agentId、tool、input、options、source(desktop/channel)、requester | 内存 + `audit.jsonl` |
 | `RuntimeEvent` | v、seq、sessionId、turnId、kind、payload | 事件流，不落盘（检查点在 loop/） |
 
@@ -167,15 +170,19 @@ scheduler（cron / interval / 一次性）
 ┌ 桌面 App（main.go）
 │  ├ agent.Manager
 │  ├ approval.Center
+│  ├ memory.Store + Bridge ── memory.db，自动写 agent.message
+│  ├ scheduler.Service ── 30s 心跳，schedules.json
 │  ├ feishu.Hub ── 唯一飞书长连接（保持现状）
 │  └ gateway host ── 127.0.0.1:8780，仅 web，HTTP + SSE
 │       └ gateway-bindings.json（桌面数据目录）
-└ 窗口（MyGo IPC，含网关页）
+└ 窗口（MyGo IPC，含网关 / 记忆 / 计划页）
 ```
 
-- 启动顺序：Manager / 审批中心 / Hub 就绪 → 启动网关 → 创建窗口；退出时先关网关再 `Manager.Shutdown()`。
-- 端口占用只记日志 + `GatewayStatus.listenError`，桌面照常启动。
+- 启动顺序：Manager / 审批中心 / Hub 就绪 → 记忆库 + 调度服务 → 启动网关 → 创建窗口。
+- 退出顺序：停调度心跳 → 记忆 Bridge 排空 + 关库 → 关网关 → `Manager.Shutdown()`。
+- 端口占用只记日志 + `GatewayStatus.listenError`，桌面照常启动；记忆库/调度文件打不开同理，页面显示错误不阻断桌面。
 - 网关不自己连飞书；`MAD_GATEWAY_TOKEN` 为空时仅允许回环访问。
+- 记忆与调度都不起独立进程、不写网关 HTTP API，只走 MyGo IPC。
 - 后续独立常驻形态才用 `systemd`、journald、独立数据目录；本轮不做，也不新增第二条飞书连接。
 
 ---
@@ -194,9 +201,9 @@ scheduler（cron / interval / 一次性）
 │   ├ 频道（Channels）     现有 ChannelView
 │   └ 舰队（Fleet）        现有 FleetView
 ├ 助手
-│   ├ 网关（Gateway）      渠道连接、绑定会话、白名单、最近入站
-│   ├ 记忆（Memory）       每日笔记、事实、来源、删除/固化
-│   └ 计划（Schedules）    提醒、cron、上次/下次运行、失败
+│   ├ 网关（Gateway）      进程/wired/绑定/Agent/待审批/SSE
+│   ├ 记忆（Memory）       状态、搜索、最近记忆、笔记增删
+│   └ 计划（Schedules）    新建 interval/cron、暂停/删除/立即运行、上次/下次/失败
 └ 设置
 ```
 
@@ -206,11 +213,11 @@ scheduler（cron / interval / 一次性）
 |---|---|---|---|---|
 | 会话 | 引导「新建会话 / 接入 ACP」 | 骨架行 | 显示原因 + 重试 | 运行中禁用删除 |
 | 网关 | 「网关未启用」+ 启动说明 | 读取中 | 端口占用 / 装配失败原因 + 重试 | token 非空时只读 |
-| 记忆 | 「还没有记忆」+ 导入入口 | 骨架 | 读取失败 | 删除需确认 |
-| 计划 | 「还没有计划」+ 新建 | 骨架 | 调度器未启动 | 静默时段提示 |
+| 记忆 | 「还没有记忆」+ 搜索/新增笔记 | 骨架 | 库打不开原因 + 重试 | 删除需确认 |
+| 计划 | 「还没有计划」+ 新建 | 骨架 | 调度器未启用 / 文件损坏原因 | 静默时段提示 |
 
-原则：**不允许出现「看起来能点但没反应」的按钮**。没有后端就明确写「未接入」并禁用；
-已经接上的页面（网关）必须显示真实状态，不能用「未接入」占位糊过去。
+原则：**不允许出现「看起来能点但没反应」的按钮**。已经接上的网关 / 记忆 / 计划三页必须显示真实状态，
+不能用「未接入」占位糊过去；尚未接的能力明确禁用并写原因。
 
 ### 6.3 会话行要能看出「谁在执行」
 
@@ -257,8 +264,8 @@ scheduler（cron / interval / 一次性）
 | **M3 网关最小闭环**（已完成内嵌形态） | `internal/gateway` 作为库嵌入桌面：Manager/审批中心/FileBinder/SSE Sender 真装配，仅接管 web；飞书仍走 Hub | 启动桌面 `/api/status` wired 四项为 true；网关页显示真实状态并可审批；端口占用不阻断桌面 |
 | **M3.5 独立常驻**（后续） | `cmd/mad-gateway` 独立进程 + 数据互斥 + 渠道迁入 | 桌面关闭后仍可派活；不与桌面抢写 `agents.json` |
 | **M4 第二渠道**（3–5 天） | Telegram 长轮询 + 白名单 + 去重 | 非飞书渠道跑通同一套隔离与审批 |
-| **M5 记忆**（1 周） | 每日笔记、`memory_search`、定时整理 | 跨会话能召回；有来源与删除 |
-| **M6 计划**（1 周） | cron / 提醒 / 早报 / 静默时段 | 任务可停用；失败降频；不刷屏 |
+| **M5 记忆**（已完成内嵌） | SQLite `memory.db` + 自动写 `agent.message` + `memory_search` + 记忆页 | 跨会话可召回；按 agent 过滤；有来源与删除；重复/限流有测试 |
+| **M6 计划**（已完成内嵌） | 30s 心跳、interval/cron、持久化、暂停/删除/立即运行、静默/限频/退避 | 重启恢复；失败计数与退避；不自动批准；页面可操作 |
 | **M7 沙箱与分发**（按需） | Linux 沙箱、签名、自动更新 | 公网暴露前完成渠道白名单与注入测试 |
 
 ---
@@ -270,13 +277,13 @@ scheduler（cron / interval / 一次性）
 | 会话/队列/审批 | `internal/agent`、`approval`、`audit` | 无（只加字段） |
 | 无头事件 | `Manager` 的 `Emitter` 注入 | `internal/gateway` 总线 + `internal/gateway/host` 把 `emit` 旁路进 SSE |
 | 渠道 | `internal/feishu`（保持为唯一飞书连接） | `internal/gateway/channel/{telegram,web}`（web 为当前接管） |
-| 记忆 | `internal/knowledge`、`LearnText` | `internal/memory`（笔记 + 检索 + 整理任务） |
-| 计划 | 无 | `internal/scheduler` |
+| 记忆 | `LearnText`（会话内摘要，仍保留） | `internal/memory`（SQLite 事件/笔记/事实 + FTS5 + Bridge + `memory_search`） |
+| 计划 | 无 | `internal/scheduler`（Service 持久化 + 心跳 + Runner 接 `Manager.Prompt`） |
 | 技能 | `internal/skill`（SKILL.md） | 安装/更新/权限 |
 | 运行时 | `internal/runtime` | 无（当前三件套） |
 
 **不动的部分**：`src/mygo.ts` 生成链路、设计 token、飞书 Hub 的既有行为。
-`main.go` 只新增网关的启动/关闭与事件旁路，不改成「双模入口」；
+`main.go` 只新增网关 / 记忆 / 调度的启动关闭与事件旁路，不改成「双模入口」；
 独立 `cmd/mad-gateway` 留给 M3.5，不与桌面共用同一数据目录同时跑。
 
 ---
@@ -312,7 +319,8 @@ scheduler（cron / interval / 一次性）
 
 网关内嵌闭环已落地：桌面启动即起 HTTP/SSE，`Session/Approval/Sender/Binder` 四项真装配，
 `web` 入站可派活、审批可在网关页操作；飞书链路保持原样。
-记忆与调度**故意延后**：等网关验收（桌面实机 `/api/status` wired、网关页无「未接入」、飞书不重复回复）之后，
-再单独开线，避免与网关改动抢 `main.go` / `useBackend` / `src/mygo.ts`。
+记忆与调度也已内嵌：`memory.db` + 自动写入 + `memory_search` + 记忆页；30s 心跳 + interval/cron + 暂停/删除/立即运行 + 计划页。
+两者都不自动批准工具，计划任务仍走 `approval.Center`（超时/只读 fail-closed）。
 
-每接一个后端能力，就替换掉一个「未接入」占位，不先写依赖假数据的交互逻辑。
+下一步只剩独立常驻/第二渠道/沙箱。每接一个后端能力，就替换掉一个「未接入」占位，
+不先写依赖假数据的交互逻辑。

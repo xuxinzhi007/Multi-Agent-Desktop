@@ -47,6 +47,13 @@ type Task struct {
 	CronSpec   string        // cron 模式，5 字段
 	Quiet      QuietWindow   // 静默时段，零值表示不静默
 	MaxPerHour int           // 每任务频率上限，0 表示不限
+
+	// 以下字段由上层业务填充，调度内核只透传给 Runner。
+	AgentID   string // 绑定的会话 ID
+	Prompt    string // 触发时发给该会话的提示词
+	Channel   string // 来源频道（可空）
+	Enabled   bool   // 停用的任务不参与触发
+	CreatedAt int64  // 创建时间（Unix 秒）
 }
 
 // Options 调度器全局参数。零值字段会用默认值。
@@ -70,6 +77,8 @@ type taskState struct {
 	failures     int
 	backoffUntil time.Time
 	limit        *limiter
+	lastRunAt    time.Time
+	lastError    string
 }
 
 // Scheduler 心跳调度器。零值不可用，用 New 构造。
@@ -165,6 +174,8 @@ func (s *Scheduler) Tick(ctx context.Context) []Result {
 // evaluate 必须在持锁状态下调用，返回非空 reason 表示跳过。
 func (s *Scheduler) evaluate(st *taskState, now time.Time) string {
 	switch {
+	case !st.task.Enabled:
+		return "disabled"
 	case InQuietWindow(now, st.task.Quiet):
 		return "quiet"
 	case now.Before(st.backoffUntil):
@@ -195,8 +206,10 @@ func (s *Scheduler) run(ctx context.Context, st *taskState, now time.Time) (ran 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	st.lastRunAt = now
 	if runErr != nil {
 		st.failures++
+		st.lastError = runErr.Error()
 		d := BackoffDelay(st.failures, s.opts.BackoffBase, s.opts.BackoffCap)
 		st.backoffUntil = now.Add(d)
 		st.nextRun = now.Add(d)
@@ -204,6 +217,7 @@ func (s *Scheduler) run(ctx context.Context, st *taskState, now time.Time) (ran 
 	}
 
 	st.failures = 0
+	st.lastError = ""
 	st.backoffUntil = time.Time{}
 	st.nextRun = s.nextSchedule(now, st.task)
 	return true, "", nil
@@ -222,4 +236,119 @@ func (s *Scheduler) nextSchedule(now time.Time, t Task) time.Time {
 		return next
 	}
 	return now.Add(time.Hour)
+}
+
+// StateSnapshot 暴露单个任务的运行时状态，供上层持久化与构造视图。
+type StateSnapshot struct {
+	Task      Task
+	NextRun   time.Time
+	Failures  int
+	LastRunAt time.Time
+	LastError string
+}
+
+// Snapshot 返回当前全部任务的状态副本，顺序与注册顺序一致。
+func (s *Scheduler) Snapshot() []StateSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]StateSnapshot, 0, len(s.states))
+	for _, st := range s.states {
+		out = append(out, StateSnapshot{
+			Task:      st.task,
+			NextRun:   st.nextRun,
+			Failures:  st.failures,
+			LastRunAt: st.lastRunAt,
+			LastError: st.lastError,
+		})
+	}
+	return out
+}
+
+// Remove 注销指定任务，返回是否原本存在。
+func (s *Scheduler) Remove(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.byID[id]
+	if !ok {
+		return false
+	}
+	delete(s.byID, id)
+	for i, x := range s.states {
+		if x == st {
+			s.states = append(s.states[:i], s.states[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+// SetEnabled 切换任务启用 / 暂停状态，返回是否存在。
+func (s *Scheduler) SetEnabled(id string, enabled bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.byID[id]
+	if !ok {
+		return false
+	}
+	st.task.Enabled = enabled
+	return true
+}
+
+// SetStats 更新任务的运行时统计（失败次数 / 上次运行 / 最近错误），返回是否存在。
+func (s *Scheduler) SetStats(id string, failures int, lastRunAt time.Time, lastError string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.byID[id]
+	if !ok {
+		return false
+	}
+	st.failures = failures
+	st.lastRunAt = lastRunAt
+	st.lastError = lastError
+	return true
+}
+
+// Restore 从持久化记录恢复一条任务，保留上次运行、失败次数与错误信息。
+// nextRun 为零值时按规则重新计算；退避期不跨进程保留，重启后从 nextRun 继续。
+func (s *Scheduler) Restore(task Task, nextRun time.Time, failures int, lastRunAt time.Time, lastError string) error {
+	if task.ID == "" {
+		return errors.New("scheduler: task ID is empty")
+	}
+	now := s.clock.Now()
+	st := &taskState{
+		task:      task,
+		limit:     newLimiter(task.MaxPerHour, now),
+		failures:  failures,
+		lastRunAt: lastRunAt,
+		lastError: lastError,
+	}
+
+	switch task.Type {
+	case ScheduleInterval:
+		if task.Interval <= 0 {
+			return fmt.Errorf("scheduler: task %q interval must be positive", task.ID)
+		}
+		if nextRun.IsZero() {
+			nextRun = now
+		}
+	case ScheduleCron:
+		if _, err := NextCron(task.CronSpec, now); err != nil {
+			return fmt.Errorf("scheduler: task %q cron: %w", task.ID, err)
+		}
+		if nextRun.IsZero() {
+			nextRun, _ = NextCron(task.CronSpec, now)
+		}
+	default:
+		return fmt.Errorf("scheduler: unknown schedule type %q", task.Type)
+	}
+	st.nextRun = nextRun
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.byID[task.ID]; ok {
+		return fmt.Errorf("scheduler: duplicate task ID %q", task.ID)
+	}
+	s.byID[task.ID] = st
+	s.states = append(s.states, st)
+	return nil
 }

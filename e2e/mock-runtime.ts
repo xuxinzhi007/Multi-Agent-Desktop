@@ -44,6 +44,62 @@ export type GatewayMock = {
   bindings?: GatewayMockBinding[]
 }
 
+export type MemoryMockItem = {
+  id: number
+  kind: string
+  source: string
+  agentId?: string
+  title?: string
+  snippet: string
+  createdAt: number
+}
+
+export type MemoryMockNote = {
+  id: number
+  title: string
+  body: string
+  tags: string
+  source?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type MemoryMock = {
+  /** ok：已接入；disabled：记忆库未启用；error：状态读取失败 / 初始化异常。 */
+  mode?: 'ok' | 'disabled' | 'error'
+  recent?: MemoryMockItem[]
+  notes?: MemoryMockNote[]
+  search?: MemoryMockItem[]
+  /** 非空时 UpsertNote 以该文案 reject。 */
+  upsertError?: string
+}
+
+export type PlanMockTask = {
+  id: string
+  type: string
+  intervalSec: number
+  cron: string
+  agentId: string
+  prompt: string
+  channel?: string
+  enabled: boolean
+  createdAt: number
+  lastRunAt: number
+  nextRunAt: number
+  failures: number
+  lastError?: string
+}
+
+export type PlanMock = {
+  /** ok：运行中；disabled：调度器未启用；error：状态读取失败 / 初始化异常。 */
+  mode?: 'ok' | 'disabled' | 'error'
+  tasks?: PlanMockTask[]
+  /** 非空时 PlanCreate 以该文案 reject，用于校验错误原文上屏。 */
+  createError?: string
+  /** 非空时 PlanRunNow 以该文案 reject。 */
+  actionError?: string
+}
+
 type MockState = {
   agents: unknown[]
   channels: unknown[]
@@ -52,6 +108,8 @@ type MockState = {
   /** 非空时 SaveFeishu 以该文案 reject，用于验证后端错误原文展示。 */
   feishuError?: string
   gateway?: GatewayMock
+  memory?: MemoryMock
+  plan?: PlanMock
 }
 
 const EMPTY_STATE: MockState = { agents: [], channels: [], notes: [], feishu: [] }
@@ -70,6 +128,16 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
     const gwAgents = [...(gwConfig.agents ?? [])]
     const gwApprovals = [...(gwConfig.approvals ?? [])]
     const gwBindings = [...(gwConfig.bindings ?? [])]
+
+    // 记忆 mock 状态：最近 / 笔记 / 搜索副本，增删直接改本地副本。
+    const memConfig = initial.memory ?? { mode: 'disabled' }
+    const memRecent = [...(memConfig.recent ?? [])]
+    const memNotes = [...(memConfig.notes ?? [])]
+    const memSearch = [...(memConfig.search ?? memConfig.recent ?? [])]
+
+    // 计划 mock 状态：任务副本，暂停 / 删除 / 立即运行直接改本地副本。
+    const planConfig = initial.plan ?? { mode: 'disabled' }
+    const planTasks = [...(planConfig.tasks ?? [])]
 
     const handlers: Record<string, (...args: unknown[]) => unknown> = {
       'API.ListAgents': () => initial.agents,
@@ -324,6 +392,167 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.GatewayDecideApproval': (id: unknown) => {
         const idx = gwApprovals.findIndex((a) => a.id === id)
         if (idx >= 0) gwApprovals.splice(idx, 1)
+        return undefined
+      },
+      // 记忆：状态 / 搜索 / 最近 / 笔记增删。未提供 memory 配置时回落 disabled 空态。
+      'API.MemoryStatus': () => {
+        const mode = memConfig.mode ?? 'disabled'
+        if (mode === 'error') {
+          return {
+            available: false,
+            path: '',
+            dbBytes: 0,
+            events: 0,
+            notes: 0,
+            facts: 0,
+            lastWriteAt: 0,
+            error: '打开记忆库失败：disk I/O error',
+          }
+        }
+        if (mode === 'disabled') {
+          return {
+            available: false,
+            path: '',
+            dbBytes: 0,
+            events: 0,
+            notes: 0,
+            facts: 0,
+            lastWriteAt: 0,
+            error: '记忆库未启用',
+          }
+        }
+        return {
+          available: true,
+          path: '/tmp/e2e/memory.db',
+          dbBytes: 2048,
+          events: memRecent.length,
+          notes: memNotes.length,
+          facts: 2,
+          lastWriteAt: Math.floor(Date.now() / 1000),
+          error: '',
+        }
+      },
+      'API.MemorySearch': (query: unknown, agentId: unknown, limit: unknown) => {
+        let list = memSearch
+        if (agentId) list = list.filter((m) => m.agentId === agentId)
+        const q = String(query ?? '').trim().toLowerCase()
+        if (q) {
+          list = list.filter((m) => `${m.title ?? ''} ${m.snippet ?? ''}`.toLowerCase().includes(q))
+        }
+        const n = Number(limit) > 0 ? Number(limit) : 20
+        return list.slice(0, n)
+      },
+      'API.MemoryRecent': (limit: unknown) => {
+        const n = Number(limit) > 0 ? Number(limit) : 20
+        return memRecent.slice(0, n)
+      },
+      'API.MemoryNotes': (limit: unknown) => {
+        const n = Number(limit) > 0 ? Number(limit) : 50
+        return memNotes.slice(0, n)
+      },
+      'API.MemoryUpsertNote': (title: unknown, body: unknown, tags: unknown) => {
+        if (memConfig.upsertError) return Promise.reject(new Error(memConfig.upsertError))
+        const id = memNotes.length ? Math.max(...memNotes.map((n) => n.id)) + 1 : 1
+        const now = Math.floor(Date.now() / 1000)
+        memNotes.push({
+          id,
+          title: String(title ?? ''),
+          body: String(body ?? ''),
+          tags: String(tags ?? ''),
+          source: 'user',
+          createdAt: now,
+          updatedAt: now,
+        })
+        return id
+      },
+      'API.MemoryDeleteNote': (id: unknown) => {
+        const idx = memNotes.findIndex((n) => n.id === Number(id))
+        if (idx < 0) return Promise.reject(new Error('笔记不存在或已被删除'))
+        memNotes.splice(idx, 1)
+        return undefined
+      },
+      // 计划：状态 / 列表 / 新建 / 暂停 / 删除 / 立即运行。未提供 plan 配置时回落 disabled。
+      'API.PlanStatus': () => {
+        const mode = planConfig.mode ?? 'disabled'
+        if (mode === 'error') {
+          return {
+            available: false,
+            running: false,
+            count: 0,
+            enabled: 0,
+            quiet: '23:00–08:00',
+            lastTickAt: 0,
+            error: '调度器初始化失败：schedules.json 损坏',
+          }
+        }
+        if (mode === 'disabled') {
+          return {
+            available: false,
+            running: false,
+            count: 0,
+            enabled: 0,
+            quiet: '23:00–08:00',
+            lastTickAt: 0,
+            error: '调度器未启用',
+          }
+        }
+        return {
+          available: true,
+          running: true,
+          count: planTasks.length,
+          enabled: planTasks.filter((t) => t.enabled).length,
+          quiet: '23:00–08:00',
+          lastTickAt: Math.floor(Date.now() / 1000),
+          error: '',
+        }
+      },
+      'API.PlanList': () => planTasks.map((t) => ({ ...t })),
+      'API.PlanCreate': (req: unknown) => {
+        if (planConfig.createError) return Promise.reject(new Error(planConfig.createError))
+        const r = (req ?? {}) as Partial<PlanMockTask>
+        const now = Math.floor(Date.now() / 1000)
+        const task: PlanMockTask = {
+          id: r.id || `plan-${now}`,
+          type: r.type ?? 'interval',
+          intervalSec: Number(r.intervalSec) || 0,
+          cron: r.cron ?? '',
+          agentId: r.agentId ?? '',
+          prompt: r.prompt ?? '',
+          channel: r.channel ?? '',
+          enabled: r.enabled !== false,
+          createdAt: now,
+          lastRunAt: 0,
+          nextRunAt: 0,
+          failures: 0,
+          lastError: '',
+        }
+        planTasks.push(task)
+        return { ...task }
+      },
+      'API.PlanUpdate': (req: unknown) => {
+        const r = (req ?? {}) as Partial<PlanMockTask>
+        const idx = planTasks.findIndex((t) => t.id === r.id)
+        if (idx < 0) return Promise.reject(new Error('计划不存在'))
+        planTasks[idx] = { ...planTasks[idx], ...r }
+        return { ...planTasks[idx] }
+      },
+      'API.PlanPause': (id: unknown, paused: unknown) => {
+        const t = planTasks.find((x) => x.id === id)
+        if (!t) return Promise.reject(new Error('计划不存在'))
+        t.enabled = !paused
+        return undefined
+      },
+      'API.PlanDelete': (id: unknown) => {
+        const idx = planTasks.findIndex((x) => x.id === id)
+        if (idx < 0) return Promise.reject(new Error('计划不存在'))
+        planTasks.splice(idx, 1)
+        return undefined
+      },
+      'API.PlanRunNow': (id: unknown) => {
+        if (planConfig.actionError) return Promise.reject(new Error(planConfig.actionError))
+        const t = planTasks.find((x) => x.id === id)
+        if (!t) return Promise.reject(new Error('计划不存在'))
+        t.lastRunAt = Math.floor(Date.now() / 1000)
         return undefined
       },
     }

@@ -11,6 +11,7 @@ import (
 
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/loop"
+	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/tool/builtin"
 	"multi-agent-desktop/internal/tool/web"
@@ -171,6 +172,9 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	reg.Register(&setProfileTool{m: m, id: a.ID})
 	reg.Register(&deleteAgentTool{m: m, id: a.ID})
 	reg.Register(web.New())
+	if mem := m.Memory(); mem != nil {
+		reg.Register(memory.NewSearchTool(mem))
+	}
 	if m.Skills() != nil {
 		reg.Register(&readSkillTool{m: m})
 		reg.Register(&saveSkillTool{m: m})

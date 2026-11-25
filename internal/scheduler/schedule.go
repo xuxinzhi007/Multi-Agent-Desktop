@@ -105,6 +105,11 @@ func ParseCron(spec string) (*cronSpec, error) {
 	if c.dow, err = parseField(parts[4], 0, 7); err != nil {
 		return nil, err
 	}
+	// 周日兼容写法 7 归一为 0；该转换只作用于星期字段。
+	if c.dow.values[7] {
+		delete(c.dow.values, 7)
+		c.dow.values[0] = true
+	}
 	return &c, nil
 }
 
@@ -128,9 +133,6 @@ func parseField(token string, min, max int) (cronField, error) {
 		}
 		if n < min || n > max {
 			return f, fmt.Errorf("scheduler: value %d out of [%d,%d]", n, min, max)
-		}
-		if n == 7 { // 周日兼容写法
-			n = 0
 		}
 		f.values[n] = true
 	}

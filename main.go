@@ -26,7 +26,9 @@ import (
 	gwhost "multi-agent-desktop/internal/gateway/host"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/pty"
+	"multi-agent-desktop/internal/scheduler"
 	"multi-agent-desktop/internal/skill"
 	"multi-agent-desktop/internal/workdir"
 )
@@ -1470,6 +1472,16 @@ func emitToWindow(win *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, 
 	}
 }
 
+// planRunner 把计划任务接到现有会话队列；只入队 Prompt，不伪造回复，也不自动批准工具。
+type planRunner struct{ mgr *agent.Manager }
+
+func (r planRunner) Run(ctx context.Context, task *scheduler.Task) error {
+	if task == nil || r.mgr == nil {
+		return errors.New("调度任务无效")
+	}
+	return r.mgr.Prompt(ctx, agent.PromptRequest{AgentID: task.AgentID, Text: task.Prompt})
+}
+
 func main() {
 	cfg := llm.Config{}
 	var mgr *agent.Manager
@@ -1503,12 +1515,24 @@ func main() {
 		if gw != nil {
 			gw.OnAgentEvent(event, data)
 		}
+		// agent.message 旁路进记忆库；异步、去重、限流，不阻塞 emit。
+		if memBridge != nil {
+			memBridge.OnAgentEvent(event, data)
+		}
 		emitToWindow(win, mgr, chMgr, event, data)
 	}
 
 	// 持久化到用户数据目录
 	dataDir := mustDataDir()
 	_ = os.MkdirAll(dataDir, 0o755)
+
+	// 跨会话记忆：单文件 SQLite，生命周期跟随桌面。打不开只降级，不阻断启动。
+	if ms, memErr := memory.Open(filepath.Join(dataDir, "memory.db")); memErr != nil {
+		log.Printf("memory: open failed: %v", memErr)
+	} else {
+		memStore = ms
+		memBridge = memory.NewBridge(ms, memory.BridgeOptions{})
+	}
 
 	// 应用级设置（含 API Key）：独立配置文件，0600 权限，
 	// 与 agents.json 的历史分离，避免每次对话都重写凭据。
@@ -1541,6 +1565,21 @@ func main() {
 
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
+	mgr.SetMemory(memStore)
+
+	// 计划调度：任务持久化在桌面数据目录，30s 心跳；初始化失败只降级，不阻断桌面。
+	if svc, planErr := scheduler.NewService(scheduler.Config{
+		Path: filepath.Join(dataDir, "schedules.json"),
+		AgentExists: func(id string) bool {
+			_, ok := mgr.Get(id)
+			return ok
+		},
+		Runner: planRunner{mgr: mgr},
+	}); planErr != nil {
+		log.Printf("scheduler: init failed: %v", planErr)
+	} else {
+		planSvc = svc
+	}
 	// 全局并发上限：每个会话跑起来就是一条模型流 + 一棵可能的工作树，
 	// 不限量时一次 delegate 就能把机器拖死。测试不调这个，保持不限。
 	mgr.SetMaxConcurrent(3)
@@ -1662,6 +1701,11 @@ func main() {
 	}
 	api.gw = gw
 
+	// 心跳在窗口创建前启动；任务只入队 Prompt，仍走现有审批与队列。
+	if planSvc != nil {
+		planSvc.Start(context.Background(), 30*time.Second)
+	}
+
 	api.desk = browser.NewDesk()
 	api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
 	browser.SetDesk(api.desk)
@@ -1671,6 +1715,16 @@ func main() {
 	mygo.App.OnQuit(func() {
 		if api.bot != nil {
 			api.bot.Sync(nil)
+		}
+		// 先停调度心跳，再排空记忆写入并关库，再关网关与会话内核。均幂等。
+		if planSvc != nil {
+			planSvc.Stop()
+		}
+		if memBridge != nil {
+			memBridge.Close()
+		}
+		if memStore != nil {
+			_ = memStore.Close()
 		}
 		// 先关网关（停止接收外部入站），再停会话内核。Close 幂等。
 		if gw != nil {

@@ -76,6 +76,7 @@ func TestQuietWindowSkipsThenRuns(t *testing.T) {
 		Type:     ScheduleInterval,
 		Interval: time.Hour,
 		Quiet:    QuietWindow{StartHour: 22, EndHour: 8, Loc: loc},
+		Enabled:  true,
 	})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
@@ -124,6 +125,7 @@ func TestPerTaskRateLimit(t *testing.T) {
 		Type:       ScheduleInterval,
 		Interval:   time.Hour,
 		MaxPerHour: 1,
+		Enabled:    true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -160,10 +162,10 @@ func TestGlobalRateLimit(t *testing.T) {
 	runner := &fakeRunner{}
 	sch := New(clk, runner, Options{GlobalMaxPerHour: 1})
 
-	if err := sch.Add(Task{ID: "a", Type: ScheduleInterval, Interval: time.Hour}); err != nil {
+	if err := sch.Add(Task{ID: "a", Type: ScheduleInterval, Interval: time.Hour, Enabled: true}); err != nil {
 		t.Fatalf("Add a: %v", err)
 	}
-	if err := sch.Add(Task{ID: "b", Type: ScheduleInterval, Interval: time.Hour}); err != nil {
+	if err := sch.Add(Task{ID: "b", Type: ScheduleInterval, Interval: time.Hour, Enabled: true}); err != nil {
 		t.Fatalf("Add b: %v", err)
 	}
 
@@ -191,7 +193,7 @@ func TestBackoffThenRecover(t *testing.T) {
 	runner := &fakeRunner{failNext: 2, err: errors.New("boom")}
 	sch := New(clk, runner, Options{BackoffBase: 30 * time.Second, BackoffCap: 30 * time.Minute})
 
-	if err := sch.Add(Task{ID: "flaky", Type: ScheduleInterval, Interval: time.Hour}); err != nil {
+	if err := sch.Add(Task{ID: "flaky", Type: ScheduleInterval, Interval: time.Hour, Enabled: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -263,7 +265,7 @@ func TestCronCrossDay(t *testing.T) {
 	clk := &fakeClock{t: after}
 	runner := &fakeRunner{}
 	sch := New(clk, runner, Options{})
-	if err := sch.Add(Task{ID: "morning", Type: ScheduleCron, CronSpec: "30 7 * * *"}); err != nil {
+	if err := sch.Add(Task{ID: "morning", Type: ScheduleCron, CronSpec: "30 7 * * *", Enabled: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 

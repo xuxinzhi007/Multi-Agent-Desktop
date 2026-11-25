@@ -14,6 +14,7 @@ import (
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/workdir"
 	"multi-agent-desktop/internal/worktree"
 )
@@ -145,6 +146,8 @@ type Manager struct {
 	imageDir  string // 图片字节目录，与 json 分开
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
+	// memory 是跨会话长期记忆库；nil 表示未启用（测试/无数据目录）。
+	memory    *memory.Store
 	skills    SkillStore
 	feed      Feed
 	channels  ChannelRoster
@@ -189,6 +192,20 @@ func (m *Manager) SetKnowledge(k KnowledgeProvider) {
 	m.mu.Lock()
 	m.knowledge = k
 	m.mu.Unlock()
+}
+
+// SetMemory 注入长期记忆库；传 nil 表示不启用记忆检索。
+func (m *Manager) SetMemory(s *memory.Store) {
+	m.mu.Lock()
+	m.memory = s
+	m.mu.Unlock()
+}
+
+// Memory 返回记忆库，没装时为 nil。
+func (m *Manager) Memory() *memory.Store {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.memory
 }
 
 // SetApprovals 注入审批中心。nil 表示写操作不审批。
