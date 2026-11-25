@@ -53,6 +53,12 @@ type API struct {
 	// 图片下载结果缓存一小会儿，避免界面反复轮询重复下载。
 	mediaMu sync.Mutex
 	media   map[string]mediaBlob
+	// feishuPick 记每个飞书会话上次由哪个 agent 处理。
+	// 连发消息时复用同一个执行体，否则历史会散在不同 agent 上，用户看到的就是接不上。
+	feishuPick struct {
+		mu     sync.Mutex
+		byChat map[string]string
+	}
 }
 
 // mediaBlob 是一条消息里的图片转成的 data URL。
@@ -249,8 +255,10 @@ type AgentView struct {
 	QueueLen  int           `json:"queueLen"`
 	Backend   string        `json:"backend"`
 	WorkDir   string        `json:"workDir"`
-	LLM       *LLMConfig    `json:"llm,omitempty"`
-	Knowledge []string      `json:"knowledge,omitempty"`
+	// ExtraDirs 是附加目录：文件工具可读写，shell 的 cwd 仍是 WorkDir。
+	ExtraDirs []string   `json:"extraDirs,omitempty"`
+	LLM       *LLMConfig `json:"llm,omitempty"`
+	Knowledge []string   `json:"knowledge,omitempty"`
 	// BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
 
@@ -300,6 +308,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		QueueLen:       s.QueueLen,
 		Backend:        s.Backend,
 		WorkDir:        s.WorkDir,
+		ExtraDirs:      append([]string(nil), s.ExtraDirs...),
 		LLM:            llm.RedactedPtr(s.LLMCfg),
 		Knowledge:      s.Knowledge,
 		BlockedReason:  s.BlockedReason,
@@ -351,6 +360,15 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.Status, _ = m["status"].(string)
 	v.Backend, _ = m["backend"].(string)
 	v.WorkDir, _ = m["workDir"].(string)
+	if raw, ok := m["extraDirs"].([]string); ok {
+		v.ExtraDirs = append([]string(nil), raw...)
+	} else if raw, ok := m["extraDirs"].([]any); ok {
+		for _, x := range raw {
+			if str, ok := x.(string); ok {
+				v.ExtraDirs = append(v.ExtraDirs, str)
+			}
+		}
+	}
 	v.Worktree, _ = m["worktree"].(string)
 	v.WorktreeBranch, _ = m["worktreeBranch"].(string)
 	if ids, ok := m["knowledge"].([]string); ok {
@@ -413,6 +431,15 @@ func (s *API) ListAgents() []AgentView {
 
 // AgentMessages 返回这个会话最近的一页。磁盘上的历史不在这里截断。
 func (s *API) AgentMessages(id string, limit int) []llm.Message {
+	return s.AgentMessagesBefore(id, -1, limit)
+}
+
+// AgentMessagesBefore 返回 before 位置之前的一页，用于向上翻更多历史。
+//
+// before 是绝对下标（不是倒数偏移），前端拿当前第一条的 index 传回来。
+// before < 0 表示要最新的一页。
+// 只发 tail 时用户永远只能看到最近 40 条，更早的对话就永久看不到了。
+func (s *API) AgentMessagesBefore(id string, before, limit int) []llm.Message {
 	if s.mgr == nil {
 		return []llm.Message{}
 	}
@@ -420,7 +447,22 @@ func (s *API) AgentMessages(id string, limit int) []llm.Message {
 	if !ok {
 		return []llm.Message{}
 	}
-	return messageTail(a.Snapshot().Messages, limit)
+	msgs := a.Snapshot().Messages
+	if limit <= 0 || limit > 80 {
+		limit = agentMessagePage
+	}
+	end := len(msgs)
+	if before >= 0 && before < end {
+		end = before
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	if start >= end {
+		return []llm.Message{}
+	}
+	return append([]llm.Message(nil), msgs[start:end]...)
 }
 
 const agentMessagePage = 40
@@ -653,11 +695,27 @@ func (s *API) decideFeishu(id string, allow, remember bool) error {
 	return s.mgr.Approvals().Decide(id, allow, remember, "")
 }
 
-func (s *API) claimFeishu(parent string, busy map[string]bool) (string, error) {
+func (s *API) claimFeishu(parent, chat string, busy map[string]bool) (string, error) {
 	if s.mgr == nil {
 		return "", fmt.Errorf("会话还没准备好")
 	}
-	return s.mgr.Assist(parent, busy)
+	s.feishuPick.mu.Lock()
+	prefer := s.feishuPick.byChat[chat]
+	s.feishuPick.mu.Unlock()
+
+	got, err := s.mgr.AssistPreferring(parent, prefer, busy)
+	if err != nil {
+		return "", err
+	}
+	if chat != "" && got != "" {
+		s.feishuPick.mu.Lock()
+		if s.feishuPick.byChat == nil {
+			s.feishuPick.byChat = map[string]string{}
+		}
+		s.feishuPick.byChat[chat] = got
+		s.feishuPick.mu.Unlock()
+	}
+	return got, nil
 }
 
 func (s *API) runFeishu(ctx context.Context, req feishu.RunRequest) (string, error) {
@@ -818,7 +876,6 @@ func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text
 	return nil
 }
 
-// isRelevantToRole 判断消息是否与角色相关。
 // CreateSupervisor 新建一个自动拆任务的会话，并把目标立刻派进去。
 //
 // 它和普通 agent 的区别只在 backend：这一轮由 executeSupervisor 接手，
@@ -3162,6 +3219,9 @@ func main() {
 
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
+	// 全局并发上限：每个会话跑起来就是一条模型流 + 一棵可能的工作树，
+	// 不限量时一次 delegate 就能把机器拖死。测试不调这个，保持不限。
+	mgr.SetMaxConcurrent(3)
 	// 写操作审批与审计：生产路径必须有，测试里不装就是放行。
 	mgr.SetApprovals(approval.New(func(event string, data any) { emit(event, data) }))
 	mgr.SetAudit(audit.Open(filepath.Join(dataDir, "audit.jsonl")))
@@ -3611,4 +3671,22 @@ func (s *API) SetAgentPermission(agentID, mode string) (string, error) {
 		}
 	}
 	return string(m), nil
+}
+
+// SetAgentExtraDirs 换这个会话的附加目录。
+//
+// 用来「改这个仓库，同时读隔壁那个仓库」：文件工具能读写附加目录，
+// bash 的 cwd 仍是主工作目录。校验和主目录一样严（不能是主目录/桌面/文稿/下载）。
+// 附加目录只给文件访问，不从那边加载技能或知识——边界放宽的是文件，不是配置。
+func (s *API) SetAgentExtraDirs(agentID string, dirs []string) (AgentView, error) {
+	if err := s.mgr.SetAgentExtraDirs(agentID, dirs); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(agentID)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", agentID)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, catalogView(v))
+	return v, nil
 }

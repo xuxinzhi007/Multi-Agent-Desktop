@@ -14,6 +14,7 @@ import (
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/workdir"
 	"multi-agent-desktop/internal/worktree"
 )
 
@@ -39,11 +40,14 @@ type Agent struct {
 	Status    Status        `json:"status"`
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
-	QueueLen  int           `json:"queueLen"`            // 排队中的消息数
-	Backend   string        `json:"backend"`             // loop / mock。旧的 claude / codex 读入后按 loop 跑
-	WorkDir   string        `json:"workDir,omitempty"`   // 会话级工作目录，空则回落 Manager.workDir
-	LLMCfg    *llm.Config   `json:"llmCfg,omitempty"`    // 会话级模型配置，nil 则回落 Manager.llmCfg
-	Knowledge []string      `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
+	QueueLen  int           `json:"queueLen"`          // 排队中的消息数
+	Backend   string        `json:"backend"`           // loop / mock。旧的 claude / codex 读入后按 loop 跑
+	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
+	// ExtraDirs 是附加目录：文件工具能读写它们，bash 的 cwd 仍是 WorkDir。
+	// 用来「改这个仓库，同时读隔壁那个仓库」，不必换会话或搬目录。
+	ExtraDirs []string    `json:"extraDirs,omitempty"`
+	LLMCfg    *llm.Config `json:"llmCfg,omitempty"`    // 会话级模型配置，nil 则回落 Manager.llmCfg
+	Knowledge []string    `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
 	// BlockedReason 是「在等人」的原因，仅 Status == blocked 时有值
 	BlockedReason string `json:"blockedReason,omitempty"`
 	// ParentID 是创建它的会话。空表示用户自己建的，侧栏里和别人平级。
@@ -137,6 +141,9 @@ type Manager struct {
 	waiting map[string]string
 	// routed 记录转发出去、还没结束的目标。
 	routed map[string][]string
+	// running 是全局并发执行的名额。同时跑多个 agent 会同时拉起多个模型流，
+	// 每个还各开一棵工作树，不限量会把用户机器拖死。nil 表示不限（测试）。
+	running chan struct{}
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
@@ -272,6 +279,7 @@ func (m *Manager) Save() error {
 				Messages:       append([]llm.Message(nil), a.Messages...),
 				Backend:        a.Backend,
 				WorkDir:        a.WorkDir,
+				ExtraDirs:      append([]string(nil), a.ExtraDirs...),
 				LLMCfg:         a.LLMCfg,
 				ParentID:       a.ParentID,
 				Depth:          a.Depth,
@@ -418,6 +426,7 @@ func (m *Manager) Load() error {
 			Messages:       saved.Messages,
 			Backend:        canonicalBackend(saved.Backend),
 			WorkDir:        saved.WorkDir,
+			ExtraDirs:      append([]string(nil), saved.ExtraDirs...),
 			LLMCfg:         saved.LLMCfg,
 			ParentID:       saved.ParentID,
 			Depth:          saved.Depth,
@@ -533,6 +542,38 @@ func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	a.mu.Unlock()
 	m.goSave()
 	return nil
+}
+
+// SetAgentExtraDirs 换这个会话的附加目录。
+//
+// 附加目录只给文件读写，不改 shell 的 cwd——命令在哪跑必须是确定的。
+// 校验和主目录一样严：不能是主目录/桌面/文稿/下载，必须真实存在。
+func (m *Manager) SetAgentExtraDirs(id string, dirs []string) error {
+	a, ok := m.Get(id)
+	if !ok {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	main := a.EffectiveWorkDir(m)
+	if main == "" {
+		return fmt.Errorf("先给这个会话选一个主工作目录，再加附加目录")
+	}
+	roots, err := workdir.NewRoots(main, dirs...)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.ExtraDirs = append([]string(nil), roots[1:]...)
+	a.mu.Unlock()
+	m.emit("agent.config", a.viewMap())
+	m.goSave()
+	return nil
+}
+
+// EffectiveExtraDirs 是这个会话当前的附加目录。
+func (a *Agent) EffectiveExtraDirs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.ExtraDirs...)
 }
 
 // SetAgentLLM 设置会话级模型配置（不影响其他会话）。
@@ -729,6 +770,20 @@ const assistCap = 3
 // 没有空闲助手时新建一个，沿用主会话的模型和工作目录。超过 assistCap 个助手则返回 ErrAssistBusy。
 // busy 是飞书已经派出去、还没还的会话。
 func (m *Manager) Assist(parentID string, busy map[string]bool) (string, error) {
+	return m.assistFor(parentID, "", busy)
+}
+
+// AssistPreferring 选一个会话答飞书，优先用上次答同一个聊天的那个。
+//
+// 为什么需要：飞书里连发两条时，第一条还在跑，第二条若落到另一个助手，
+// 两者各存各的 Messages，用户看到的就是「接不上上一条」。
+// 复用同一个执行体（让它排队）才能保住上下文。
+// prefer 为空退化成普通 Assist。
+func (m *Manager) AssistPreferring(parentID, prefer string, busy map[string]bool) (string, error) {
+	return m.assistFor(parentID, prefer, busy)
+}
+
+func (m *Manager) assistFor(parentID, prefer string, busy map[string]bool) (string, error) {
 	if m == nil {
 		return "", fmt.Errorf("会话还没准备好")
 	}
@@ -741,6 +796,16 @@ func (m *Manager) Assist(parentID string, busy map[string]bool) (string, error) 
 	}
 	if agentFree(parent.Snapshot(), busy) {
 		return parentID, nil
+	}
+	// 上次就是这个助手答的，且它还活着：接着用。
+	// 即使它在忙也交回去，让它排队，不换人——换人就丢上下文。
+	if prefer != "" && prefer != parentID {
+		for _, a := range m.List() {
+			sn := a.Snapshot()
+			if sn.ID == prefer && (sn.ParentID == parentID || sn.ID == parentID) {
+				return sn.ID, nil
+			}
+		}
 	}
 	var helpers int
 	for _, a := range m.List() {
@@ -1228,12 +1293,78 @@ func (a *Agent) workerLoop(m *Manager) {
 		case <-a.done:
 			return
 		case req := <-a.queue:
+			if !m.acquireSlot(a, req) {
+				a.settle(m, req)
+				continue
+			}
 			a.runSafely(m, req)
+			m.releaseSlot()
 			a.settle(m, req)
 			m.dropForward(a.ID)
 			for a.playLater(m) {
 			}
 		}
+	}
+}
+
+// maxConcurrentRuns 是全局同时执行的会话数上限。
+//
+// 为什么需要它：每个会话跑起来就是一条模型流 + 一棵可能的 git 工作树。
+// 6 个子会话被一次 delegate 拉起来时，机器上会同时有 6 条流在跑，
+// 内存和 CPU 都被抽干，用户看到的是「整个应用卡死」。
+// 定 3：留出用户主会话 + 一个子任务 + 余量的余步。
+const maxConcurrentRuns = 3
+
+// SetMaxConcurrent 改全局并发上限。n <= 0 表示不限（测试用）。
+func (m *Manager) SetMaxConcurrent(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n <= 0 {
+		m.running = nil
+		return
+	}
+	m.running = make(chan struct{}, n)
+}
+
+// acquireSlot 拿一个全局执行名额。名额满时在队列里等，不影响用户看已有回复。
+// ctx 取消（用户点了停止）时不进入执行，返回 false，调用方不该再释放。
+func (m *Manager) acquireSlot(a *Agent, req PromptRequest) bool {
+	m.mu.RLock()
+	slots := m.running
+	m.mu.RUnlock()
+	if slots == nil {
+		return true
+	}
+	parent := req.Ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	select {
+	case slots <- struct{}{}:
+		// 名额在 runSafely 结束后由 releaseSlot 归还。
+		return true
+	case <-parent.Done():
+		a.mu.Lock()
+		a.Status = StatusIdle
+		a.BusyPlace = ""
+		a.mu.Unlock()
+		complete(req, "", "已停止")
+		return false
+	}
+}
+
+// releaseSlot 归还一个执行名额。没拿过（不限并发）时是空操作。
+// 非阻塞发送：并发上限被中途调小时，多出来的名额直接丢掉，不会把 worker 卡死。
+func (m *Manager) releaseSlot() {
+	m.mu.RLock()
+	slots := m.running
+	m.mu.RUnlock()
+	if slots == nil {
+		return
+	}
+	select {
+	case <-slots:
+	default:
 	}
 }
 
@@ -1712,6 +1843,7 @@ func (a *Agent) Snapshot() *Agent {
 		QueueLen:       a.QueueLen,
 		Backend:        a.Backend,
 		WorkDir:        a.WorkDir,
+		ExtraDirs:      append([]string(nil), a.ExtraDirs...),
 		LLMCfg:         a.LLMCfg,
 		ParentID:       a.ParentID,
 		Depth:          a.Depth,
@@ -1753,6 +1885,7 @@ func (a *Agent) viewMap() map[string]any {
 		"queueLen":       a.QueueLen,
 		"backend":        a.Backend,
 		"workDir":        a.WorkDir,
+		"extraDirs":      append([]string(nil), a.ExtraDirs...),
 		"worktree":       a.Worktree,
 		"worktreeBranch": a.WorktreeBranch,
 		"parentId":       a.ParentID,

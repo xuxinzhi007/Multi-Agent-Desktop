@@ -35,8 +35,9 @@ type Hooks struct {
 	// React 给用户刚发的那条消息加表情。处理还没结束时先让对方看见标记。
 	React func(ctx context.Context, appID, secret, messageID, emoji string) error
 	// Claim 给这条消息挑一个会话。busy 是还在答飞书的会话。
+	// chat 是飞书会话 ID，用来优先复用上次答同一个会话的执行体（保住上下文）。
 	// 主会话空闲时返回它。都在忙时返回内容为 busy 的错误，调用方等一轮结束再要。
-	Claim func(parentID string, busy map[string]bool) (string, error)
+	Claim func(parentID, chat string, busy map[string]bool) (string, error)
 	// Roster 是本机可以接手的会话。/status 和 /use 用它。
 	Roster func() []Named
 	// Actions 回复一张带按钮的卡片。批准写操作时用。
@@ -446,8 +447,12 @@ func (s *Service) dispatch(t Turn) {
 		return
 	}
 	text := taskLead + joinPieces(pieces)
-	if t.ChatType == "group" && s.log != nil && t.ChatID != "" {
-		if framed := s.log.Prompt(t.ChatID, t.ChatName, !cfg.MentionOnly); framed != "" {
+	// 群和单聊都要带上本会话的对话记录。
+	// 不带的话，连发两条时模型看不到上一条，用户会觉得「接不上」。
+	// 单聊用 join=false 的措辞：那里不是「群里接话」，是接着同一段对话。
+	if s.log != nil && t.ChatID != "" {
+		join := t.ChatType == "group" && !cfg.MentionOnly
+		if framed := s.log.Prompt(t.ChatID, t.ChatName, join); framed != "" {
 			text = taskLead + framed
 		}
 	}
@@ -1055,7 +1060,7 @@ func (s *Service) reserve(parent, key, chat string, cancel context.CancelFunc) (
 			}
 			id = parent
 		} else {
-			got, err := claim(parent, busy)
+			got, err := claim(parent, chat, busy)
 			if busyClaim(err) || (err == nil && (got == "" || busy[got])) {
 				s.waitEpoch(seen)
 				continue

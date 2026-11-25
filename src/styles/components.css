@@ -2747,3 +2747,46 @@
   line-height: 1.5;
   color: var(--text-disabled);
 }
+
+/* ===== 附加目录 ===== */
+.c-extra {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.c-extra__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+.c-extra__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.c-extra__path {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-extra__add {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.c-extra__add input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  padding: 5px 8px;
+}
+.c-extra__err {
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}

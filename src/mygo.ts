@@ -65,6 +65,8 @@ export interface AgentView {
   queueLen: number;
   backend: string;
   workDir: string;
+  /** ExtraDirs 是附加目录：文件工具可读写，shell 的 cwd 仍是 WorkDir。 */
+  extraDirs?: string[];
   llm?: Config;
   knowledge?: string[];
   /** BlockedReason 是「在等人」的原因，仅 status == "blocked" 时有值 */
@@ -545,6 +547,16 @@ export const API = {
   agentMessages(id: string, limit: number): Promise<Message[]> {
     return call("API.AgentMessages", id, limit);
   },
+  /**
+   * AgentMessagesBefore 返回 before 位置之前的一页，用于向上翻更多历史。
+   *
+   * before 是绝对下标（不是倒数偏移），前端拿当前第一条的 index 传回来。
+   * before < 0 表示要最新的一页。
+   * 只发 tail 时用户永远只能看到最近 40 条，更早的对话就永久看不到了。
+   */
+  agentMessagesBefore(id: string, before: number, limit: number): Promise<Message[]> {
+    return call("API.AgentMessagesBefore", id, before, limit);
+  },
   /** AgentPermission 返回这个会话的权限模式：ask / auto / readonly。 */
   agentPermission(agentID: string): Promise<string> {
     return call("API.AgentPermission", agentID);
@@ -592,7 +604,6 @@ export const API = {
     return call("API.CreateChannel", name, members, policy);
   },
   /**
-   * isRelevantToRole 判断消息是否与角色相关。
    * CreateSupervisor 新建一个自动拆任务的会话，并把目标立刻派进去。
    *
    * 它和普通 agent 的区别只在 backend：这一轮由 executeSupervisor 接手，
@@ -825,6 +836,16 @@ export const API = {
   },
   sendToChannel(channelId: string, fromId: string, fromName: string, text: string): Promise<void> {
     return call("API.SendToChannel", channelId, fromId, fromName, text);
+  },
+  /**
+   * SetAgentExtraDirs 换这个会话的附加目录。
+   *
+   * 用来「改这个仓库，同时读隔壁那个仓库」：文件工具能读写附加目录，
+   * bash 的 cwd 仍是主工作目录。校验和主目录一样严（不能是主目录/桌面/文稿/下载）。
+   * 附加目录只给文件访问，不从那边加载技能或知识——边界放宽的是文件，不是配置。
+   */
+  setAgentExtraDirs(agentID: string, dirs: string[]): Promise<AgentView> {
+    return call("API.SetAgentExtraDirs", agentID, dirs);
   },
   /** SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。 */
   setAgentLLM(agentId: string, cfg: Config): Promise<AgentView> {

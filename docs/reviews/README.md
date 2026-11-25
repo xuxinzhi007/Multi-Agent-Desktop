@@ -3,13 +3,17 @@
 保存对当前代码库的架构评审报告。**评审是提案，不是既定事实** —— 报告里的候选一旦被采纳并落地，
 应把结论移进 `docs/design.md`，这里是历史存档。
 
-| 报告 | 主题 | 状态 |
+> **复核纪律**：报告必须带复核日期。超过一个月未复核的按「待复核」对待，不能继续当决策依据。
+> 最近一次全量复核：**2026-11-25**，结论见 [`review-recheck-2026-11-25.md`](review-recheck-2026-11-25.md)。
+
+| 报告 | 主题 | 状态（2026-11-25 复核） |
 |---|---|---|
-| [`knowledge-architecture-review.html`](knowledge-architecture-review.html) | 知识库存储与联动（scope / 注入路径 / CLI 与频道） | 提案，待决策 |
-| [`chat-architecture-review.html`](chat-architecture-review.html) | 群聊与单聊（投递 fan-out / 共享 transcript / 双 manager 重复） | 提案，待决策 |
-| [`knowledge-plan.md`](knowledge-plan.md) | 知识库修复实施计划（分步 + 验收命令） | 待执行 |
-| [`collaboration-plan.md`](collaboration-plan.md) | 协作/讨论/主动派活 从 0 到 1 实现方案 | 决策已定，待实施 |
-| [`floating-window-review.html`](floating-window-review.html) | 悬浮窗拖动/点击/动画/窗口状态 | 提案，待决策 |
+| [`knowledge-architecture-review.html`](knowledge-architecture-review.html) | 知识库存储与联动 | **6 条中 5 条已落地**，结论已进 `design.md` §5.10；仅存档 |
+| [`chat-architecture-review.html`](chat-architecture-review.html) | 群聊与单聊 | **#1/#2/#3 已落地**（DecideReplies / BuildTranscript / Delivery）；#4 一半、#5 仍成立、#6 已修 |
+| [`knowledge-plan.md`](knowledge-plan.md) | 知识库修复实施计划 | 已执行 |
+| [`collaboration-plan.md`](collaboration-plan.md) | 协作/讨论/主动派活 | 已落地（Route / ask_agent / delegate / Supervisor） |
+| [`floating-window-review.html`](floating-window-review.html) | 悬浮窗拖动/点击/动画 | ⚫ **已废弃**：`src/mini.tsx` / `mini.html` / `API.MiniStatus` 均已移除 |
+| [`review-recheck-2026-11-25.md`](review-recheck-2026-11-25.md) | 三份评审对当前代码的逐条复核 | 当前有效 |
 
 ## 直接读纯文本
 

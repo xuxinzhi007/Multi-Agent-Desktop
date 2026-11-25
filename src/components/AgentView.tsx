@@ -33,6 +33,9 @@ type Props = {
   tokenUsage?: { in: number; out: number; lastIn?: number }
   onPrompt: (text: string, images?: { mime: string; data: string }[]) => void | Promise<unknown>
   onStop: () => void
+  /** 还有更早的历史没加载。为真时在顶部显示「加载更早」。 */
+  hasOlder?: boolean
+  onLoadOlder?: () => void
   onShell: (command: string) => void
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
@@ -49,7 +52,7 @@ type Props = {
   onRoute?: (targetName: string, text: string) => void
   agents?: Agent[]
   /** 会话级配置变更（工作目录 / 模型），只影响当前会话 */
-  onConfig: (patch: { workDir?: string; llm?: Config }) => void
+  onConfig: (patch: { workDir?: string; extraDirs?: string[]; llm?: Config }) => void
   /** 空状态下的一键创建：传角色预设，直接建出可用 agent */
   onQuickCreate?: (presetName: string, role: string) => void
   /** 空状态下打开「新建 Agent」弹窗 */
@@ -711,6 +714,14 @@ export default function AgentView(p: Props) {
           />
         )}
 
+        {p.hasOlder && p.onLoadOlder && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-2) 0' }}>
+            <button className="c-btn c-btn--ghost c-btn--sm" onClick={p.onLoadOlder}>
+              加载更早的对话
+            </button>
+          </div>
+        )}
+
         <VirtualList
           items={transcriptRows(visible, errorAt, p.error?.text)}
           resetKey={agent.id}
@@ -1077,7 +1088,7 @@ function WorkDirChip({
   onConfig,
 }: {
   agent: Agent
-  onConfig: (patch: { workDir?: string; llm?: Config }) => void
+  onConfig: (patch: { workDir?: string; extraDirs?: string[]; llm?: Config }) => void
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
@@ -1153,7 +1164,9 @@ function WorkDirChip({
           >
             <div style={popoverLabel}>这个会话的文件夹</div>
             <DirectoryPicker value={draft} onChange={setDraft} />
-            <div style={hintStyle}>只给这个会话用。读代码、跑命令都在这个目录里。</div>
+            <div style={hintStyle}>只给这个会话用。命令在这个目录里跑。</div>
+
+            <ExtraDirs agent={agent} onConfig={onConfig} />
 
             <div
               style={{
@@ -1214,6 +1227,76 @@ function WorkDirChip({
   )
 }
 
+
+/**
+ * ExtraDirs —— 附加目录：文件工具能读写它们，命令仍在主目录跑。
+ *
+ * 单根时「改这个仓库、同时读隔壁那个仓库」只能报越界，
+ * 用户得换会话或搬目录。参照 Grok Bot 的 workspacePaths 与
+ * Claude Code 的 --add-dir，工作区应当是一组根，主目录仍是 cwd。
+ */
+function ExtraDirs({
+  agent,
+  onConfig,
+}: {
+  agent: Agent
+  onConfig: (patch: { extraDirs?: string[] }) => void
+}) {
+  const list = agent.extraDirs ?? []
+  const [draft, setDraft] = useState('')
+  const [err, setErr] = useState('')
+
+  const add = () => {
+    const dir = draft.trim()
+    if (!dir) return
+    if (list.includes(dir)) {
+      setErr('这个目录已经在列表里')
+      return
+    }
+    setErr('')
+    onConfig({ extraDirs: [...list, dir] })
+    setDraft('')
+  }
+
+  return (
+    <div className="c-extra">
+      <div className="c-extra__label">附加目录</div>
+      <div style={hintStyle}>
+        文件工具可以读写这些目录，命令仍在主目录跑。适合「改这个仓库、同时读隔壁那个」。
+      </div>
+      {list.map((d) => (
+        <div key={d} className="c-extra__row">
+          <span className="mono c-extra__path" title={d}>
+            {d}
+          </span>
+          <button
+            type="button"
+            className="c-icon-btn c-icon-btn--danger"
+            aria-label={`移除附加目录 ${d}`}
+            onClick={() => onConfig({ extraDirs: list.filter((x) => x !== d) })}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div className="c-extra__add">
+        <input
+          aria-label="附加目录路径"
+          placeholder="/path/to/other-project"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') add()
+          }}
+        />
+        <button type="button" className="c-btn c-btn--ghost c-btn--sm" disabled={!draft.trim()} onClick={add}>
+          添加
+        </button>
+      </div>
+      {err && <div className="c-extra__err">{err}</div>}
+    </div>
+  )
+}
 
 function chipStyle(active: boolean): React.CSSProperties {
   return {

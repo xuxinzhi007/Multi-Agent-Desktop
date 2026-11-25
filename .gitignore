@@ -23,3 +23,14 @@ build/
 # Playwright
 test-results/
 playwright-report/
+
+# 用户数据与运行产物：绝不进版本控制
+# .kb-backup 里是真实会话历史备份；.loop 是循环检查点。
+# 备份文件今天没带 Key，下次就可能带上 config.json 的明文 Key。
+.kb-backup/
+.loop/
+**/.loop/
+.cache/
+
+# 临时克隆 / 实验目录
+tmp-*/

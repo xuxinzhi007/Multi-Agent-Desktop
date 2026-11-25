@@ -120,6 +120,7 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         }
       },
       'API.SetWorkDir': () => undefined,
+      'API.SetAgentExtraDirs': (id: unknown, dirs: unknown) => ({ id, extraDirs: dirs ?? [], messages: [] }),
       'API.PickDirectory': () => '/tmp/e2e-project',
       'API.ListModels': () => ['mock'],
       'API.ListProviderEndpoints': () => [

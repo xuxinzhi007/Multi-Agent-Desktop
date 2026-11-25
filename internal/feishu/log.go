@@ -451,6 +451,9 @@ func emptyRoom(name string, lines int) bool {
 }
 
 // Prompt 把这个会话最近的对话拼成给模型的正文。
+// promptLineLimit 是塞进 prompt 的最大条数。房间历史本身不截断，只截注入的部分。
+const promptLineLimit = 40
+
 func (l *Log) Prompt(chatID, name string, join bool) string {
 	if l == nil {
 		return ""
@@ -474,7 +477,12 @@ func (l *Log) Prompt(chatID, name string, join bool) string {
 	if join {
 		b.WriteString("」。你在这个群里。不用别人 @ 你，看到新的一句就接话。只根据这些内容回答最后一句，不要讨论本应用怎么实现。\n")
 	} else {
-		b.WriteString("」。别人 @ 了你或回复了你。只根据这些内容回答最后一句，不要讨论本应用怎么实现。\n")
+		b.WriteString("」。这是你和他之前的对话记录。接着上文回答最后一句，不要讨论本应用怎么实现。\n")
+	}
+	// 只带最近一段。房间历史无上限，全塞进去会撑爆上下文窗口，
+	// 把真正有用的指令挤掉。
+	if len(lines) > promptLineLimit {
+		lines = lines[len(lines)-promptLineLimit:]
 	}
 	for _, line := range lines {
 		who := line.From

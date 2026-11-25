@@ -184,6 +184,8 @@ export default function App() {
             return s.send('agent.prompt', { agentId: activeAgent.id, text, images })
           }}
           onStop={() => activeAgent && s.send('agent.stop', { id: activeAgent.id })}
+          hasOlder={activeAgent ? !!s.hasOlder[activeAgent.id] : false}
+          onLoadOlder={() => activeAgent && s.loadOlder(activeAgent.id)}
           onShell={(command) =>
             s.send('shell.run', { agentId: activeAgent?.id ?? '', command })
           }
@@ -203,6 +205,9 @@ export default function App() {
             if (!activeAgent) return
             if (patch.workDir !== undefined) {
               s.send('agent.workDir', { id: activeAgent.id, dir: patch.workDir })
+            }
+            if (patch.extraDirs !== undefined) {
+              API.setAgentExtraDirs(activeAgent.id, patch.extraDirs).catch(() => {})
             }
             if (patch.llm !== undefined) {
               s.send('agent.llm', { id: activeAgent.id, cfg: patch.llm })

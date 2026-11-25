@@ -573,3 +573,64 @@ func TestInternalCreateDoesNotInheritModel(t *testing.T) {
 		t.Fatalf("内部 create 不该继承全局模型：%+v", *a.Snapshot().LLMCfg)
 	}
 }
+
+func TestMaxConcurrentSlotAccounting(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	m.SetMaxConcurrent(2)
+
+	a := m.Create("", "", "r")
+	req := PromptRequest{AgentID: a.ID}
+
+	if !m.acquireSlot(a, req) {
+		t.Fatal("第一个名额该拿到")
+	}
+	if !m.acquireSlot(a, req) {
+		t.Fatal("第二个名额该拿到")
+	}
+	// 名额用尽后，acquireSlot 必须阻塞而不是继续放行。
+	done := make(chan bool, 1)
+	go func() { done <- m.acquireSlot(a, req) }()
+	select {
+	case <-done:
+		t.Fatal("名额已满时不该再拿到")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	m.releaseSlot()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("释放后该拿到名额")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("释放后仍拿不到名额")
+	}
+}
+
+func TestAcquireSlotRespectsCancel(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	m.SetMaxConcurrent(1)
+	a := m.Create("", "", "r")
+	if !m.acquireSlot(a, PromptRequest{AgentID: a.ID}) {
+		t.Fatal("首个名额该拿到")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if m.acquireSlot(a, PromptRequest{AgentID: a.ID, Ctx: ctx}) {
+		t.Fatal("ctx 已取消时不该拿到名额")
+	}
+}
+
+func TestMaxConcurrentZeroMeansUnlimited(t *testing.T) {
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	m.SetMaxConcurrent(0)
+	if m.running != nil {
+		t.Fatal("0 应当表示不限")
+	}
+	a := m.Create("", "", "r")
+	for i := 0; i < 20; i++ {
+		if !m.acquireSlot(a, PromptRequest{AgentID: a.ID}) {
+			t.Fatal("不限并发时永远该拿到名额")
+		}
+	}
+}

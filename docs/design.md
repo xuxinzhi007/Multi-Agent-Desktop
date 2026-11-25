@@ -1,7 +1,7 @@
 # 设计文档：multi-agent-desktop
 
-> 版本：0.4.2
-> 最后更新：2026-11-23
+> 版本：0.5.0
+> 最后更新：2026-11-25
 
 这一份写的是**代码里已经落地的行为**。`docs/reviews/` 里的评审和方案是历史提案，不代表现在能用。
 
@@ -12,9 +12,16 @@
 跨平台（macOS / Windows / Linux）的多 Agent 开发工具桌面程序。
 N 个 AI agent 并行工作，各自独立会话。用户可以看舰队和对话、中途插话、停止、改这个会话的模型和工作目录。
 
-**当前形态**：多 agent 会话 + 进程内工具循环（读写文件、shell、内置浏览器、会话之间派活）+ 写操作审批与命令审计 + 频道 + 知识库 + 飞书多机器人 + git worktree 隔离 + Supervisor 自动拆任务。
+**当前形态**：多 agent 会话 + 进程内工具循环（读写文件、shell、内置浏览器、会话之间派活）
++ 三档权限模式与写操作审批（应用内卡片 **和飞书卡片**）+ 命令审计
++ 多根工作区（主目录 + 附加目录）+ git worktree 隔离
++ 频道（共享 transcript + 投递记录）+ 知识库 + 技能 + 飞书多机器人 + Supervisor 自动拆任务。
 
-**还没做**：检查器里的改动/任务数据、shell 流式输出和手动命令的超时、API Key 进钥匙串、历史改 SQLite、agent id 改 ULID。
+**还没做**：检查器里的改动/任务数据、shell 流式输出和手动命令的超时、API Key 进钥匙串、历史改 SQLite、agent id 改 ULID、打包签名。
+
+**待决策（不是已落地）**：产品定位是否收窄为「飞书里的值班排障 copilot」。
+依据见 `docs/reviews/research-product-value-and-maturity.md`——抓取的 14 个同赛道竞品无一支持飞书，
+而「多会话 + worktree」这一格最接近的开源项目 Crystal 已于 2026-02 废弃。**这条还没定，不要当结论用。**
 
 ---
 
@@ -123,6 +130,24 @@ events.agentCreated.on((agent) => { ... })
 - MyGo 检测系统主题变化，通过 `mygo:theme` 事件推给前端
 - 前端监听并更新 `data-theme`
 
+### 3.2b 字号刻度与 token 校验（已落地）
+
+字号刻度：`--text-xs: 11px` / `sm: 12` / `base: 13` / `md: 14` / `lg: 16` / `xl: 20`。
+**桌面正文不低于 13px，次要信息不低于 11px。** 旧刻度（10.5 / 11.5 / 12.5）在 macOS 上偏小，
+是「界面看着廉价」的主因；CSS 里 20 处、TSX 里 35 处硬编码小字号已全部收到 token。
+
+**token 必须校验存在性**。曾经有 7 个被引用的 token 从未定义，其中 `--accent` / `--accent-soft`
+让用户气泡的 `color-mix` 整条声明静默失效——气泡一直是全透明的，而 e2e 把这个 bug 断言成了「设计规范」。
+现在 `--accent` / `--accent-soft` 是 `--accent-primary` / `--accent-dim` 的别名。
+
+> 教训：**CSS 引用不存在的变量不会报错，只会静默变成透明或默认值。**
+> 加/改 token 后跑一遍「已定义 vs 被引用」的差集检查。
+
+亮色氛围层必须克制：网格 `0.016`、光斑 `0.16`、不用暗角。
+三样叠加会把白底染成蓝紫渐变，这是「发灰、发脏」的来源。
+
+阅读宽度：单聊、频道、飞书三个视图统一 `.c-transcript` 的 820px。
+
 ### 3.3 组件规范
 
 - **前缀**：`c-`（component），如 `c-btn`、`c-badge`
@@ -163,6 +188,8 @@ Go Event → useBackend reducer → React state → 组件渲染
 | `agent.tool` | Go → 主窗口 | 工具开始 / 结束 |
 | `agent.loop` | Go → 主窗口 | 循环阶段、预算、上下文占用 |
 | `agent.stopped` | Go → 主窗口 | 停止原因 |
+| `tool.approval` | Go → 前端 **和飞书** | 一张待批卡；两侧同时出，任一侧决定后另一侧收起 |
+| `tool.approval.done` | Go → 前端 **和飞书** | 这张卡已有结果，收起按钮 |
 | `agent.config` | Go → 前端 | 会话级模型或目录变更，带完整 `AgentView` |
 | `tool.start` | Go → 主窗口 | 旧的工具开始事件 |
 | `shell.start` / `shell.result` | Go → 主窗口 | 手动执行的命令，整段结果 |
@@ -201,18 +228,28 @@ running / queued --BlockAgent--> blocked
 
 | 工具 | 作用 |
 |---|---|
-| `read_file` / `write_file` / `edit_file` | 只碰工作目录里面的文件 |
+| `read_file` / `write_file` / `edit_file` | 只碰主目录 + 附加目录里面的文件（见 5.5b） |
 | `bash` | 不读登录脚本。默认 60 秒，超时杀进程组，输出有上限，整段返回 |
 | `web` | 操作内置浏览器。先看控件，再用编号或页面上的文字。`steps` 最多 12 步，中间步骤不把页面交回 |
 | `list_agents` / `ask_agent` / `create_agent` / `delete_agent` | 看会话、等对方答完、建子会话、删自己或自己建的子会话 |
+| `delegate` | 把当前任务切成 1-3 块并行做，各建子会话在独立工作树里，汇总回父会话 |
 | `list_notes` / `save_note` | 读知识库、写一条并挂到当前会话 |
+| `read_skill` / `save_skill` | 取技能全文、把走通的流程沉淀成技能（见 5.9c） |
 | `set_profile` | 改自己的名字、简介或工作目录 |
+
+工具表按会话实际情况裁剪：到 `maxDelegateDepth` 时 `delegate` / `create_agent` **不出现在表里**，
+而不是调用时报错——省掉一轮白跑的模型调用。没有技能库时 `read_skill` / `save_skill` 同样不装。
 
 `mock` backend 仍走 `executeMock`，不调用这些工具。loop 配上 mock 或空模型，会直接报「这个会话还没有模型」。没有工作目录，或目录是主目录、盘符根、桌面、文稿、下载、图片、影片、音乐本身，这一轮报错。
 
+防打转分两种：**参数不合 schema** 的失败标 `Meta.BadArgs`，单独计数、额度翻倍（写法问题，改一下就能继续）；
+真正的执行失败连续 3 轮无进展才终止。终止理由带上最后一次真实错误，不再是一句无信息量的「all failed」。
+
 预算默认 24 轮、64 次工具、10 分钟墙钟。上下文超过窗口时先压缩，保留系统提示和最近大约 8000 token。同一会话的检查点在 `<dataDir>/loop/runs`，本会话消息能接上时可以续跑；频道里的这一轮不续跑。
 
-写操作在 `Registry.Invoke` 里分两步：先调工具的 `Preview`（标题、命令、diff），策略拦截的直接以 `denied` 结束；再由审批中心挂起，等界面上的卡片决定。允许一次只放行这一次，本会话允许按「会话 + 工具」记忆，删会话即失效。等待上限 5 分钟，ctx 取消（按停止）也会收起卡片。
+写操作在 `Registry.Invoke` 里分两步：先调工具的 `Preview`（标题、命令、diff），策略拦截的直接以 `denied` 结束；再由审批中心挂起，等卡片决定。**权限模式先于逐次审批**（见 5.9b）。允许一次只放行这一次，本会话允许按「会话 + 工具」记忆，删会话即失效。等待上限 5 分钟，ctx 取消（按停止）也会收起卡片。
+
+卡片同时出现在应用内和飞书那条对话里，任一侧决定后另一侧收起。
 
 每次有副作用的调用（`bash` / `write_file` / `edit_file`）追加一行到 `<dataDir>/audit.jsonl`，字段包括会话、命令或文件、状态、退出码、耗时。前端只读地拿最近记录，不提供修改入口。危险命令（根目录/系统目录递归删除、格式化、写块设备、关机重启、fork bomb）由 `shellguard` 在执行前拦下，bash 的 `Preview` 与 `Execute` 各检查一次，防绕过注册表直调。
 
@@ -277,7 +314,18 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 | `direct` | 成员都回 |
 | `roundrobin` | 成员都回 |
 
-`DecideReplies` 是唯一判定。绑定层只投递。领域结论（知识蒸馏命中某一块专业）会发到同名频道，下一轮的系统提示里带上别人在这块记下的几条。
+`DecideReplies` 是唯一判定，返回 `Decision{Reply, Reason}`。绑定层只投递，不做判断。
+
+**共享 transcript**：`BuildTranscript(prior, 2000)` 从频道消息构建群上下文，`Render(agentId)` 按成员裁剪后
+作为 system 段进这一轮的 prompt。所以成员**能看见彼此说了什么**，不是各说各话。
+`Agent.Messages` 只留自己的轮次，群上下文每轮现算。
+
+**投递结果是数据不是异常**：每个成员一条 `Delivery{AgentID, Status, Reason}`，
+状态 `delivered` / `skipped` / `failed`，`skipped` 也带原因。`SetDeliveries` 只回填这个字段并重发同 ID 事件，
+前端 `DeliveryRow` 直接显示「谁收到了、谁没收到、为什么」。
+早期版本把失败拼成字符串抛出、前端 `.catch` 吞掉，用户看到「发出去了」其实没人收到——那条已修。
+
+领域结论（知识蒸馏命中某一块专业）会发到同名频道，下一轮的系统提示里带上别人在这块记下的几条。
 
 飞书房间不是这里的频道。见 5.7。
 
@@ -287,6 +335,20 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 - 解耦：agent 包不依赖 MyGo
 - 可测试：单测时换成 channel 收集事件
 - `emitToWindow` 只做「字符串事件 → 强类型 payload → Emit」的转发
+
+### 5.5b 工作区是一组根（已落地）
+
+`Agent.WorkDir` 是主目录，`Agent.ExtraDirs` 是附加目录，合起来由 `workdir.Roots` 校验和解析。
+
+- **文件工具**（read/write/edit）能读写主目录 + 附加目录
+- **bash 的 cwd 仍是主目录**：命令在哪跑必须是确定的，否则相对路径语义会漂
+- 相对路径先在主目录解析，不存在时再逐个附加目录试；绝对路径校验落在任一根内
+- 附加目录同样过 `TooBroad`（不能是主目录/桌面/文稿/下载），且必须真实存在
+- **不从附加目录加载技能或知识**：放宽的是文件访问，不是配置
+
+依据见 `docs/reviews/research-workspace-roots.md`（Grok Bot 的 `workspacePaths`、
+Claude Code 的 `--add-dir` / `permissions.additionalDirectories` 一手证据）。
+单根时行为与改造前完全一致，`roots_test.go` 守住这条。
 
 ### 5.6 会话级配置（单一事实源）
 
@@ -364,6 +426,18 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 
 `browser.Desk` 用名为 workbench 的 `mygo.Session`，单独窗口。`OpenWorkbench` 和 `web` 工具都走它。地址只接受 `http` / `https` / `about`。登录 cookie 留在这个窗口，不使用用户的 Chrome。页面状态记在 `browser-page.json`。窗口关掉后不再留着，下次打开再创建。
 
+**引擎是 WebKit（Safari），不是 Chrome**。只支持 Chrome 的页面特性这里可能没有，工具描述里写明了这一点，遇到要换路径。窗口有菜单：⌘R 刷新、⇧⌘R 强制刷新、⌘[ 后退、⌘] 前进、⇧⌘C 复制地址。
+
+三个已修的卡点：
+
+- **控件编号跟着节点走**，不再每次 snapshot 重排。页面重渲染一次就换掉编号，会让模型反复 snapshot 重试
+- **弹层优先纳入**：下拉/对话框挂在 DOM 末尾，按页面顺序取前 N 个会把选项挤掉。现在 dialog/listbox/menu/popper 优先，上限 100
+- **重定向不再干等**：停止加载且非空白页即算落定（2 秒宽限），把「已跳转到 X」写进返回。
+  原来要求 URL 必须等于目标，站点跳登录页就永远不匹配，每次白等 20 秒
+
+参数兼容：`steps` 里补齐 `timeoutMs / urlContains / mods / dx / dy`；只给 `steps` 不给 `op` 不报缺字段；
+`type` 只写 `text` 时当作输入内容；收下同义动词 `goto/fill/refresh/screenshot/hover/press`。
+
 ### 5.9 学习摘要（已落地）
 
 一轮结束后 `studyHistory` 在后台跑，不挡住已经显示的回复。最近 8 条留在窗口里，更早的按最多 3 步、每步 20 条或大约 3000 token，用一次单独的模型调用收成摘要。有空闲子会话时记它的名字；否则在没有子会话且人数未满时先建「…的学习」。已经有子会话但都不空闲，或人数满了，就用本会话的模型。摘要里出现、原文里没有的路径会被整句丢掉。结果放在下一轮系统提示的开头，并标出覆盖了前多少条。`LearnBusy` 期间界面能看到还在写。
@@ -426,7 +500,17 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 | `openai` / `deepseek` / `claude` | OpenAI 兼容。Claude 需要网关，不是原生接口 |
 | `qoder` | 自己的对话协议。浏览器授权，或 `pt-` Personal Access Token / 访问令牌。默认模型 `DeepSeek-V4-Pro` |
 
-`ListAllModels` 把已保存的连接摊成一份列表。Qoder 用账号拉到的目录，没有目录时用内置表，能思考的模型带推理档位。
+`ListAllModels` 把已保存的连接摊成一份列表。Qoder 用账号拉到的目录，能思考的模型带推理档位。
+
+**Qoder 的两条已修问题**（都属于「用假成功掩盖真失败」）：
+
+1. **检查不能比执行更严**。`QoderAccountStatus` 曾在 `qoderIdentity` 之后再加一道 `apiKey == access` 严格相等。
+   access token 会自动刷新，刷新后 config 里存的旧 key 永远对不上 → **对话能用，连接页却报红**。
+   现在检查复用执行同一套判定；刷新后通过回调把新 Key 回写 `config.json`，根治状态不一致。
+2. **目录拉取失败不再静默退回内置表**。`qoderResolve` 原来吞掉错误返回内置目录，
+   于是「Key 失效」被伪装成「模型列表正常」。现在错误上抛。
+
+界面上的版本号取自 `mygo.App.Version()`（`SystemInfo.Version`），不在前端写死字符串。
 
 `StaleBuild` 只在当前目录像一份源码树（有 `go.mod`，且不是 `/` 或用户主目录）时，把非测试 `.go` 的修改时间和本进程的可执行文件比一下。诊断面板在源码更新、进程还是旧的时提示重启。打包后的进程不做这次扫描，避免碰到桌面和文稿。
 
@@ -464,7 +548,17 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 
 正常结束回到灰色空闲，不留一颗绿色的「完成」点。
 
-**检查器**：工具、知识两个页。工具行来自 `agent.tool`。没有改动页，也没有任务页。
+**检查器**：工具、知识、**能力**三个页。工具行来自 `agent.tool`。没有改动页，也没有任务页。
+能力页列出这个会话此刻的工具与技能，**不可用的直接写明原因**（没文件夹 / 没模型 / 浏览器没开），
+数据来自 `API.AgentCapabilities`，不是前端硬编码清单。
+
+**侧栏**：频道 / 飞书 / 会话三组可折叠，带条数，折叠状态记在本机。
+删除按钮平时不出现，悬停或键盘聚焦到那一行才显形。
+**⌘K 快速跳转**把三类目标放进同一个列表，输入名字直达——条目一多时这比滑动查找便宜得多。
+三类行都是 `role="button"` + `tabIndex`，Enter / Space 可打开。
+
+**删会话要带走它的全部临时状态**：`errors / shellByAgent / reasoning / pace / tokenUsage / stops` 按 id 清，
+`tools` 按 id 过滤。其中 `tools` 是用户可见的——检查器拿的是全部会话的工具行，不清就永远留在那里。
 
 **舰队**：并排看状态、当前任务摘要、最近输出和产出量，不展开完整对话。
 
@@ -478,30 +572,45 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 
 ## 7. 已知限制
 
-| 限制 | 状态 | 说明 |
+| 项 | 状态 | 说明 |
 |---|---|---|
 | 每个会话一条队列，连发不乱序 | ✅ 已落地 | `workerLoop`。跑的过程中本会话新消息会插进下一步 |
-| agent 可以互相派活 | ✅ 已落地 | `Route`、`ask_agent`、`create_agent`；批量拆任务走 Supervisor |
+| agent 可以互相派活 | ✅ 已落地 | `Route`、`ask_agent`、`create_agent`、`delegate`；批量拆任务走 Supervisor |
+| 子会话名额 | ✅ 已修 | `maxChildAgents = 6` **只算模型自建的**；用户自建不占名额也不设上限。旧的总数上限 8 会让派活永久失败 |
+| 空闲子会话复用 | ✅ 已落地 | 名额满且有空闲子会话时改名复用，都在忙才拒绝 |
 | 会话持久化 | ✅ 已落地 | `agents.json`。不是 SQLite |
-| 群聊 | ✅ 已落地 | `discuss` / `direct` / `roundrobin` |
+| 群聊 | ✅ 已落地 | `discuss` / `direct` / `roundrobin`；共享 transcript + 每人一条投递记录 |
 | 会话级模型与目录 | ✅ 已落地 | 输入栏选择，凭据在设置里 |
+| **多根工作区** | ✅ 已落地 | 主目录 + 附加目录；文件工具可读写全部根，bash 的 cwd 仍是主目录。见 5.5b |
 | 知识库 | ✅ 已落地 | 挂上的笔记下一轮注入。创建时不塞全局 top-8 |
-| 读写代码与 shell | ✅ 已落地 | 工作目录内。bash 有 60 秒上限，不流式 |
-| 内置浏览器 | ✅ 已落地 | `web` 工具 + 单独窗口 |
-| 飞书多机器人 | ✅ 已落地 | 长连接、权限、助手认领、房间只读 |
-| 学习摘要 | ✅ 已落地 | 子会话或本会话自己写，不挡当前回复 |
-| 父子会话 | ✅ 已落地 | `ParentID`，侧栏嵌套，总数 8 |
+| **技能** | ✅ 已落地 | `<dataDir>/skills/*.md`；清单进提示、正文按需 `read_skill`。见 5.9c |
+| 读写代码与 shell | ✅ 已落地 | 边界内。bash 有 60 秒上限，不流式 |
+| 内置浏览器 | ✅ 已落地 | `web` 工具 + 单独窗口 + 刷新菜单。**引擎是 WebKit，不是 Chrome** |
+| 飞书多机器人 | ✅ 已落地 | 长连接、双身份、权限自检、助手认领、房间只读 |
+| **飞书审批卡** | ✅ 已落地 | 卡片发在对话里，拒绝/允许一次/本会话允许；任一侧决定后另一侧收起。见 5.9b |
+| **权限模式** | ✅ 已落地 | `ask` / `auto` / `readonly` 三档，输入栏切换。**刻意不做「完整权限」**：工作目录是工具层硬边界 |
+| 学习摘要 | ✅ 已落地 | 子会话或本会话自己写，不挡当前回复。飞书协助与学习助手自身不再建学习子会话 |
+| 父子会话 | ✅ 已落地 | `ParentID`，侧栏嵌套；深度上限 2 |
 | Qoder、StaleBuild、模型选择 | ✅ 已落地 | 见 5.11 |
-| 检查器的改动 / 任务 | ❌ 未做 | 页已经拿掉，没有结构化数据 |
 | 工具审批 | ✅ 已落地 | 写前快照 + 结构化 diff；允许一次 / 本会话允许；5 分钟超时，停止即取消 |
-| 命令审计 | ✅ 已落地 | `<dataDir>/audit.jsonl`，记会话、命令、状态、退出码、耗时；危险命令前置拦截 |
-| git worktree | ✅ 已落地 | 会话级开关；工作树在 `.mad-worktrees/<仓库>/`，分支 `mad/<slug>`；仅 git 仓库生效 |
-| Supervisor 自动拆任务 | ✅ 已落地 | `backend=supervisor`，侧栏入口；2-4 个子任务、20 分钟总时限、子会话默认各建 worktree |
+| 命令审计 | ✅ 已落地 | `<dataDir>/audit.jsonl`；危险命令前置拦截，不受权限模式影响 |
+| git worktree | ✅ 已落地 | 会话级开关；`.mad-worktrees/<仓库>/`，分支 `mad/<slug>`。**解绑与物理删除分离**：删不掉也能关掉 |
+| Supervisor 自动拆任务 | ✅ 已落地 | `backend=supervisor`；单次最多 3 个子任务、20 分钟总时限、子会话默认各建 worktree |
+| 失败可解释 | 🟡 一半 | 终止理由带真实错误、参数错误单独计数；`tools/runs.py` 可自查。**还没做进界面** |
+| 视觉与可读性 | 🟡 持续 | 字号刻度、失效 token、氛围层、阅读宽度已修；16 张界面截图巡检见 `e2e/visual-audit.spec.ts` |
+| 检查器的改动 / 任务 | ❌ 未做 | 页已经拿掉，没有结构化数据 |
+| composer 未抽成模块 | ❌ 未做 | 单聊/群聊各一个输入框，切换丢草稿。见 `docs/reviews/review-recheck-2026-11-25.md` #5 |
+| channel / agent 落盘重复 | ❌ 未做 | `goSave` / 原子写各一份。**纯结构收益，等真实需求压出来再抽**，不凭空做泛型 |
 | shell 流式输出；手动命令的超时 | ❌ 未做 | 手动执行只在取消时杀进程组 |
-| API Key / 飞书 Secret 明文 | 🟡 未做迁移 | `config.json` 权限 600；会话 Key 在 `agents.json`。见 `TODO(secrets)` |
+| API Key / 飞书 Secret 明文 | 🔴 未做 | `config.json` 权限 600；会话 Key 在 `agents.json`。**交付给别人前必须解决** |
 | 历史改 SQLite | ❌ 未做 | 仍是整份 JSON |
 | agent id 改 ULID | ❌ 未做 | `agent-<时间戳>` |
-| 未签名 | 🟡 | Gatekeeper / SmartScreen 会拦 |
+| 打包签名 / 分发 | 🔴 未做 | Gatekeeper / SmartScreen 会拦。开发版 ad-hoc 签名导致钥匙串反复弹窗，`tools/dev-sign.sh` 可建固定身份 |
+
+### 成熟度判定
+
+**不是 demo，是「作者本人可用的生产工具」。** 离「能交给别人用」差三件：**签名分发、密钥进钥匙串、失败可解释做进界面**。
+依据与同赛道竞品数据见 `docs/reviews/research-product-value-and-maturity.md`。
 
 ---
 
@@ -509,3 +618,8 @@ Supervisor（`backend=supervisor`）：侧栏「自动拆任务」填一句目�
 
 - MyGo: https://github.com/egoist/mygo
 - 架构评审历史：`docs/reviews/`（提案，不是当前行为）
+- **评审复核**：`docs/reviews/review-recheck-2026-11-25.md`——三份旧评审逐条对当前代码的核对结果。
+  报告超过一个月未复核的按「待复核」对待，不能当决策依据
+- 产品价值与成熟度：`docs/reviews/research-product-value-and-maturity.md`
+- 工作区边界与 Grok Bot 实测：`docs/reviews/research-workspace-roots.md`
+- 产品形态一手调研：`docs/reviews/research-product-forms.md`

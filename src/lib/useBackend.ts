@@ -52,8 +52,10 @@ type State = {
   /** 这一轮模型请求：since 是发出时刻，first 是到首个推理或正文的毫秒，heard 表示先到的是哪一种。 */
   pace: Record<string, { since: number; first?: number; heard?: 'reason' | 'text' }>
   tokenUsage: Record<string, { in: number; out: number; lastIn?: number }>
-  /** 正在看的会话。其它会话不留全文。 */
+  /** 正在看的会话。其它会话保留已加载的全文，切回来不用重新拉。 */
   opened: string
+  /** 哪些会话还有更早的历史没加载。为真时才显示「加载更早」。 */
+  hasOlder: Record<string, boolean>
   /** 已经乐观插入消息、但后端还没回执的 agent */
   pending: Record<string, boolean>
   /** 上一句还没答完时先排在回答后面，不插进正文。 */
@@ -83,6 +85,7 @@ const EMPTY: State = {
   pace: {},
   tokenUsage: {},
   opened: '',
+  hasOlder: {},
   pending: {},
   outbox: {},
   stops: {},
@@ -107,8 +110,15 @@ function lastFrom(messages?: { role: string; content: string }[]): string {
   return ''
 }
 
+/**
+ * 会话切到后台时保留已加载的消息，只补一个 last 摘要。
+ *
+ * 之前这里会清空 messages，切走再切回来要重新请求，请求回来前是空白页；
+ * 后端只给最近 40 条，更早的永久看不到。切会话丢历史是用户第一眼就会撞到的问题，
+ * 省这点内存不值得。
+ */
 function shellAgent<T extends Agent>(a: T): T {
-  return { ...a, messages: [], last: a.last || lastFrom(a.messages) }
+  return { ...a, last: a.last || lastFrom(a.messages) }
 }
 
 export function useBackend() {
@@ -279,6 +289,16 @@ export function useBackend() {
         streaming: omit(s.streaming, id),
         channelStreaming: omit(s.channelStreaming, id),
         outbox: omit(s.outbox, id),
+        // 删会话要把它的全部临时状态一起带走。只清一半的话，
+        // errors / tokenUsage 这些按 id 取值的 map 会留着上一个会话的值，
+        // 界面按 id 读时就串味（架构评审 #5/#6 指出过）。
+        errors: omit(s.errors, id),
+        shellByAgent: omit(s.shellByAgent, id),
+        reasoning: omit(s.reasoning, id),
+        pace: omit(s.pace, id),
+        tokenUsage: omit(s.tokenUsage, id),
+        stops: omit(s.stops, id),
+        tools: s.tools.filter((t) => t.id !== id),
       })),
     )
     // token 级流式片段：累积到 streaming[agentId]，assistant 完整消息到达时清掉。
@@ -343,7 +363,7 @@ export function useBackend() {
               return { ...a, messages: [...list.slice(0, -1), { ...last, ...message }] }
             }
             const spoken = clipSentence(message.content) || a.last
-            if (s.opened !== id) return { ...a, messages: [], last: spoken }
+            if (s.opened !== id) return { ...a, last: spoken }
             if (message.role === 'assistant' && last?.role === 'assistant' && last.content === message.content) {
               if (message.reasoning && message.reasoning !== last.reasoning) {
                 return { ...a, last: spoken, messages: [...list.slice(0, -1), { ...last, reasoning: message.reasoning }] }
@@ -518,7 +538,7 @@ export function useBackend() {
           if (x.id !== a.id) return x
           const parentId = a.parentId || x.parentId
           if (s.opened === a.id) return { ...x, ...a, parentId, messages: x.messages, last: a.last || x.last }
-          return shellAgent({ ...x, ...a, parentId, messages: [] })
+          return shellAgent({ ...x, ...a, parentId, messages: x.messages })
         }),
       })),
     )
@@ -722,7 +742,7 @@ export function useBackend() {
                   if (x.id !== view.id) return x
                   const parentId = view.parentId || x.parentId
                   if (s.opened === x.id) return { ...x, ...view, parentId, messages: x.messages, last: view.last || x.last }
-                  return shellAgent({ ...x, ...view, parentId, messages: [] })
+                  return shellAgent({ ...x, ...view, parentId, messages: x.messages })
                 }),
               }))
             }
@@ -803,6 +823,7 @@ export function useBackend() {
         const list = messages ?? []
         setState((s) => {
           if (s.opened !== id) return s
+          const more = list.length >= PAGE
           const cur = s.agents.find((a) => a.id === id)
           const curMsgs = cur?.messages ?? []
           const prefix =
@@ -814,6 +835,7 @@ export function useBackend() {
           const next = prefix ? curMsgs : [...list, ...extra]
           return {
             ...s,
+            hasOlder: { ...s.hasOlder, [id]: more },
             agents: s.agents.map((a) =>
               a.id === id ? { ...a, messages: next, last: lastFrom(next) || a.last } : shellAgent(a),
             ),
@@ -821,6 +843,38 @@ export function useBackend() {
         })
       })
       .catch(() => {})
+  }, [])
+
+  /**
+   * 往前再拉一页历史。
+   *
+   * 后端只发最近 40 条，没有这个入口的话更早的对话永远看不到。
+   * before 用当前已有条数当绝对下标：后端按 messages[0, before) 取一页。
+   */
+  const loadOlder = useCallback((id: string) => {
+    setState((s) => {
+      const cur = s.agents.find((a) => a.id === id)
+      if (!cur || !s.hasOlder[id]) return s
+      const before = (cur.messages ?? []).length
+      API.agentMessagesBefore(id, before, PAGE)
+        .then((older) => {
+          if (!older?.length) {
+            setState((p) => ({ ...p, hasOlder: { ...p.hasOlder, [id]: false } }))
+            return
+          }
+          setState((p) => ({
+            ...p,
+            hasOlder: { ...p.hasOlder, [id]: older.length >= PAGE },
+            agents: p.agents.map((a) =>
+              a.id === id
+                ? { ...a, messages: [...older, ...(a.messages ?? [])], last: a.last || lastFrom(older) }
+                : a,
+            ),
+          }))
+        })
+        .catch(() => {})
+      return s
+    })
   }, [])
 
   const parkAgents = useCallback(() => {
@@ -887,7 +941,7 @@ export function useBackend() {
     setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) }))
   }, [])
 
-  return { ...state, send, refreshNotes, openAgent, parkAgents, decideApproval }
+  return { ...state, send, refreshNotes, openAgent, parkAgents, loadOlder, decideApproval }
 }
 
 function oneLine(text?: string) {

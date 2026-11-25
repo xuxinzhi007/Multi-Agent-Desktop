@@ -200,36 +200,36 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 //
 // 不做这个检查的话，模型可以 read_file("/etc/passwd")。
 // 它不是恶意，只是不知道边界在哪 —— 所以边界必须由代码强制。
+//
+// 多根走 rootsPath；这里保留单根形式，调用方没给附加目录时行为不变。
 func safePath(workDir, p string) (string, error) {
-	if p == "" {
-		return "", fmt.Errorf("path must not be empty")
-	}
-	abs := p
-	if !filepath.IsAbs(p) {
-		abs = filepath.Join(workDir, p)
-	}
-	abs = filepath.Clean(abs)
+	return rootsPath(workDir, nil, p)
+}
 
+// rootsPath 在主目录 + 附加目录这组边界内解析路径。
+func rootsPath(workDir string, extra []string, p string) (string, error) {
 	if workDir == "" {
-		return abs, nil
+		if strings.TrimSpace(p) == "" {
+			return "", fmt.Errorf("path must not be empty")
+		}
+		return filepath.Clean(p), nil
 	}
-	root, err := filepath.Abs(workDir)
+	roots, err := workdir.NewRoots(workDir, extra...)
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf(
-			"path %q is outside the working directory %q", p, root)
-	}
-	return abs, nil
+	return roots.Resolve(p)
 }
 
 // ReadFile 读取文本文件，带行号。
 //
 // 行号是刻意加的：模型拿到行号才能在 edit_file 里精确定位。
 // 不带行号的 read_file 会让后续编辑变成"猜位置"。
-type ReadFile struct{ WorkDir string }
+type ReadFile struct {
+	WorkDir string
+	// ExtraDirs 是附加目录：只给文件读写，不改 shell 的 cwd。
+	ExtraDirs []string
+}
 
 func (*ReadFile) Name() string        { return "read_file" }
 func (*ReadFile) Writes() bool        { return false }
@@ -257,7 +257,7 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("cannot parse arguments: %v", err)
 	}
-	abs, err := safePath(r.WorkDir, in.Path)
+	abs, err := rootsPath(r.WorkDir, r.ExtraDirs, in.Path)
 	if err != nil {
 		return tool.Fail("%v", err)
 	}
@@ -305,7 +305,10 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 //
 // 明确的写操作，所以 Writes() = true，执行前需要审批。
 // 不做"自动创建目录"以外的智能推断 —— 模型应该自己说清楚要写什么。
-type WriteFile struct{ WorkDir string }
+type WriteFile struct {
+	WorkDir   string
+	ExtraDirs []string
+}
 
 func (*WriteFile) Name() string { return "write_file" }
 func (*WriteFile) Writes() bool { return true }
@@ -334,7 +337,7 @@ func (w *WriteFile) Preview(ctx context.Context, raw json.RawMessage) (tool.Prev
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Preview{}, fmt.Errorf("cannot parse arguments: %v", err)
 	}
-	abs, err := safePath(w.WorkDir, in.Path)
+	abs, err := rootsPath(w.WorkDir, w.ExtraDirs, in.Path)
 	if err != nil {
 		return tool.Preview{}, err
 	}
@@ -358,7 +361,7 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("cannot parse arguments: %v", err)
 	}
-	abs, err := safePath(w.WorkDir, in.Path)
+	abs, err := rootsPath(w.WorkDir, w.ExtraDirs, in.Path)
 	if err != nil {
 		return tool.Fail("%v", err)
 	}
@@ -379,7 +382,10 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 //
 // 要求 oldText 在文件里唯一出现 —— 不唯一就报错而不是"替换第一个"。
 // 后者是最容易造成静默错误的操作：模型以为改对了，实际改了另一处。
-type EditFile struct{ WorkDir string }
+type EditFile struct {
+	WorkDir   string
+	ExtraDirs []string
+}
 
 func (*EditFile) Name() string { return "edit_file" }
 func (*EditFile) Writes() bool { return true }
@@ -424,7 +430,7 @@ func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	if in.OldText == in.NewText {
 		return editPlan{}, fmt.Errorf("oldText and newText are identical; nothing to do")
 	}
-	abs, err := safePath(e.WorkDir, in.Path)
+	abs, err := rootsPath(e.WorkDir, e.ExtraDirs, in.Path)
 	if err != nil {
 		return editPlan{}, err
 	}
@@ -485,8 +491,14 @@ func displayPath(p string) string {
 
 // Register 把 4 个原语工具装进注册表。
 func Register(r *tool.Registry, workDir string) {
-	r.Register(&ReadFile{WorkDir: workDir})
-	r.Register(&WriteFile{WorkDir: workDir})
-	r.Register(&EditFile{WorkDir: workDir})
+	RegisterRoots(r, workDir, nil)
+}
+
+// RegisterRoots 装文件与 shell 工具。extra 是附加目录：
+// 文件工具能读写它们，bash 的 cwd 仍是主目录——命令在哪跑必须是确定的。
+func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
+	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Bash{WorkDir: workDir})
 }

@@ -607,3 +607,87 @@ func TestBlockedStatus(t *testing.T) {
 		}
 	})
 }
+
+// 附加目录必须进 Save/Load/snapshot/viewMap，否则重启后静默丢边界。
+func TestExtraDirsSurviveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main")
+	other := filepath.Join(dir, "other")
+	for _, d := range []string{main, other} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := filepath.Join(dir, "agents.json")
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	if err := m.SetStore(store); err != nil {
+		t.Fatal(err)
+	}
+	a := m.Create("a1", "后端", "")
+	if err := m.SetAgentWorkDir(a.ID, main); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetAgentExtraDirs(a.ID, []string{other}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.EffectiveExtraDirs(); len(got) != 1 || got[0] != other {
+		t.Fatalf("snapshot 前 extraDirs = %v", got)
+	}
+	if sn := a.Snapshot(); len(sn.ExtraDirs) != 1 {
+		t.Fatalf("Snapshot 丢了 extraDirs：%v", sn.ExtraDirs)
+	}
+	if vm := a.viewMap(); vm["extraDirs"] == nil {
+		t.Fatal("viewMap 丢了 extraDirs")
+	}
+	m.waitSaves()
+
+	m2 := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	t.Cleanup(m2.waitSaves)
+	if err := m2.SetStore(store); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Load(); err != nil {
+		t.Fatal(err)
+	}
+	back, ok := m2.Get(a.ID)
+	if !ok {
+		t.Fatal("会话没读回来")
+	}
+	if got := back.EffectiveExtraDirs(); len(got) != 1 || got[0] != other {
+		t.Fatalf("重启后 extraDirs = %v，持久化白名单漏了字段", got)
+	}
+}
+
+// 附加目录的校验和主目录一样严，不能拿它绕开过宽目录的限制。
+func TestExtraDirsRejectBroadAndMissing(t *testing.T) {
+	m := newTestManager(t)
+	a := m.Create("a1", "后端", "")
+	if err := m.SetAgentExtraDirs(a.ID, []string{t.TempDir()}); err == nil {
+		t.Fatal("没有主目录时不该能设附加目录")
+	}
+	main := t.TempDir()
+	if err := m.SetAgentWorkDir(a.ID, main); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	if err := m.SetAgentExtraDirs(a.ID, []string{home}); err == nil {
+		t.Fatal("主目录不能当附加目录")
+	}
+	if err := m.SetAgentExtraDirs(a.ID, []string{filepath.Join(main, "nope")}); err == nil {
+		t.Fatal("不存在的目录应当报错")
+	}
+}
+
+func TestSystemPromptDeclaresNetworkCapability(t *testing.T) {
+	p := loopSystemPrompt("/tmp/work", false)
+	// agent 曾因为只看到「只能操作工作目录内的文件」就断定环境完全离线，
+	// 于是拒绝查网页。约束必须和许可一起写，否则模型会按最保守的方式理解。
+	for _, want := range []string{"可以联网", "不等于离线", "不要说环境离线"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("系统提示缺少能力声明 %q", want)
+		}
+	}
+	if strings.Contains(p, "你只能操作工作目录内的文件。") {
+		t.Error("旧的全称限制句会再次导致「离线」误判")
+	}
+}

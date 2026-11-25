@@ -24,7 +24,13 @@ func (*Tool) Description() string {
 		"引擎是 Safari/WebKit，不是 Chrome：只支持 Chrome 的页面特性这里可能没有，遇到就换路径。open 后若被重定向（如跳登录页），返回的 url 就是实际地址，先处理登录再重试。"
 }
 
-func (*Tool) Writes() bool { return true }
+// Writes 返回 false：web 只操作应用内置浏览器，不碰工作目录里的任何文件。
+//
+// 之前标为 true，每次 open 一张网页都要挂一张审批卡，实际把「查资料」变成了
+// 「先等用户点允许」，model 等不到就以为环境没有联网能力。
+// 内置浏览器是独立沙箱（不是用户的 Chrome），改页面不产生本地副作用；
+// 真正需要审批的是 bash 与文件写入，它们在那些工具里各自拦。
+func (*Tool) Writes() bool { return false }
 
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{

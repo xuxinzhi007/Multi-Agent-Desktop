@@ -595,7 +595,9 @@ func TestCatchUpRunsUnanswered(t *testing.T) {
 	s.catchUp(context.Background(), "cli", "sec")
 	select {
 	case text := <-got:
-		if !strings.Contains(text, "你好呀") || strings.Contains(text, "群里没点名") || strings.Contains(text, "更早一句") {
+		// 单聊也要带上本会话的对话记录，否则连发两条接不上。
+		// 群里没点名的那条不属于这个会话，不能混进来。
+		if !strings.Contains(text, "你好呀") || strings.Contains(text, "群里没点名") {
 			t.Fatalf("text=%s", text)
 		}
 	case <-time.After(2 * time.Second):
@@ -753,7 +755,7 @@ func TestTwoMessagesReplyAtOnce(t *testing.T) {
 	var mu sync.Mutex
 	patches := map[string]string{}
 	s := New(Hooks{
-		Claim: func(parent string, busy map[string]bool) (string, error) {
+		Claim: func(parent, chat string, busy map[string]bool) (string, error) {
 			if !busy[parent] {
 				return parent, nil
 			}
