@@ -2710,6 +2710,13 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
 }
+/* 弹层里向上开会被模态框顶部裁掉（上方溢出差不到），改向下 + 右对齐 */
+.c-perm__menu--down {
+  top: calc(100% + 6px);
+  bottom: auto;
+  left: auto;
+  right: 0;
+}
 .c-perm__item {
   display: grid;
   gap: 1px;
@@ -2789,4 +2796,107 @@
   margin-top: 4px;
   font-size: var(--text-xs);
   color: var(--danger);
+}
+
+/* ===== 行内 @ 提及输入框（TipTap） ===== */
+.c-mention-editor {
+  outline: none;
+  padding: 11px 13px 4px;
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  min-height: 42px;
+  max-height: 160px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+.c-mention-editor p {
+  margin: 0;
+}
+.c-mention-editor .c-mention-chip {
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.c-mention-editor p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--text-disabled);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+.c-mention-suggest {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px 4px 8px;
+  width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.c-mention-suggest__item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.c-mention-suggest__item.is-on {
+  background: var(--bg-surface-hover);
+}
+.c-mention-suggest__empty {
+  padding: 8px 10px;
+  font-size: var(--text-xs);
+  color: var(--text-disabled);
+}
+
+/* ===== 频道 agent 消息卡片 + 快捷流转 ===== */
+.c-channel-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+.c-channel-card > :first-child { margin-top: 0; }
+.c-channel-card > :last-child { margin-bottom: 0; }
+.c-channel-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.c-channel-forward {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  min-width: 140px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+.c-channel-forward button {
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.c-channel-forward button:hover {
+  background: var(--bg-surface-hover);
 }

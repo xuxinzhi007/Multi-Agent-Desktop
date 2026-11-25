@@ -913,6 +913,29 @@ export function useBackend() {
   }, [])
 
   useEffect(() => {
+    // 心跳：connected 之前永远是 true，断线横幅从不亮。用最轻的已有 RPC 探活，
+    // 连续两次失败才判断线，避免启动期单次抖动误报。
+    let stop = false
+    let fails = 0
+    const beat = () => {
+      API.getWorkDir()
+        .then(() => {
+          fails = 0
+          if (!stop) setState((s) => (s.connected ? s : { ...s, connected: true }))
+        })
+        .catch(() => {
+          fails++
+          if (!stop && fails >= 2) setState((s) => (s.connected ? { ...s, connected: false } : s))
+        })
+    }
+    const timer = window.setInterval(beat, 5000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
     // 版本号取自后端打包信息，不在前端写死——写死的那个永远和实际跑的进程对不上。
     API.info()
       .then((i) => {

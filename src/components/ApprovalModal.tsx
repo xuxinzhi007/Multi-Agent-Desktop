@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ApprovalView } from '../mygo'
+import type { AgentView, ApprovalView } from '../mygo'
 
 /**
  * 写操作审批卡。
@@ -10,14 +10,29 @@ import type { ApprovalView } from '../mygo'
  */
 export default function ApprovalModal({
   items,
+  agents,
   onDecide,
 }: {
   items: ApprovalView[]
+  agents?: AgentView[]
   onDecide: (id: string, allow: boolean, remember: boolean) => Promise<void>
 }) {
   const item = items[0]
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+
+  // 沿 parentId 上溯≤3 层判子会话并取根名。后端 ApprovalView 补 RootAgentID
+  // 之前的显示近似：让用户看出是主还是子会话在申请（总纲 §3.5）。
+  const requester = agents?.find((a) => a.id === item?.agentId)
+  const isSub = !!requester?.parentId
+  let rootName = requester?.name || item?.agentName || item?.agentId || ''
+  if (requester) {
+    let cur: AgentView | undefined = requester
+    for (let i = 0; i < 3 && cur?.parentId; i++) {
+      cur = agents?.find((a) => a.id === cur!.parentId)
+    }
+    if (cur && cur.id !== requester.id) rootName = cur.name
+  }
 
   useEffect(() => {
     setBusy(false)
@@ -82,7 +97,14 @@ export default function ApprovalModal({
             )}
           </div>
           <div style={{ marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-            {item.agentName || item.agentId} 想执行一次写操作
+            {isSub ? (
+              <>
+                <span className="c-badge c-badge--warning" style={{ fontSize: 'var(--text-xs)', marginRight: 6 }}>子会话</span>
+                {item.agentName || item.agentId} 申请 · 属于主会话 {rootName}
+              </>
+            ) : (
+              <>{item.agentName || item.agentId} 想执行一次写操作</>
+            )}
           </div>
         </div>
 
@@ -138,7 +160,7 @@ export default function ApprovalModal({
           }}
         >
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', flex: 1, lineHeight: 1.5 }}>
-            允许一次只放行这一次；本会话允许只对「{item.tool}」生效，删除会话后失效。
+            允许一次只放行这一次；{isSub ? '本子会话允许' : '本会话允许'}只对「{item.tool}」生效，删除该会话后失效。
           </span>
           <button
             type="button"
@@ -162,7 +184,7 @@ export default function ApprovalModal({
             disabled={busy}
             onClick={() => void decide(true, true)}
           >
-            {busy ? '提交中…' : '本会话允许'}
+            {busy ? '提交中…' : isSub ? '本子会话允许' : '本会话允许'}
           </button>
         </div>
       </div>

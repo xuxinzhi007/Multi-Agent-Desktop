@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import TextareaAutosize from 'react-textarea-autosize'
-import MentionPicker from './MentionPicker'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import MentionInput, { type MentionInputHandle } from './MentionInput'
 import MentionText, { type MentionTarget } from './MentionText'
 import Modal from './Modal'
 import PermissionPicker from './PermissionPicker'
 import ProfileCard from './ProfileCard'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
+import { API } from '../mygo'
 import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
 import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
@@ -23,33 +25,72 @@ type Props = {
   allChannels?: Channel[]
   onOpenAgent?: (id: string) => void
   onOpenChannel?: (id: string) => void
+  /** 后端连接状态：断线时横幅提示并禁用发送 */
+  connected?: boolean
+  onStopAgent?: (id: string) => void
 }
 
 /**
  * ChannelView 是「群聊」视图：一个频道里的消息对所有成员广播。
  * 与 AgentView 的区别是消息带发言人身份，且成员都是 agent。
  */
-export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete, allChannels, onOpenAgent, onOpenChannel }: Props) {
+export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete, allChannels, onOpenAgent, onOpenChannel, connected = true, onStopAgent }: Props) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<DraftImage[]>([])
   const [imageNote, setImageNote] = useState('')
-  const [showMentions, setShowMentions] = useState(false)
-  const [mentionQuery, setMentionQuery] = useState('')
-  // 被 @ 的成员：结构化选择，不是从文本里解析
+  // 正文里的胶囊 @：由 MentionInput 序列化时一并给出
   const [mentioned, setMentioned] = useState<string[]>([])
   const [profileId, setProfileId] = useState<string | null>(null)
   const [membersOpen, setMembersOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const taRef = useRef<HTMLTextAreaElement>(null)
+  const taRef = useRef<MentionInputHandle>(null)
+  // 阅读权优先：用户上翻即解锁自动滚底，只有回底胶囊/贴底时才跟随
+  const stickRef = useRef(true)
+  const jumpingRef = useRef(false)
+  const [showJump, setShowJump] = useState(false)
+  const stopAllRef = useRef<() => void>(() => {})
+
+  const handleScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    if (jumpingRef.current) {
+      if (nearBottom) {
+        jumpingRef.current = false
+        stickRef.current = true
+        setShowJump(false)
+      }
+      return
+    }
+    stickRef.current = nearBottom
+    setShowJump(!nearBottom)
+  }
+
+  const jumpToBottom = () => {
+    const el = scrollRef.current
+    if (!el) return
+    jumpingRef.current = true
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') stopAllRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const streamLen = Object.values(streaming ?? {}).reduce((n, t) => n + (t?.length ?? 0), 0)
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight
   }, [channel?.messages.length, streamLen])
 
   useEffect(() => {
+    stickRef.current = true
+    setShowJump(false)
     taRef.current?.focus()
   }, [channel?.id])
 
@@ -81,6 +122,46 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
   ]
   const memberById = (id: string) => agents.find((a) => a.id === id)
 
+  const msgs = channel.messages ?? []
+  let lastUserAt = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].fromId === 'user') {
+      lastUserAt = i
+      break
+    }
+  }
+  // 防「已读不回」：最后一条用户消息里 delivered 的成员，还没回复、没在流式，
+  // 且回合确实还活着（running/queued/blocked）才显示状态行。
+  // 回合以停止/出错/空回复结束时 agent 回 idle，回复永远不会来——
+  // 不过滤就会永远挂在「正在接入」。事件顺序保证：postChannel 先 Prompt
+  // （发 agent.status）后回填 deliveries，收到回执时状态已就位。
+  const replied = new Set(msgs.slice(lastUserAt + 1).map((m) => m.fromId))
+  const pending =
+    lastUserAt >= 0
+      ? (msgs[lastUserAt].deliveries ?? [])
+          .filter((d) => d.status === 'delivered' && !replied.has(d.agentId) && !streaming?.[d.agentId])
+          .map((d) => memberById(d.agentId))
+          .filter((a): a is Agent => !!a)
+          .filter((a) => a.status === 'running' || a.status === 'queued' || a.status === 'blocked')
+      : []
+  const errored = members.filter((a) => a.status === 'error')
+  // 正在回复的：还没开口的 + 正在流式输出的，去重后给「停止全部」
+  const activeIds = [
+    ...new Set([
+      ...pending.map((a) => a.id),
+      ...Object.entries(streaming ?? {})
+        .filter(([id, t]) => t && (channel.members ?? []).includes(id))
+        .map(([id]) => id),
+    ]),
+  ]
+  const stopAll = () => activeIds.forEach((id) => onStopAgent?.(id))
+  // Esc 全局急停；弹层开着时让弹层自己处理 Esc
+  stopAllRef.current = () => {
+    if (!membersOpen && !profileId && activeIds.length > 0) stopAll()
+  }
+  // ≥3 人并发：本轮长回复限高折叠，防瀑布流淹没主时间轴
+  const burst = activeIds.length >= 3
+
   const addImages = async (files: File[]) => {
     const got = await readImageFiles(files)
     if (got.error) setImageNote(got.error)
@@ -89,48 +170,22 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
   }
 
   const submit = () => {
+    if (!connected) return
     const text = input.trim()
-    if (!text && mentioned.length === 0 && images.length === 0) return
-    // 把被 @ 的成员名附在文本末尾，后端 ParseMentions 能读到；
-    // 同时传结构化 mentions，避免名字里含空格时解析失败。
-    const textWithMentions =
-      mentioned.length > 0
-        ? `${mentioned.map((n) => `@${n}`).join(' ')} ${text}`.trim()
-        : text
+    if (!text && images.length === 0) return
+    // @名字 已在正文里（胶囊序列化），后端 ParseMentions 直接读文本
     const shots = images.map((img) => ({ mime: img.mime, data: img.data }))
-    Promise.resolve(onSend(textWithMentions, mentioned, shots.length ? shots : undefined))
+    Promise.resolve(onSend(text, mentioned, shots.length ? shots : undefined))
       .then(() => {
         setInput('')
+        setMentioned([])
         setImages([])
         setImageNote('')
-        setMentioned([])
-        setShowMentions(false)
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err)
         setImageNote(msg || '发送失败')
       })
-  }
-
-  const toggleMention = (name: string) => {
-    setMentioned((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]))
-    // 插入 @ 到输入框便于阅读（不参与解析）
-    setShowMentions(false)
-    taRef.current?.focus()
-  }
-
-  const handleInputChange = (value: string) => {
-    setInput(value)
-    const atIndex = value.lastIndexOf('@')
-    if (atIndex !== -1) {
-      const query = value.slice(atIndex + 1)
-      if (!query.includes(' ')) {
-        setMentionQuery(query)
-        setShowMentions(true)
-        return
-      }
-    }
-    setShowMentions(false)
   }
 
   return (
@@ -254,7 +309,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
 
       <div
         ref={scrollRef}
-        style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6)' }}
+        onScroll={handleScroll}
+        style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-4) var(--space-6) var(--space-6)' }}
       >
         {/* 和单聊、飞书会话共用同一个阅读宽度 */}
         <div className="c-transcript">
@@ -262,84 +318,120 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           <div className="c-empty" style={{ paddingTop: 'var(--space-6)' }}>
             {previewMode() ? '这是预览' : '频道已创建，发第一条消息吧'}
             <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
-              没 @ 人时，由默认接话人回答。@ 谁谁回答，@所有人每人一次。
+              没 @ 人时，由默认接话人回答。输入 @ 选人变胶囊，谁被 @ 谁回，@所有人每人一次；Backspace 整块删除。
             </div>
           </div>
         )}
-        {(channel.messages ?? []).map((m) => (
+        {(channel.messages ?? []).map((m, i) => (
           <ChannelBubble
             key={m.id}
             msg={m}
             agent={memberById(m.fromId)}
             mentionTargets={mentionTargets}
             agents={agents}
+            total={members.length}
+            clamp={burst && i > lastUserAt && m.fromId !== 'user' && bodyOf(m.text).length > 200}
+            forwardTargets={members.filter((x) => x.id !== m.fromId).map((x) => x.name)}
+            onForward={(target, text) => onSend(`@${target} 请跟进这条：\n${text}`, [target])}
             onProfile={m.fromId !== 'user' ? setProfileId : undefined}
+            onRefill={
+              m.fromId === 'user'
+                ? (t) => {
+                    setInput(t)
+                    taRef.current?.focus()
+                  }
+                : undefined
+            }
           />
         ))}
 
-        {/* 流式输出：正在生成回复的成员 */}
+        {/* 流式输出：正在生成回复的成员；≥3 并发时限高折叠 */}
         {Object.entries(streaming ?? {})
           .filter(([id, text]) => text && (channel.members ?? []).includes(id))
-          .map(([id, text]) => {
-            const a = memberById(id)
-            return (
-              <div
-                key={`streaming-${id}`}
-                style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}
-              >
-                <span
-                  style={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: 'var(--radius-sm)',
-                    background: a?.color ?? 'var(--text-disabled)',
-                    color: 'var(--bg-base)',
-                    display: 'grid',
-                    placeItems: 'center',
-                    fontSize: 'var(--text-xs)',
-                    fontWeight: 700,
-                    flexShrink: 0,
-                    marginTop: 1,
-                  }}
-                >
-                  {(a?.name ?? id).slice(0, 1).toUpperCase()}
-                </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      marginBottom: 3,
-                      fontSize: 'var(--text-xs)',
-                      fontWeight: 600,
-                      color: a?.color ?? 'var(--text-tertiary)',
-                    }}
-                  >
-                    {a?.name ?? id}
-                    <span className="blink" style={{ color: 'var(--warning)', fontSize: 'var(--text-xs)' }}>
-                      ●
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 'var(--text-md)',
-                      lineHeight: 1.7,
-                      wordBreak: 'break-word',
-                      color: 'var(--text-secondary)',
-                      whiteSpace: 'pre-wrap',
-                    }}
-                  >
-                    {bodyOf(text)}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+          .map(([id, text]) => (
+            <StreamCard
+              key={`streaming-${id}`}
+              agent={memberById(id)}
+              id={id}
+              text={text}
+              clamp={burst}
+              onStop={onStopAgent}
+            />
+          ))}
+
+        {/* 接入了但还没开口：送达 ≠ 已回复，把状态摆出来，别像已读不回 */}
+        {pending.map((a) => (
+          <div
+            key={`pending-${a.id}`}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--space-3)', fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)' }}
+          >
+            <span
+              style={{ width: 22, height: 22, borderRadius: 'var(--radius-sm)', background: a.color, color: 'var(--bg-base)', display: 'grid', placeItems: 'center', fontSize: 'var(--text-xs)', fontWeight: 700, flexShrink: 0, opacity: 0.7 }}
+            >
+              {a.name.slice(0, 1).toUpperCase()}
+            </span>
+            <span style={{ fontWeight: 600, color: a.color }}>{a.name}</span>
+            <span className="blink">●</span>
+            <span>
+              {a.status === 'running' && a.busy === channel.name
+                ? '正在思考中…'
+                : a.status === 'blocked'
+                  ? '等你审批后继续…'
+                  : a.status === 'running'
+                    ? `在 #${a.busy || '别处'} 回答，本条排队中…`
+                    : '排队中，前面的回合结束后接入…'}
+            </span>
+            {onStopAgent && (
+              <button className="c-btn c-btn--sm" onClick={() => onStopAgent(a.id)}>
+                停止
+              </button>
+            )}
+          </div>
+        ))}
         </div>
       </div>
 
+      {/* 回底胶囊：用户上翻时浮在输入框正上方，不拽视口 */}
+      {showJump && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 var(--space-6) 6px', flexShrink: 0 }}>
+          <button className="c-btn c-btn--sm" onClick={jumpToBottom} style={{ boxShadow: 'var(--shadow-lg)' }}>
+            ↓ {activeIds.length > 0 ? '有新回复生成中' : '回到底部'}
+          </button>
+        </div>
+      )}
+
       <div style={{ padding: 'var(--space-3) var(--space-6) var(--space-5)', flexShrink: 0 }}>
+        {!connected && (
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, padding: '8px 12px', background: 'var(--danger-dim)', border: '1px solid var(--danger-border)', borderRadius: 'var(--radius-md)', fontSize: 'var(--text-sm)', color: 'var(--danger)' }}
+          >
+            ⚠ 与后端的连接已断开，正在重连…消息暂不可发送，已显示的内容不会丢失
+          </div>
+        )}
+        {errored.length > 0 && (
+          <div style={{ marginBottom: 8, fontSize: 'var(--text-xs)', color: 'var(--danger)' }}>
+            {errored.map((a) => (
+              <span key={a.id} style={{ marginRight: 12 }}>
+                ⚠ {a.name} 出错，这一轮没有完成
+                {lastUserAt >= 0 && (
+                  <button
+                    className="c-btn c-btn--sm"
+                    style={{ marginLeft: 4 }}
+                    title="只重发给这个人：以 @他 + 原消息重新投递，不影响其他人"
+                    onClick={() => onSend(`@${a.name} ${bodyOf(msgs[lastUserAt].text)}`, [a.name])}
+                  >
+                    重试
+                  </button>
+                )}
+                {onOpenAgent && (
+                  <button className="c-btn c-btn--sm" style={{ marginLeft: 4 }} onClick={() => onOpenAgent(a.id)}>
+                    去单聊看
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
         <div
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
@@ -354,43 +446,17 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           }}
         >
           <ImageStrip images={images} onRemove={(i) => setImages((prev) => prev.filter((_, at) => at !== i))} />
-          <TextareaAutosize
+          <MentionInput
             ref={taRef}
-            value={input}
-            onChange={(e) => handleInputChange(e.target.value)}
-            onPaste={(e) => {
-              const files = Array.from(e.clipboardData.files)
-              if (files.length === 0) return
-              e.preventDefault()
-              void addImages(files)
+            text={input}
+            onChange={(t, ms) => {
+              setInput(t)
+              setMentioned(ms)
             }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                submit()
-              }
-            }}
+            targets={[{ id: 'all', name: '所有人', color: 'var(--accent-bright)' }, ...members.map((m) => ({ id: m.id, name: m.name, color: m.color }))]}
             placeholder={`发消息到 #${channel.name}…  输入 @ 提及成员`}
-            minRows={1}
-            maxRows={6}
-            style={{
-              width: '100%',
-              resize: 'none',
-              border: 'none',
-              background: 'transparent',
-              padding: '11px 13px 4px',
-              lineHeight: 'var(--leading-normal)',
-              fontSize: 'var(--text-md)',
-            }}
-          />
-
-          <MentionPicker
-            open={showMentions}
-            query={mentionQuery}
-            agents={members}
-            multi
-            selected={mentioned}
-            onPick={toggleMention}
+            onSubmit={submit}
+            onPasteFiles={(files) => void addImages(files)}
           />
 
           <div style={{ display: 'flex', alignItems: 'center', padding: '5px 8px 7px' }}>
@@ -426,34 +492,45 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
                 )
               ) : (
                 <>
-                  点名：
-                  {mentioned.map((n) => (
-                    <span
-                      key={n}
-                      onClick={() => toggleMention(n)}
-                      title="点击取消"
-                      style={{
-                        padding: '1px 6px',
-                        borderRadius: 'var(--radius-sm)',
-                        background: 'var(--accent-dim)',
-                        color: 'var(--accent-bright)',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      @{n} ×
+                  将点名：{mentioned.map((n) => `@${n}`).join(' ')}，被 @ 的都会回
+                  {mentioned.includes('所有人') && (
+                    <span style={{ color: 'var(--warning)' }}>
+                      ；每人各回一条，简单确认建议只 @ 默认接话人
                     </span>
-                  ))}
+                  )}
                 </>
               )}
             </span>
-            <button
-              className="c-btn c-btn--primary c-btn--sm"
-              style={{ marginLeft: 'auto' }}
-              onClick={submit}
-              disabled={!input.trim() && mentioned.length === 0 && images.length === 0}
-            >
-              发送
-            </button>
+            {/* 控制权收口输入区：空输入时发送键直接变停止全部；有内容时发送+紧凑停止 */}
+            {activeIds.length > 0 && !input.trim() && images.length === 0 ? (
+              <button
+                className="c-btn c-btn--danger c-btn--sm"
+                style={{ marginLeft: 'auto' }}
+                onClick={stopAll}
+                title="停止本频道所有正在回复的成员（Esc）"
+              >
+                ⏹ 停止全部 ({activeIds.length})
+              </button>
+            ) : (
+              <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {activeIds.length > 0 && (
+                  <button
+                    className="c-btn c-btn--danger c-btn--sm"
+                    onClick={stopAll}
+                    title="停止本频道所有正在回复的成员（Esc）"
+                  >
+                    ⏹ 停止全部
+                  </button>
+                )}
+                <button
+                  className="c-btn c-btn--primary c-btn--sm"
+                  onClick={submit}
+                  disabled={!connected || (!input.trim() && images.length === 0)}
+                >
+                  发送
+                </button>
+              </span>
+            )}
           </div>
         </div>
         <div
@@ -534,9 +611,23 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               <span style={{ fontSize: 'var(--text-xs)', color: m.status === 'running' ? 'var(--success)' : 'var(--text-disabled)' }}>
                 {m.status === 'running' ? '干活中' : m.status === 'blocked' ? '等你处理' : '空闲'}
               </span>
-              <PermissionPicker agentId={m.id} />
+              <PermissionPicker agentId={m.id} placement="down" />
             </div>
           ))}
+
+          <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              className="c-btn c-btn--sm"
+              title="把所有成员的干活权限切为只读，写操作直接拒绝"
+              onClick={() => {
+                if (confirm(`把 ${members.length} 位成员全部切为只读？写操作将被直接拒绝。`)) {
+                  members.forEach((m) => API.setAgentPermission(m.id, 'readonly').catch(() => {}))
+                }
+              }}
+            >
+              全员只读安全模式
+            </button>
+          </div>
 
           {agents.filter((a) => !(channel.members ?? []).includes(a.id)).length > 0 && (
             <div style={{ marginTop: 14 }}>
@@ -598,14 +689,29 @@ function ChannelBubble({
   agent,
   mentionTargets,
   agents,
+  total,
+  clamp,
+  forwardTargets,
+  onForward,
   onProfile,
+  onRefill,
 }: {
   msg: ChannelMessage
   agent?: Agent
   mentionTargets: MentionTarget[]
   agents: Agent[]
+  total?: number
+  /** ≥3 人并发时的长回复限高折叠 */
+  clamp?: boolean
+  forwardTargets?: string[]
+  onForward?: (target: string, text: string) => void
   onProfile?: (id: string) => void
+  /** 点自己发过的消息回填输入框，改完重发 */
+  onRefill?: (text: string) => void
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const [forwardOpen, setForwardOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
   const color = agent?.color ?? 'var(--text-tertiary)'
   // 老版本写进 channels.json 的消息缺 fromName / fromId，
   // 反序列化后是 undefined。渲染层必须兜底：
@@ -662,62 +768,137 @@ function ChannelBubble({
           </span>
         </div>
         <div
+          onClick={onRefill ? () => onRefill(bodyOf(msg.text)) : undefined}
+          title={onRefill ? '点击回填到输入框，修改后重发' : undefined}
+          className={!isUser && (msg.blocks?.length ?? 0) === 0 ? 'markdown-body c-channel-card' : undefined}
           style={{
             fontSize: 'var(--text-md)',
             lineHeight: 1.7,
             wordBreak: 'break-word',
             color: 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap',
+            whiteSpace: isUser ? 'pre-wrap' : undefined,
+            cursor: onRefill ? 'pointer' : undefined,
+            maxHeight: clamp && !expanded ? '10.2em' : undefined,
+            overflow: clamp && !expanded ? 'hidden' : undefined,
           }}
         >
           {(msg.blocks?.length ?? 0) > 0 ? (
             <MessageShots blocks={msg.blocks} content={bodyOf(msg.text)} />
-          ) : (
+          ) : isUser ? (
             <MentionText text={bodyOf(msg.text)} agents={mentionTargets} selfColor={color} />
+          ) : (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                table: ({ children }) => (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table>{children}</table>
+                  </div>
+                ),
+              }}
+            >
+              {bodyOf(msg.text)}
+            </ReactMarkdown>
           )}
         </div>
-        <DeliveryRow msg={msg} agents={agents} />
+        {clamp && (
+          <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? '收起' : '展开全文'}
+          </button>
+        )}
+        {!isUser && (
+          <div className="c-channel-actions">
+            <button
+              className="c-btn c-btn--ghost c-btn--sm"
+              onClick={() => {
+                navigator.clipboard.writeText(bodyOf(msg.text)).then(() => {
+                  setCopied(true)
+                  window.setTimeout(() => setCopied(false), 1500)
+                })
+              }}
+            >
+              {copied ? '已复制' : '复制'}
+            </button>
+            {onForward && (forwardTargets?.length ?? 0) > 0 && (
+              <span style={{ position: 'relative' }}>
+                <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setForwardOpen((v) => !v)}>
+                  转派
+                </button>
+                {forwardOpen && (
+                  <div className="c-channel-forward">
+                    {forwardTargets!.map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => {
+                          onForward(t, bodyOf(msg.text))
+                          setForwardOpen(false)
+                        }}
+                      >
+                        @{t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </span>
+            )}
+          </div>
+        )}
+        <DeliveryRow msg={msg} agents={agents} total={total} />
       </div>
     </div>
   )
 }
 
-const STATUS_META: Record<string, { icon: string; color: string; label: string }> = {
-  delivered: { icon: '✓', color: 'var(--success)', label: '已送达' },
-  skipped: { icon: '○', color: 'var(--text-disabled)', label: '已跳过' },
-  failed: { icon: '✕', color: 'var(--danger)', label: '失败' },
-}
-
-/** 渲染投递结果：回复/失败的人突出显示，跳过的折叠成一条，点开看名字和原因。 */
-function DeliveryRow({ msg, agents }: { msg: ChannelMessage; agents: Agent[] }) {
+/** 渲染投递结果：送达只留汇总，失败突出，跳过折叠；点开看名单。 */
+function DeliveryRow({ msg, agents, total }: { msg: ChannelMessage; agents: Agent[]; total?: number }) {
   const [expandSkipped, setExpandSkipped] = useState(false)
+  const [expandDelivered, setExpandDelivered] = useState(false)
   const deliveries = msg.deliveries ?? []
   if (deliveries.length === 0) return null
 
   // ID 是 agent-<unix秒>，前 8 位永远是 agent-17，必须解析成名字
   const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? id
-  const active = deliveries.filter((d) => d.status !== 'skipped')
+  const delivered = deliveries.filter((d) => d.status === 'delivered')
+  const failed = deliveries.filter((d) => d.status !== 'delivered' && d.status !== 'skipped')
   const skipped = deliveries.filter((d) => d.status === 'skipped')
 
   return (
     <div style={{ marginTop: 5, fontSize: 'var(--text-xs)' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        {active.map((d) => {
-          const meta = STATUS_META[d.status] ?? STATUS_META.skipped
-          return (
-            <span
-              key={d.agentId}
-              title={d.reason || meta.label}
-              style={{ color: meta.color, display: 'inline-flex', alignItems: 'center', gap: 3 }}
-            >
-              <span>{meta.icon}</span>
-              <span style={{ fontWeight: 600 }}>{nameOf(d.agentId)}</span>
-              <span style={{ color: 'var(--text-disabled)' }}>
-                {d.status === 'failed' ? `失败：${d.reason ?? '未知原因'}` : meta.label}
-              </span>
+        {/* 送达只留一条汇总，逐个名字悬停/点开看；状态行里不再重复「已送达」 */}
+        {delivered.length === 1 && (
+          <span style={{ color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            <span>✓</span>
+            <span style={{ fontWeight: 600 }}>{nameOf(delivered[0].agentId)}</span>
+            <span style={{ color: 'var(--text-disabled)' }}>已送达</span>
+          </span>
+        )}
+        {delivered.length > 1 && (
+          <span
+            onClick={() => setExpandDelivered((v) => !v)}
+            title={delivered.map((d) => nameOf(d.agentId)).join('、')}
+            style={{ color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}
+          >
+            <span>✓</span>
+            <span>
+              {total && delivered.length === total
+                ? `全员已送达 (${delivered.length}/${total})`
+                : `${delivered.length} 人已送达`}{' '}
+              {expandDelivered ? '▾' : '▸'}
             </span>
-          )
-        })}
+          </span>
+        )}
+        {failed.map((d) => (
+          <span
+            key={d.agentId}
+            title={d.reason || '失败'}
+            style={{ color: 'var(--danger)', display: 'inline-flex', alignItems: 'center', gap: 3 }}
+          >
+            <span>✕</span>
+            <span style={{ fontWeight: 600 }}>{nameOf(d.agentId)}</span>
+            <span style={{ color: 'var(--text-disabled)' }}>失败：{d.reason ?? '未知原因'}</span>
+          </span>
+        ))}
         {skipped.length > 0 && (
           <span
             onClick={() => setExpandSkipped((v) => !v)}
@@ -731,6 +912,15 @@ function DeliveryRow({ msg, agents }: { msg: ChannelMessage; agents: Agent[] }) 
           </span>
         )}
       </div>
+      {expandDelivered && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+          {delivered.map((d) => (
+            <span key={d.agentId} style={{ color: 'var(--text-tertiary)' }}>
+              {nameOf(d.agentId)}
+            </span>
+          ))}
+        </div>
+      )}
       {expandSkipped && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
           {skipped.map((d) => (
@@ -740,6 +930,93 @@ function DeliveryRow({ msg, agents }: { msg: ChannelMessage; agents: Agent[] }) 
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/** 流式回复卡片：≥3 人并发时限高折叠，防止瀑布流淹没主时间轴。 */
+function StreamCard({
+  agent,
+  id,
+  text,
+  clamp,
+  onStop,
+}: {
+  agent?: Agent
+  id: string
+  text: string
+  clamp?: boolean
+  onStop?: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const body = bodyOf(text)
+  const long = body.length > 180 || body.split('\n').length > 6
+  const clamped = clamp && long && !expanded
+
+  return (
+    <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+      <span
+        style={{
+          width: 22,
+          height: 22,
+          borderRadius: 'var(--radius-sm)',
+          background: agent?.color ?? 'var(--text-disabled)',
+          color: 'var(--bg-base)',
+          display: 'grid',
+          placeItems: 'center',
+          fontSize: 'var(--text-xs)',
+          fontWeight: 700,
+          flexShrink: 0,
+          marginTop: 1,
+        }}
+      >
+        {(agent?.name ?? id).slice(0, 1).toUpperCase()}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: 3,
+            fontSize: 'var(--text-xs)',
+            fontWeight: 600,
+            color: agent?.color ?? 'var(--text-tertiary)',
+          }}
+        >
+          {agent?.name ?? id}
+          <span className="blink" style={{ color: 'var(--warning)', fontSize: 'var(--text-xs)' }}>
+            ●
+          </span>
+          {onStop && (
+            <button
+              className="c-btn c-btn--danger c-btn--sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => onStop(id)}
+            >
+              停止
+            </button>
+          )}
+        </div>
+        <div
+          style={{
+            fontSize: 'var(--text-md)',
+            lineHeight: 1.7,
+            wordBreak: 'break-word',
+            color: 'var(--text-secondary)',
+            whiteSpace: 'pre-wrap',
+            maxHeight: clamped ? '10.2em' : undefined,
+            overflow: clamped ? 'hidden' : undefined,
+          }}
+        >
+          {body}
+        </div>
+        {clamp && long && (
+          <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? '收起' : '展开全文'}
+          </button>
+        )}
+      </div>
     </div>
   )
 }

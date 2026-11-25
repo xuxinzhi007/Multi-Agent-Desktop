@@ -49,8 +49,8 @@ const CHANNELS = [
       {
         id: 'm2',
         channelId: 'ch1',
-        fromId: 'a1',
-        fromName: '前端',
+        fromId: 'user',
+        fromName: '你',
         text: '@后端 接口字段定了吗',
         at: 2,
       },

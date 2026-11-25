@@ -38,7 +38,11 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 	}
 
 	a.mu.Lock()
-	history := append([]llm.Message(nil), a.Messages...)
+	// 同 loop_backend：群回合不拼私聊历史，否则切到豆包 CLI 就复现串扰。
+	var history []llm.Message
+	if channelID == "" {
+		history = append([]llm.Message(nil), a.Messages...)
+	}
 	role := a.Role
 	a.mu.Unlock()
 	if channelID != "" {

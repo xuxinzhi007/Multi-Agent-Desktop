@@ -93,6 +93,7 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.SettingsPath': () =>
         '/Users/me/Library/Application Support/multi-agent-desktop/config.json',
       'API.ListFeishu': () => initial.feishu ?? [],
+      'API.ListFeishuRooms': () => initial.feishu ?? [],
       'API.DeleteFeishu': () => undefined,
       'API.SetFeishuEnabled': (id: unknown, enabled: unknown) => ({
         id: String(id ?? ''),

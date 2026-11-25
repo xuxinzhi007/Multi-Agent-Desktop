@@ -81,7 +81,7 @@ test('投递结果显示成员真名，不再显示截断的 agent-17', async ({
   await mockRuntime(page, { agents: AGENTS, channels: CHANNELS, notes: [] })
   await openChannel(page)
 
-  await expect(page.getByText('已送达')).toBeVisible()
+  await expect(page.getByText('已送达', { exact: true })).toBeVisible()
   const body = await page.locator('body').innerText()
   expect(body, '投递行仍在显示截断 ID').not.toContain('agent-17')
 })

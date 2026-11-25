@@ -137,4 +137,6 @@ func registerSpawnTools(reg *tool.Registry, m *Manager, a *Agent, channelID stri
 	// ask_agent 找的是已有会话，不新增名额，任何层都能用。
 	reg.Register(&askAgentTool{m: m, fromID: a.ID})
 	reg.Register(&listAgentsTool{m: m, self: a.ID})
+	// 邀同事进群：任何层都能用，它不新增会话名额。
+	reg.Register(&inviteToChannelTool{m: m, fromID: a.ID})
 }

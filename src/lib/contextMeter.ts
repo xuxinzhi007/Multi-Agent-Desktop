@@ -1,17 +1,25 @@
 /** 和 internal/llm/compact.go 的 ContextLimit 保持同一组默认值。 */
-export function contextLimit(provider: string, configured?: number): number {
+export function contextLimit(provider: string, configured?: number, model?: string): number {
   if (configured && configured > 0) return configured
   switch (provider) {
     case 'llamacpp':
     case 'ollama':
-      return 4096
+      return 8192
     case 'deepseek':
       return 65536
     case 'qoder':
       return 131072
     case 'openai':
-    case 'claude':
+    case 'claude': {
+      const m = (model || '').toLowerCase()
+      if (provider === 'openai') {
+        if (m.includes('gpt-4o') || m.includes('gpt-4.1') || m.includes('gpt-5')) return 131072
+        if (m.includes('gpt-4-mini') || m.includes('gpt-3.5')) return 16384
+      } else {
+        if (m.includes('claude-3') || m.includes('claude-4') || m.includes('claude-opus') || m.includes('claude-sonnet') || m.includes('claude-haiku')) return 200000
+      }
       return 32768
+    }
     default:
       return 8192
   }

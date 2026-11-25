@@ -15,11 +15,11 @@ import { API } from '../mygo'
 
 const MODES = [
   { id: 'ask', label: '逐次审批', hint: '每次写操作都问你', icon: '◐' },
-  { id: 'auto', label: '自动', hint: '工作目录内直接执行', icon: '▶' },
+  { id: 'auto', label: '自动', hint: '工作目录内直接执行', icon: '⚡' },
   { id: 'readonly', label: '只读', hint: '只查不改，写操作直接拒', icon: '◌' },
 ] as const
 
-export default function PermissionPicker({ agentId }: { agentId: string }) {
+export default function PermissionPicker({ agentId, placement = 'up' }: { agentId: string; placement?: 'up' | 'down' }) {
   const [mode, setMode] = useState('ask')
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -77,13 +77,14 @@ export default function PermissionPicker({ agentId }: { agentId: string }) {
         disabled={busy}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={`权限：${cur.label} — ${cur.hint}`}
+        title={open ? undefined : `权限：${cur.label} — ${cur.hint}`}
       >
         <span aria-hidden>{cur.icon}</span>
         {cur.label}
+        <span aria-hidden style={{ fontSize: 'var(--text-xs)', opacity: 0.6 }}>▾</span>
       </button>
       {open && (
-        <div className="c-perm__menu" role="menu">
+        <div className={`c-perm__menu${placement === 'down' ? ' c-perm__menu--down' : ''}`} role="menu">
           {MODES.map((m) => (
             <button
               key={m.id}

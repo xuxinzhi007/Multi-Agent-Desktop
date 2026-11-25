@@ -1,6 +1,7 @@
+import { useEffect, useState } from 'react'
 import Modal from './Modal'
 import PermissionPicker from './PermissionPicker'
-import type { AgentView as Agent, Channel } from '../mygo'
+import { API, type AgentView as Agent, type Channel } from '../mygo'
 import { bodyOf } from '../lib/message'
 
 const STATUS_TEXT: Record<string, { label: string; color: string }> = {
@@ -28,6 +29,8 @@ export default function ProfileCard({
   onOpenChat?: (id: string) => void
   onOpenChannel?: (id: string) => void
 }) {
+  const [editRole, setEditRole] = useState<string | null>(null)
+  useEffect(() => setEditRole(null), [agent?.id])
   if (!agent) return null
 
   const st = STATUS_TEXT[agent.status] ?? STATUS_TEXT.idle
@@ -73,7 +76,35 @@ export default function ProfileCard({
               {agent.name}
             </div>
             <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-              {agent.role || '没写职责'}
+              {editRole === null ? (
+                <span
+                  onClick={() => setEditRole(agent.role ?? '')}
+                  title="点击修改职责简介"
+                  style={{ cursor: 'pointer' }}
+                >
+                  {agent.role || '没写职责'} <span style={{ opacity: 0.5 }}>✎</span>
+                </span>
+              ) : (
+                <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                  <textarea
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value)}
+                    rows={2}
+                    style={{ flex: 1, resize: 'vertical', fontSize: 'var(--text-sm)', background: 'var(--bg-inset)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '4px 6px' }}
+                  />
+                  <button
+                    className="c-btn c-btn--primary c-btn--sm"
+                    onClick={() => {
+                      API.setAgentProfile(agent.id, agent.name, editRole.trim())
+                        .then(() => setEditRole(null))
+                        .catch(() => {})
+                    }}
+                  >
+                    存
+                  </button>
+                  <button className="c-btn c-btn--sm" onClick={() => setEditRole(null)}>取消</button>
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 'var(--text-xs)', color: st.color, marginTop: 2 }}>
               ● {st.label}
@@ -88,7 +119,7 @@ export default function ProfileCard({
         {agent.createdAt ? row('入职时间', new Date(agent.createdAt * 1000).toLocaleString('zh-CN')) : null}
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 'var(--text-sm)', lineHeight: 1.8 }}>
           <span style={{ width: 64, flexShrink: 0, color: 'var(--text-tertiary)' }}>干活权限</span>
-          <PermissionPicker agentId={agent.id} />
+          <PermissionPicker agentId={agent.id} placement="down" />
         </div>
 
         <div style={{ marginTop: 14 }}>

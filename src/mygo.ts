@@ -139,6 +139,8 @@ export interface Channel {
   messages: ChannelMessage[];
   policy?: TurnPolicy;
   speaker?: string;
+  owner?: string;
+  admins?: string[];
 }
 
 export interface ChannelMessage {
@@ -682,9 +684,23 @@ export const API = {
   info(): Promise<SystemInfo> {
     return call("API.Info");
   },
+  /**
+   * InviteToChannel 把一个会话邀进群。byId 是发起邀请的人（"user" 或 agent ID）。
+   *
+   * 权限判定在 internal/channel（任何成员可邀），这里只校验会话存在、投递、留痕。
+   * 留痕是一条 system 消息，只进群时间线，不投递给任何 agent —— 邀人这件事
+   * 本身不该引起谁接话。
+   */
+  inviteToChannel(channelId: string, agentId: string, byId: string): Promise<Channel> {
+    return call("API.InviteToChannel", channelId, agentId, byId);
+  },
   /** IsAlwaysOnTop 返回窗口是否置顶。 */
   isAlwaysOnTop(): Promise<boolean> {
     return call("API.IsAlwaysOnTop");
+  },
+  /** KickFromChannel 把一个成员移出群。只有群主和管理能做，判定在 internal/channel。 */
+  kickFromChannel(channelId: string, agentId: string, byId: string): Promise<Channel> {
+    return call("API.KickFromChannel", channelId, agentId, byId);
   },
   listAgents(): Promise<AgentView[]> {
     return call("API.ListAgents");

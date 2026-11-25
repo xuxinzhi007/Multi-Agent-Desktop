@@ -65,6 +65,62 @@ type Channel struct {
 	Policy   TurnPolicy `json:"policy,omitempty"` // 回合策略，默认 discuss
 	// Speaker 是没人被 @ 时的默认接话人（agent ID）。空则这一条没人接。
 	Speaker string `json:"speaker,omitempty"`
+	// Owner 是建频道的人：用户建的记 "user"，agent 建的记它的 ID。
+	// 空等于 "user"：老 channels.json 没这个字段，不能把用户锁在自己建的群外面。
+	Owner string `json:"owner,omitempty"`
+	// Admins 是管理员（agent ID 或 "user"）。与 Owner 同权，但不可被踢。
+	Admins []string `json:"admins,omitempty"`
+}
+
+// UserActor 是用户本人在权限判定里的身份。不是 agent ID。
+const UserActor = "user"
+
+// ownerOf 返回实际的群主。空视为用户，兼容老文件。
+func (c *Channel) ownerOf() string {
+	if c == nil || c.Owner == "" {
+		return UserActor
+	}
+	return c.Owner
+}
+
+// isManager 报告 by 是不是群主或管理员。
+func (c *Channel) isManager(by string) bool {
+	if c == nil || by == "" {
+		return false
+	}
+	if by == c.ownerOf() {
+		return true
+	}
+	for _, id := range c.Admins {
+		if id == by {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMember 报告 id 在不在成员里。用户不算成员但永远有发言权。
+func (c *Channel) hasMember(id string) bool {
+	if c == nil {
+		return false
+	}
+	for _, cur := range c.Members {
+		if cur == id {
+			return true
+		}
+	}
+	return false
+}
+
+// canInvite：任何成员都能邀，用户和管理当然也能。
+// 用户原话「agent 也能互相邀请」，所以这里不限 Owner/Admins。
+func (c *Channel) canInvite(by string) bool {
+	return by == UserActor || c.isManager(by) || c.hasMember(by)
+}
+
+// canKick：只有群主和管理能踢人。
+func (c *Channel) canKick(by string) bool {
+	return by == UserActor || c.isManager(by)
 }
 
 // Manager 管理所有频道。
@@ -130,6 +186,8 @@ func (m *Manager) Save() error {
 				Messages: append([]Message{}, ch.Messages...),
 				Policy:   ch.Policy,
 				Speaker:  ch.Speaker,
+				Owner:    ch.Owner,
+				Admins:   append([]string{}, ch.Admins...),
 			})
 		}
 	}
@@ -216,6 +274,8 @@ func (c *Channel) clone() Channel {
 		Members: append([]string{}, c.Members...),
 		Policy:  c.Policy,
 		Speaker: c.Speaker,
+		Owner:   c.Owner,
+		Admins:  append([]string{}, c.Admins...),
 	}
 	if c.Messages == nil {
 		out.Messages = []Message{}
@@ -254,6 +314,8 @@ func (m *Manager) Create(id, name string, members []string, policy TurnPolicy) C
 		Members:  append([]string(nil), members...),
 		Messages: []Message{},
 		Policy:   policy,
+		// 建群的人是群主。老文件缺这个字段时 ownerOf() 同样回落 user。
+		Owner: UserActor,
 	}
 	m.channels[id] = ch
 	m.order = append(m.order, id)
@@ -436,6 +498,11 @@ func (m *Manager) addMessage(channelId, fromId, fromName, text string, blocks []
 		Text:      text,
 		At:        time.Now().Unix(),
 		Blocks:    blocks,
+	}
+	// 系统记录（邀请/移出这类成员变更）在这里定性并落盘。
+	// 调用方拿到的是副本，在外部改 Kind 不会写进文件。
+	if fromId == "system" {
+		msg.Kind = "system"
 	}
 	ch.Messages = append(ch.Messages, msg)
 	m.mu.Unlock()
@@ -703,4 +770,74 @@ func (m *Manager) SetSpeaker(channelId, agentId string) (Channel, error) {
 	m.mu.Unlock()
 	m.goSave()
 	return snap, nil
+}
+
+// AddMember 把一个 agent 邀进群。任何成员都能邀（用户原话：agent 也能互相邀请）。
+// 已在群里时幂等返回，不报错也不重复加。
+func (m *Manager) AddMember(channelId, agentId, by string) (Channel, error) {
+	if strings.TrimSpace(agentId) == "" {
+		return Channel{}, fmt.Errorf("缺少要邀请的会话")
+	}
+	m.mu.Lock()
+	ch := m.channels[channelId]
+	if ch == nil {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("channel %s not found", channelId)
+	}
+	if !ch.canInvite(by) {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("只有这个群的成员能邀请别人")
+	}
+	if ch.hasMember(agentId) {
+		out := ch.clone()
+		m.mu.Unlock()
+		return out, nil
+	}
+	ch.Members = append(append([]string(nil), ch.Members...), agentId)
+	out := ch.clone()
+	m.mu.Unlock()
+	m.goSave()
+	return out, nil
+}
+
+// KickMember 把一个成员移出群。只有群主和管理能做。
+// 群主和管理自己不能被踢；被踢的正好是默认接话人时清空 Speaker。
+func (m *Manager) KickMember(channelId, agentId, by string) (Channel, error) {
+	if strings.TrimSpace(agentId) == "" {
+		return Channel{}, fmt.Errorf("缺少要移出的会话")
+	}
+	m.mu.Lock()
+	ch := m.channels[channelId]
+	if ch == nil {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("channel %s not found", channelId)
+	}
+	if !ch.canKick(by) {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("只有群主和管理能移出成员")
+	}
+	if agentId == ch.ownerOf() {
+		m.mu.Unlock()
+		return Channel{}, fmt.Errorf("群主不能被移出")
+	}
+	for _, id := range ch.Admins {
+		if id == agentId {
+			m.mu.Unlock()
+			return Channel{}, fmt.Errorf("管理员不能被移出，先撤销管理身份")
+		}
+	}
+	kept := make([]string, 0, len(ch.Members))
+	for _, id := range ch.Members {
+		if id != agentId {
+			kept = append(kept, id)
+		}
+	}
+	ch.Members = kept
+	if ch.Speaker == agentId {
+		ch.Speaker = ""
+	}
+	out := ch.clone()
+	m.mu.Unlock()
+	m.goSave()
+	return out, nil
 }

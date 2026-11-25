@@ -170,3 +170,90 @@ func (s *API) postChannel(ctx context.Context, channelId, fromId, fromName, text
 	}
 	return nil
 }
+
+// InviteToChannel 把一个会话邀进群。byId 是发起邀请的人（"user" 或 agent ID）。
+//
+// 权限判定在 internal/channel（任何成员可邀），这里只校验会话存在、投递、留痕。
+// 留痕是一条 system 消息，只进群时间线，不投递给任何 agent —— 邀人这件事
+// 本身不该引起谁接话。
+func (s *API) InviteToChannel(channelId, agentId, byId string) (channel.Channel, error) {
+	if s.channels == nil || s.mgr == nil {
+		return channel.Channel{}, fmt.Errorf("频道还没准备好")
+	}
+	target, ok := s.mgr.Get(agentId)
+	if !ok {
+		return channel.Channel{}, fmt.Errorf("会话不存在")
+	}
+	ch, err := s.channels.AddMember(channelId, agentId, byId)
+	if err != nil {
+		return channel.Channel{}, err
+	}
+	s.noteMemberChange(ch, fmt.Sprintf("%s 邀请 %s 加入", s.actorName(byId), target.Snapshot().Name))
+	ChannelCreated.Emit(s.win, ch)
+	return ch, nil
+}
+
+// KickFromChannel 把一个成员移出群。只有群主和管理能做，判定在 internal/channel。
+func (s *API) KickFromChannel(channelId, agentId, byId string) (channel.Channel, error) {
+	if s.channels == nil || s.mgr == nil {
+		return channel.Channel{}, fmt.Errorf("频道还没准备好")
+	}
+	name := agentId
+	if target, ok := s.mgr.Get(agentId); ok {
+		name = target.Snapshot().Name
+	}
+	ch, err := s.channels.KickMember(channelId, agentId, byId)
+	if err != nil {
+		return channel.Channel{}, err
+	}
+	s.noteMemberChange(ch, fmt.Sprintf("%s 把 %s 移出", s.actorName(byId), name))
+	ChannelCreated.Emit(s.win, ch)
+	return ch, nil
+}
+
+// actorName 把 byId 换成给人看的名字。
+func (s *API) actorName(byId string) string {
+	if byId == "" || byId == channel.UserActor {
+		return "你"
+	}
+	if a, ok := s.mgr.Get(byId); ok {
+		return a.Snapshot().Name
+	}
+	return byId
+}
+
+// noteMemberChange 往群时间线写一条系统记录。不投递，所以不会引起接话。
+func (s *API) noteMemberChange(ch channel.Channel, text string) {
+	msg, err := s.channels.AddMessage(ch.ID, "system", "", text)
+	if err != nil {
+		log.Printf("channel member note: %v", err)
+		return
+	}
+	emitChannelMessage(msg, s.win)
+}
+
+// Channels 实现 agent.ChannelRoster：给 agent 工具看有哪些群。
+func (f *channelFeed) Channels() []agent.ChannelRef {
+	if f == nil || f.ch == nil {
+		return nil
+	}
+	list := f.ch.List()
+	out := make([]agent.ChannelRef, 0, len(list))
+	for _, c := range list {
+		out = append(out, agent.ChannelRef{
+			ID:      c.ID,
+			Name:    c.Name,
+			Members: append([]string(nil), c.Members...),
+		})
+	}
+	return out
+}
+
+// Invite 实现 agent.ChannelRoster。走和 RPC 同一条路，权限判定与留痕都在那里面。
+func (f *channelFeed) Invite(channelID, agentID, byID string) error {
+	if f == nil || f.api == nil {
+		return fmt.Errorf("频道还没准备好")
+	}
+	_, err := f.api.InviteToChannel(channelID, agentID, byID)
+	return err
+}

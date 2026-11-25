@@ -5,19 +5,34 @@ import (
 )
 
 // ContextLimit 返回这次请求应按多少 token 来收历史。
-// 显式配置优先。本地服务按常见的 4096 窗口，远程模型按更大的默认值。
+// 显式配置优先。本地服务按常见的 8192 窗口，远程模型按更大的默认值。
 func ContextLimit(cfg Config) int {
 	if cfg.ContextWindow > 0 {
 		return cfg.ContextWindow
 	}
 	switch cfg.Provider {
 	case "llamacpp", "ollama":
-		return 4096
+		return 8192
 	case "deepseek":
 		return 65536
 	case "qoder":
 		return 131072
 	case "openai", "claude":
+		m := strings.ToLower(cfg.Model)
+		if cfg.Provider == "openai" {
+			if strings.Contains(m, "gpt-4o") || strings.Contains(m, "gpt-4.1") || strings.Contains(m, "gpt-5") {
+				return 131072
+			}
+			if strings.Contains(m, "gpt-4-mini") || strings.Contains(m, "gpt-3.5") {
+				return 16384
+			}
+		} else {
+			if strings.Contains(m, "claude-3") || strings.Contains(m, "claude-4") ||
+				strings.Contains(m, "claude-opus") || strings.Contains(m, "claude-sonnet") ||
+				strings.Contains(m, "claude-haiku") {
+				return 200000
+			}
+		}
 		return 32768
 	default:
 		return 8192

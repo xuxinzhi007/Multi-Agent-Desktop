@@ -96,6 +96,12 @@ func ThinkingEnabled(cfg Config) bool {
 	switch cfg.Provider {
 	case "deepseek":
 		return true
+	case "openai":
+		m := strings.ToLower(cfg.Model)
+		if strings.Contains(m, "o1") || strings.Contains(m, "o3") || strings.Contains(m, "o4") {
+			return cfg.Thinking != "off"
+		}
+		return false
 	case "qoder":
 		return qoderModelByID(cfg.Model).reasoning
 	default:

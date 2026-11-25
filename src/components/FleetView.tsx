@@ -183,8 +183,12 @@ function FleetColumn({
   const active = agent.status === 'running' && live.length > 0
   const status = STATUS[agent.status] ?? STATUS.idle
 
+  // 卡片只展示「最近产出」，不从 messages 里反推当前任务。
+  //
+  // messages 现在切到后台也保留（修「切会话丢历史」），如果还从这里找
+  // 最后一条 user 消息，舰队卡片就会把完整任务原话摆出来 —— 那是打开
+  // 对话之后才该看到的东西。agent.last 是后端给的最后一句摘要，正合卡片用。
   const msgs = agent.messages ?? []
-  const task = [...msgs].reverse().find((m) => m.role === 'user')
   const lastReply = [...msgs].reverse().find((m) => m.role === 'assistant')
   const preview = bodyOf(lastReply?.content || agent.last || '')
   const chars = agent.chars ?? 0
@@ -284,18 +288,11 @@ function FleetColumn({
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', minHeight: 0 }}>
-        {task ? (
-          <>
-            <div style={labelStyle}>当前任务</div>
-            <div className="c-fleet-task">{bodyOf(task.content)}</div>
-          </>
-        ) : (
-          !live && !preview && (
-            // 空转的卡片不该摆两个「还没有」的标题：直接告诉用户下一步能做什么。
-            <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
-              还没接活。打开对话交一句任务，它就开工。
-            </div>
-          )
+        {!live && !preview && (
+          // 空转的卡片不该摆两个「还没有」的标题：直接告诉用户下一步能做什么。
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
+            还没接活。打开对话交一句任务，它就开工。
+          </div>
         )}
 
         {live ? (

@@ -86,6 +86,10 @@ export default function App() {
     if (created && workDir) {
       await s.send('agent.workDir', { id: created.id, dir: workDir })
     }
+    // 评审/审查/规划类角色默认只读，降低多 Agent 并发写文件冲突
+    if (created && /review|审查|评审|规划|planner/i.test(`${created.name} ${created.role}`)) {
+      API.setAgentPermission(created.id, 'readonly').catch(() => {})
+    }
     if (created) setActive({ kind: 'agent', id: created.id })
   }
 
@@ -156,15 +160,24 @@ export default function App() {
           channel={activeChannel}
           agents={s.agents}
           streaming={s.channelStreaming}
-          onSend={(text, _mentions, images) =>
-            s.send('channel.send', {
+          onSend={async (text, mentions, images) => {
+            // 同对象抢占：新消息再 @ 正在本群输出的人 → 先停旧回合再投新指令；
+            // 异对象并行：空闲成员不受影响。精确只断群回合需后端，见交接单。
+            const targets = mentions.includes('所有人')
+              ? s.agents.filter((a) => (activeChannel.members ?? []).includes(a.id))
+              : s.agents.filter((a) => mentions.includes(a.name))
+            const busyHere = targets.filter((a) => a.status === 'running' && a.busy === activeChannel.name)
+            if (busyHere.length > 0) {
+              await Promise.all(busyHere.map((a) => s.send('agent.stop', { id: a.id }).catch(() => {})))
+            }
+            return s.send('channel.send', {
               channelId: activeChannel.id,
               fromId: 'user',
               fromName: '你',
               text,
               images,
             })
-          }
+          }}
           onSetSpeaker={(agentId) =>
             s.send('channel.speaker', { channelId: activeChannel.id, agentId })
           }
@@ -178,6 +191,8 @@ export default function App() {
             setActive({ kind: 'channel', id })
             setView('chat')
           }}
+          connected={s.connected}
+          onStopAgent={(id) => s.send('agent.stop', { id })}
         />
       ) : (
         <AgentView
@@ -279,7 +294,7 @@ export default function App() {
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
       />
 
-      <ApprovalModal items={s.approvals} onDecide={s.decideApproval} />
+      <ApprovalModal items={s.approvals} agents={s.agents} onDecide={s.decideApproval} />
 
       <ToastContainer />
 

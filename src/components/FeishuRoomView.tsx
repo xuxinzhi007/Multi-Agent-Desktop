@@ -166,17 +166,21 @@ function LineBody({ line }: { line: Line }) {
   if (kind === 'post') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div
-          style={{
-            fontSize: 'var(--text-md)',
-            lineHeight: 1.7,
-            wordBreak: 'break-word',
-            color: 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap',
-          }}
-        >
-          {line.text}
-        </div>
+        {line.self ? (
+          md(line.text)
+        ) : (
+          <div
+            style={{
+              fontSize: 'var(--text-md)',
+              lineHeight: 1.7,
+              wordBreak: 'break-word',
+              color: 'var(--text-secondary)',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {line.text}
+          </div>
+        )}
         {images.map((m) => <MessageImage key={m.key} messageID={line.id} item={m} />)}
       </div>
     )

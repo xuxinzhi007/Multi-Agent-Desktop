@@ -61,8 +61,15 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	}
 
 	a.mu.Lock()
-	history := append([]llm.Message(nil), a.Messages...)
-	if channelID != "" {
+	// 群回合只带该群的上文，不拼私聊历史。
+	//
+	// 以前两边都以 a.Messages 起头，于是私聊里的旧话题无条件混进每个群回合，
+	// 模型拿着远古历史回答当前群的问题。chat-isolation 守的是「不写入、不显示」，
+	// 这里守的是「不取材」：输入侧同样要按场景隔开。
+	var history []llm.Message
+	if channelID == "" {
+		history = append([]llm.Message(nil), a.Messages...)
+	} else {
 		if contextText != "" {
 			history = append(history, llm.Message{Role: "system", Content: contextText})
 		}
@@ -93,8 +100,16 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	}
 
 	// 上一次运行的检查点允许续跑：崩溃或停止后重发消息，
-	// 已消耗的预算不会凭空重置
+	// 已消耗的预算不会凭空重置。
+	//
+	// 键必须带场景：以前群回合也用 a.ID，于是它把带群上文的检查点
+	// 写到了私聊的键上，下一次私聊续跑就把群历史读回来了。
+	// 私聊沿用旧键，磁盘上已有的 agent-*.json 继续能续跑，不需迁移。
+	// 用 __ 而不是 :：store 拿 id 当文件名，冒号在 Windows 非法。
 	runID := a.ID
+	if channelID != "" {
+		runID = a.ID + "__" + channelID
+	}
 	store, err := loop.NewFileStore(filepath.Join(loopCheckpointRoot(m), "runs"))
 	if err != nil {
 		m.finish(a, StatusError, "无法建立检查点目录："+err.Error())

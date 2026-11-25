@@ -138,6 +138,7 @@ type Manager struct {
 	knowledge KnowledgeProvider
 	skills    SkillStore
 	feed      Feed
+	channels  ChannelRoster
 	feishuOn  bool
 	// approvals 是写操作审批中心；nil 表示不审批（测试/无界面）。
 	approvals *approval.Center

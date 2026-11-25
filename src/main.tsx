@@ -10,12 +10,14 @@ import { installPreviewRuntime } from './lib/preview-runtime'
 import App from './App.tsx'
 import ErrorBoundary from './components/ErrorBoundary.tsx'
 
-installPreviewRuntime()
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </StrictMode>,
-)
+// 必须先确定跑在真窗口还是纯浏览器里，再挂载 React。
+// 不等这一步就渲染，桌面窗口会被误判成预览，整个界面变成假数据。
+void installPreviewRuntime().then(() => {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </StrictMode>,
+  )
+})

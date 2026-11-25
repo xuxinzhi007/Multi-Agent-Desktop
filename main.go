@@ -1515,7 +1515,9 @@ func main() {
 	}
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
-	mgr.SetFeed(&channelFeed{ch: channels, api: api})
+	roster := &channelFeed{ch: channels, api: api}
+	mgr.SetFeed(roster)
+	mgr.SetChannels(roster)
 	api.bot = feishu.NewHub(feishu.Hooks{
 		Run:     api.runFeishu,
 		Show:    api.showFeishu,

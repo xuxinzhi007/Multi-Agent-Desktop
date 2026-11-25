@@ -171,9 +171,31 @@ export function previewMode(): boolean {
   return typeof document !== 'undefined' && document.documentElement.dataset.preview === '1'
 }
 
-export function installPreviewRuntime() {
+/**
+ * 等 MyGo 把 runtime 注入进来。
+ *
+ * 注入是窗口创建后异步做的，而 main.tsx 在模块顶层就跑。以前这里只看
+ * 「这一刻有没有 globalThis.mygo」，React 启动比注入快，于是桌面窗口里
+ * 也被装上假 runtime，整个应用变成预览数据 —— 这就是 web 和桌面不一致的原因。
+ *
+ * 现在先轮询等一会儿：真窗口里注入会到，到了就什么都不装。
+ * 只有等超时（纯浏览器直开）才认定是预览。
+ */
+async function waitForRuntime(timeoutMS = 1500): Promise<boolean> {
   const g = globalThis as { mygo?: unknown }
-  if (g.mygo) return // 真实窗口里什么都不做
+  if (g.mygo) return true
+  const deadline = Date.now() + timeoutMS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25))
+    if (g.mygo) return true
+  }
+  return false
+}
+
+export async function installPreviewRuntime() {
+  const g = globalThis as { mygo?: unknown }
+  if (g.mygo) return // 已经注入，真实窗口
+  if (await waitForRuntime()) return // 注入到了，同样什么都不做
   document.documentElement.dataset.preview = '1'
   document.title = '预览 · Multi-Agent Desktop'
 
@@ -240,4 +262,17 @@ export function installPreviewRuntime() {
   console.info(
     '[preview] 浏览器预览模式：数据是假的，写入不生效。要真实行为请用 MyGo 窗口打开。',
   )
+
+  // 兜底：注入比等待窗口更慢时（机器忙、首帧慢），真 runtime 后到。
+  // 这时把假替身撤掉并刷新，让界面重新按真实数据加载，
+  // 而不是永远停在预览上。
+  const fake = g.mygo
+  const watch = setInterval(() => {
+    // MyGo 注入会直接覆盖 globalThis.mygo。被换掉说明真环境到了。
+    if (g.mygo === fake) return
+    clearInterval(watch)
+    delete document.documentElement.dataset.preview
+    location.reload()
+  }, 200)
+  setTimeout(() => clearInterval(watch), 15000)
 }
