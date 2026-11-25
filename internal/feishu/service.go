@@ -40,6 +40,9 @@ type Hooks struct {
 	Claim func(parentID, chat string, busy map[string]bool) (string, error)
 	// Roster 是本机可以接手的会话。/status 和 /use 用它。
 	Roster func() []Named
+	// Root 把子会话 id 映射到它所属的根会话。审批卡挂在根会话的 run 上，
+	// 子会话自己通常没有飞书 run；为空时按原 id 处理。
+	Root func(agentID string) string
 	// Actions 回复一张带按钮的卡片。批准写操作时用。
 	Actions func(ctx context.Context, appID, secret, messageID, text string, buttons []CardButton) (string, error)
 	// Decide 把飞书卡片上的允许或拒绝送回审批。
@@ -755,10 +758,16 @@ func (s *Service) Ask(v Ask) {
 	if s == nil || v.ID == "" || s.hooks.Actions == nil {
 		return
 	}
+	agentID := v.AgentID
+	if s.hooks.Root != nil {
+		if root := s.hooks.Root(v.AgentID); root != "" {
+			agentID = root
+		}
+	}
 	s.mu.Lock()
 	var run *liveRun
 	for _, cur := range s.runs {
-		if cur != nil && !cur.closed && cur.agent == v.AgentID && cur.key != "" {
+		if cur != nil && !cur.closed && cur.agent == agentID && cur.key != "" {
 			run = cur
 			break
 		}

@@ -21,6 +21,19 @@ func newTestManager(t *testing.T) *Manager {
 	return m
 }
 
+func TestRootIDWalksParentToTop(t *testing.T) {
+	m := newTestManager(t)
+	root := m.Create("root", "根", "统筹")
+	mid := m.create("mid", "中间", "", root.ID)
+	leaf := m.create("leaf", "子会话", "", mid.ID)
+	if got := m.RootID(leaf.ID); got != root.ID {
+		t.Fatalf("RootID(leaf) = %s, want %s", got, root.ID)
+	}
+	if got := m.RootID("missing"); got != "missing" {
+		t.Fatalf("RootID(missing) = %s", got)
+	}
+}
+
 // ① Save/Load 必须完整往返 WorkDir + LLMCfg（四个白名单点不能漂移）。
 func TestSaveLoadRoundTripSessionConfig(t *testing.T) {
 	dir := t.TempDir()

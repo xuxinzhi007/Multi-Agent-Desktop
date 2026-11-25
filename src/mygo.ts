@@ -326,6 +326,54 @@ export interface FeishuView {
   userRead?: string;
 }
 
+/** GatewayAgentView 是网关侧会话快照的前端视图。 */
+export interface GatewayAgentView {
+  id: string;
+  name: string;
+  status: string;
+  queueLen: number;
+  lastError?: string;
+}
+
+/** GatewayApprovalView 是网关侧待审批卡片的前端视图。 */
+export interface GatewayApprovalView {
+  id: string;
+  agentId: string;
+  agentName: string;
+  tool: string;
+  title: string;
+  detail: string;
+  diff?: string;
+  createdAt: number;
+}
+
+/** GatewayBindingView 是外部渠道会话与本地 Agent 绑定的前端视图。 */
+export interface GatewayBindingView {
+  channel: string;
+  externalChatId: string;
+  agentId: string;
+  policy?: string;
+  createdAt: number;
+}
+
+/**
+ * GatewayStatusView 是网关总览的前端视图。Agents / PendingApprovals 为列表，
+ * Bindings 为计数；进程级字段（wired/channels/uptime/sse 等）来自 gw.Status()。
+ */
+export interface GatewayStatusView {
+  gateway: boolean;
+  running: boolean;
+  addr: string;
+  listenError?: string;
+  wired: Record<string, boolean>;
+  channels: string[];
+  uptimeSec: number;
+  bindings: number;
+  agents: GatewayAgentView[];
+  pendingApprovals: GatewayApprovalView[];
+  sseSubscribers: number;
+}
+
 export interface ImageFile {
   mime: string;
   data: string;
@@ -694,6 +742,21 @@ export const API = {
   /** FinishFeishuUserAuth 等用户确认，把用户令牌留在本机配置里。 */
   finishFeishuUserAuth(id: string): Promise<FeishuView> {
     return call("API.FinishFeishuUserAuth", id);
+  },
+  /** GatewayBindings 返回全部渠道绑定。gw==nil 时返回空切片（非 nil）。 */
+  gatewayBindings(): Promise<GatewayBindingView[]> {
+    return call("API.GatewayBindings");
+  },
+  /** GatewayDecideApproval 转发一次网关侧审批决定。错误原文透传。 */
+  gatewayDecideApproval(id: string, allow: boolean, remember: boolean, reason: string): Promise<void> {
+    return call("API.GatewayDecideApproval", id, allow, remember, reason);
+  },
+  /**
+   * GatewayStatus 返回网关总览。gw==nil 时返回 Gateway:false 的空态：
+   * 切片用 make 初始化（不返回 null），Wired 为空 map。
+   */
+  gatewayStatus(): Promise<GatewayStatusView> {
+    return call("API.GatewayStatus");
   },
   /** GetAgentConfig 返回这个会话自己选的模型。地址和 Key 来自该厂商已保存的连接。 */
   getAgentConfig(agentId: string): Promise<Config> {

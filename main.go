@@ -23,6 +23,7 @@ import (
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/feishu"
+	gwhost "multi-agent-desktop/internal/gateway/host"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/pty"
@@ -39,6 +40,7 @@ type API struct {
 	kb        knowledge.Store
 	settings  *config.Store
 	bot       *feishu.Hub
+	gw        *gwhost.Host
 	win       *mygo.Window
 	desk      *browser.Desk
 	imageDir  string
@@ -1473,6 +1475,7 @@ func main() {
 	var mgr *agent.Manager
 	var win *mygo.Window
 	var api *API
+	var gw *gwhost.Host
 
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	var chMgr *channel.Manager
@@ -1495,6 +1498,10 @@ func main() {
 			if id, ok := approvalDoneID(data); ok {
 				api.bot.CloseAsk(id)
 			}
+		}
+		// 全事件桥接给内嵌网关；渠道归属/是否回复由 Service 侧过滤。
+		if gw != nil {
+			gw.OnAgentEvent(event, data)
 		}
 		emitToWindow(win, mgr, chMgr, event, data)
 	}
@@ -1619,11 +1626,42 @@ func main() {
 		React:   feishu.React,
 		Claim:   api.claimFeishu,
 		Roster:  api.feishuRoster,
+		Root: func(id string) string {
+			if api.mgr == nil {
+				return id
+			}
+			return api.mgr.RootID(id)
+		},
 		Actions: feishu.ReplyActions,
 		Decide:  api.decideFeishu,
 	})
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.syncFeishu()
+
+	// 内嵌网关：桌面进程直接挂 HTTP/SSE。初始化或监听失败只记日志，
+	// 绝不能阻断桌面启动；失败时 gw=nil，前端显示「未启用」。
+	gwAddr := strings.TrimSpace(os.Getenv("MAD_GATEWAY_ADDR"))
+	if gwAddr == "" {
+		gwAddr = "127.0.0.1:8780"
+	}
+	var gwErr error
+	gw, gwErr = gwhost.New(gwhost.Deps{
+		Manager:   mgr,
+		Approvals: mgr.Approvals(),
+		DataDir:   dataDir,
+	})
+	if gwErr != nil {
+		log.Printf("gateway: init failed: %v", gwErr)
+		gw = nil
+	} else {
+		if err := gw.Start(gwAddr, os.Getenv("MAD_GATEWAY_TOKEN")); err != nil {
+			log.Printf("gateway: listen %s failed, desktop continues: %v", gwAddr, err)
+		} else {
+			log.Printf("gateway: listening on %s", gwAddr)
+		}
+	}
+	api.gw = gw
+
 	api.desk = browser.NewDesk()
 	api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
 	browser.SetDesk(api.desk)
@@ -1633,6 +1671,12 @@ func main() {
 	mygo.App.OnQuit(func() {
 		if api.bot != nil {
 			api.bot.Sync(nil)
+		}
+		// 先关网关（停止接收外部入站），再停会话内核。Close 幂等。
+		if gw != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = gw.Close(closeCtx)
+			cancel()
 		}
 		if mgr != nil {
 			mgr.Shutdown()

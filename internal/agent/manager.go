@@ -924,6 +924,27 @@ func (m *Manager) Get(id string) (*Agent, bool) {
 	return a, ok
 }
 
+// RootID 沿 ParentID 往上找到根会话。子会话的审批卡要挂在根会话的
+// 飞书 run 上；找不到或成环时返回当前 id，调用方按原样处理。
+func (m *Manager) RootID(id string) string {
+	if m == nil || id == "" {
+		return id
+	}
+	cur := id
+	for i := 0; i < 32; i++ {
+		a, ok := m.Get(cur)
+		if !ok {
+			return cur
+		}
+		p := a.Snapshot().ParentID
+		if p == "" || p == cur {
+			return cur
+		}
+		cur = p
+	}
+	return cur
+}
+
 func (m *Manager) List() []*Agent {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

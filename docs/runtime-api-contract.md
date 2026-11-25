@@ -207,13 +207,20 @@ allow, reason := appr.Approve(turnCtx, a.ID, a.Name, tool.Call{
 
 `auto` 模式仍由 `approval.Center` 的既有语义决定（显式配置才自动）；`readonly` 一律拒绝。审批卡片复用现有 `ApprovalModal`，不新建 UI。
 
-## 8. 前端待接清单（本契约只负责契约，UI 由前端线实现）
+## 8. 前端接线（已实现，2026-11-25）
 
-1. 新建会话弹窗：运行时二选一（原生 / 外部 ACP），ACP 下填 名称 / 命令 / 参数 / 环境变量；命令为空禁止提交并就地提示。
-2. 会话编辑：读取 `AgentView.acp` 回填，保存调用 `API.setAgentRuntime`，失败时展示后端原文。
-3. 会话展示：`原生` / `ACP · <name|basename>` 徽标；未配置命令也如实显示，方便用户补。
-4. 流式文本、思考、工具开始/结束、审批卡：**复用**现有组件与事件，不新建重复实现。
-5. 颜色只用 `src/index.css` 的 token。
+以下五项均已落地，改动只在 `src/**` 与 `e2e/**`；生成物 `src/mygo.ts` 未手改。
+
+1. 新建会话弹窗：运行时二选一（原生 / 外部 ACP），ACP 下填 名称 / 命令 / 参数 / 环境变量；命令为空禁止提交并就地提示。落点 `src/components/CreateAgentModal.tsx`。
+2. 会话编辑：输入栏 `RuntimeChip`（与 `WorkDirChip` 同范式的 chip + 弹层 + Escape），读取 `AgentView.acp` 回填，保存调用 `API.setAgentRuntime`，失败显示后端原文，保存中禁用，刷新以 `agent.config` 为准。落点 `src/components/AgentView.tsx`、`src/lib/runtime.ts`。
+3. 运行时展示：`RuntimeBadge` 在会话行、舰队卡片与头部显示 `原生` / `ACP · <name|basename>`；连接状态只用 `runtimeState`（starting / running / idle / error）与 `runtimeError`，ACP 未填命令显示「未配置」。
+4. 流式文本、思考、工具开始/结束、审批卡全部复用现有组件；ACP 审批（`tool:"acp"`）由 `ApprovalModal` 展示与决定。
+5. 颜色只用 `src/index.css` 的 token；e2e 新增 `e2e/runtime.spec.ts`（6 例）与 `e2e/feishu-whitelist.spec.ts`（2 例），`e2e/mock-runtime.ts` 已补 `SetAgentRuntime` 与白名单回传。
+
+仍待后端配合（不影响本契约的当前使用）：
+
+- `CreateAgentRequest` 还没有 runtime 字段，前端采用「先创建、再 `setAgentRuntime`」两阶段；若后端并入创建请求，弹窗可简化。
+- 网关 / 记忆 / 计划三页的数据面未接，仍是明确的「未接入」禁用态。
 
 ## 9. 验证
 

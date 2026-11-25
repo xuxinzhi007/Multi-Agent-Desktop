@@ -5,12 +5,22 @@
  * - 运行中：agents 里 status === 'running' 的会话数
  * - 待审批：approvals 队列长度，点击打开审批队列（复用 ApprovalModal）
  * - 队列：各会话 queueLen 之和
- * - 网关：mad-gateway 后端尚未接入，固定「未接入」禁用态，不伪造在线 / 延迟
+ * - 网关：来自 GatewayStatus IPC 的轻量摘要。三态：运行中 / 端口占用 / 未启用；
+ *   不再固定写「未接入」。摘要由 App 按挂载与低速轮询刷新，这里不自己发请求。
  */
+
+export type GatewaySummary = {
+  /** gateway:false（gw 未装配 / 运行时缺失）→ 未启用 */
+  enabled: boolean
+  running: boolean
+  listenError: string
+}
+
 type Props = {
   running: number
   approvals: number
   queue: number
+  gateway?: GatewaySummary
   onOpenApprovals: () => void
 }
 
@@ -38,12 +48,46 @@ const numStyle: React.CSSProperties = {
   fontVariantNumeric: 'tabular-nums',
 }
 
-export default function StatusBar({ running, approvals, queue, onOpenApprovals }: Props) {
+function gatewayBadge(g?: GatewaySummary): { cls: string; dot: string; text: string; title: string } {
+  if (!g || !g.enabled) {
+    return {
+      cls: 'c-badge c-badge--disabled',
+      dot: 'c-dot--idle',
+      text: '网关 未启用',
+      title: '网关未启用：未装配、初始化失败，或不在桌面运行时内',
+    }
+  }
+  if (g.listenError) {
+    return {
+      cls: 'c-badge c-badge--warning',
+      dot: 'c-dot--error',
+      text: '网关 端口占用',
+      title: g.listenError,
+    }
+  }
+  if (g.running) {
+    return {
+      cls: 'c-badge c-badge--success',
+      dot: 'c-dot--connected',
+      text: '网关 运行中',
+      title: '网关 HTTP/SSE 已在本地监听',
+    }
+  }
+  return {
+    cls: 'c-badge c-badge--disabled',
+    dot: 'c-dot--idle',
+    text: '网关 已停止',
+    title: '网关已装配但当前未在监听',
+  }
+}
+
+export default function StatusBar({ running, approvals, queue, gateway, onOpenApprovals }: Props) {
+  const gw = gatewayBadge(gateway)
   return (
     <header style={barStyle}>
-      <span className="c-badge c-badge--disabled" title="网关后端尚未接入，暂不显示在线状态与延迟">
-        <span className="c-dot c-dot--idle" aria-hidden />
-        网关 未接入
+      <span className={gw.cls} title={gw.title}>
+        <span className={gw.dot} aria-hidden />
+        {gw.text}
       </span>
 
       <span style={statStyle}>

@@ -986,6 +986,12 @@
 .c-settings__input {
   width: 100%;
 }
+.c-settings__textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: var(--leading-normal);
+  font-family: var(--font-mono);
+}
 .c-settings__load-btn {
   white-space: nowrap;
   min-width: 82px;

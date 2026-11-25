@@ -166,6 +166,15 @@ func TestCancelledContextDenies(t *testing.T) {
 	}
 }
 
+func TestDefaultTimeoutOutlivesSupervisorTurn(t *testing.T) {
+	// Supervisor 一轮按 10 分钟算，默认审批等待必须比它长，否则长任务
+	// 最后一步的审批会被固定 5 分钟误杀。
+	c := New(func(string, any) {})
+	if c.timeout <= 10*time.Minute {
+		t.Fatalf("default approval timeout = %s, want > 10m", c.timeout)
+	}
+}
+
 func TestTimeoutDenies(t *testing.T) {
 	c := New(nil)
 	c.SetTimeout(60 * time.Millisecond)
@@ -214,6 +223,88 @@ func TestModeReadOnlyRejectsImmediately(t *testing.T) {
 	}
 	if len(c.Pending()) != 0 {
 		t.Fatal("只读模式不该留下待批卡")
+	}
+}
+
+// 会话带 deadline 时，审批等待跟会话生命周期走：短 deadline 到点就拒绝，
+// 不能再被固定的 5 分钟上限拖住，也不能自动放行。
+func TestApprovalFollowsContextDeadline(t *testing.T) {
+	c := New(nil)
+	c.SetTimeout(time.Hour) // 默认上限拉长，确保触发的是 deadline 而不是默认超时
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	ok, reason := c.Approve(ctx, "a1", "前端", call("bash"))
+	if ok {
+		t.Fatal("deadline 到期应当拒绝")
+	}
+	if reason == "" {
+		t.Fatal("拒绝要带原因")
+	}
+	if elapsed := time.Since(start); elapsed < 60*time.Millisecond {
+		t.Fatalf("返回得太早：%v", elapsed)
+	}
+	if got := len(c.Pending()); got != 0 {
+		t.Fatalf("deadline 结束后不该残留待批卡，pending=%d", got)
+	}
+}
+
+// 长会话的 deadline 比默认等待上限长时，审批不该被固定上限误杀：
+// 在会话还活着的时候批，应当放行。
+func TestApprovalOutlivesDefaultTimeoutForLongSession(t *testing.T) {
+	c := New(nil)
+	// 模拟被压短的默认上限；会话 deadline 更长，等待以 deadline 为准。
+	c.SetTimeout(150 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	var ok bool
+	go func() {
+		ok, _ = c.Approve(ctx, "a1", "前端", call("bash"))
+		close(done)
+	}()
+
+	pending := waitPending(t, c)
+	// 超过被压短的默认上限之后再批，证明等待没有被默认上限掐断。
+	time.Sleep(300 * time.Millisecond)
+	if err := c.Decide(pending.ID, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("审批没有被决定唤醒")
+	}
+	if !ok {
+		t.Fatal("长会话里及时批准应当放行")
+	}
+}
+
+// 用户中途停止：ctx 取消要拒绝，不能放行，也不能留待批卡。
+func TestApprovalRejectedWhenUserStops(t *testing.T) {
+	c := New(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var ok bool
+	var reason string
+	go func() {
+		ok, reason = c.Approve(ctx, "a1", "前端", call("bash"))
+		close(done)
+	}()
+	waitPending(t, c)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("取消后没有唤醒")
+	}
+	if ok || reason == "" {
+		t.Fatalf("停止应当拒绝：ok=%v reason=%q", ok, reason)
+	}
+	if got := len(c.Pending()); got != 0 {
+		t.Fatalf("停止后不该残留待批卡，pending=%d", got)
 	}
 }
 

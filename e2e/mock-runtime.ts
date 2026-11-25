@@ -9,11 +9,49 @@ import { test as base, type Page } from '@playwright/test'
  * 只 mock UI 结构测试需要的方法，返回值都是空数据。
  */
 
+export type GatewayMockAgent = {
+  id: string
+  name: string
+  status: string
+  queueLen: number
+  lastError?: string
+}
+
+export type GatewayMockApproval = {
+  id: string
+  agentId: string
+  agentName: string
+  tool: string
+  title: string
+  detail: string
+  diff?: string
+  createdAt: number
+}
+
+export type GatewayMockBinding = {
+  channel: string
+  externalChatId: string
+  agentId: string
+  policy: string
+  createdAt: number
+}
+
+export type GatewayMock = {
+  /** ok：运行中；listenError：端口占用降级；disabled：gw 未启用。 */
+  mode?: 'ok' | 'listenError' | 'disabled'
+  agents?: GatewayMockAgent[]
+  approvals?: GatewayMockApproval[]
+  bindings?: GatewayMockBinding[]
+}
+
 type MockState = {
   agents: unknown[]
   channels: unknown[]
   notes: unknown[]
   feishu?: unknown[]
+  /** 非空时 SaveFeishu 以该文案 reject，用于验证后端错误原文展示。 */
+  feishuError?: string
+  gateway?: GatewayMock
 }
 
 const EMPTY_STATE: MockState = { agents: [], channels: [], notes: [], feishu: [] }
@@ -26,6 +64,12 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
     const listeners = new Map<string, ((data: unknown) => void)[]>()
     const calls: { method: string; args: unknown[] }[] = []
     ;(window as unknown as Record<string, unknown>).__mockCalls = calls
+
+    // 网关 mock 状态：决定审批后从本地副本摘除，模拟后端队列收缩。
+    const gwConfig = initial.gateway ?? { mode: 'disabled' }
+    const gwAgents = [...(gwConfig.agents ?? [])]
+    const gwApprovals = [...(gwConfig.approvals ?? [])]
+    const gwBindings = [...(gwConfig.bindings ?? [])]
 
     const handlers: Record<string, (...args: unknown[]) => unknown> = {
       'API.ListAgents': () => initial.agents,
@@ -107,7 +151,18 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         status: enabled ? 'connecting' : 'stopped',
       }),
       'API.SaveFeishu': (input) => {
-        const in_ = input as { id?: string; name?: string; enabled?: boolean; appId?: string; appSecret?: string; agentId?: string; mentionOnly?: boolean }
+        if (initial.feishuError) return Promise.reject(new Error(initial.feishuError))
+        const in_ = input as {
+          id?: string
+          name?: string
+          enabled?: boolean
+          appId?: string
+          appSecret?: string
+          agentId?: string
+          mentionOnly?: boolean
+          ownerOpenId?: string
+          approverOpenIds?: string[]
+        }
         return {
           id: in_.id || 'bot_test',
           name: in_.name ?? '',
@@ -117,6 +172,8 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
           hasUser: false,
           agentId: in_.agentId ?? '',
           mentionOnly: !!in_.mentionOnly,
+          ownerOpenId: in_.ownerOpenId ?? '',
+          approverOpenIds: in_.approverOpenIds ?? [],
           status: in_.enabled ? 'connecting' : 'stopped',
         }
       },
@@ -166,6 +223,35 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         backend: 'supervisor',
         workDir: '/tmp/e2e-project',
       }),
+      'API.SetAgentRuntime': (req) => {
+        const r = req as {
+          agentId?: string
+          runtime?: string
+          name?: string
+          command?: string
+          args?: string[]
+          env?: string[]
+        }
+        return {
+          id: r.agentId ?? 'agent-test-1',
+          name: 'test',
+          role: '',
+          color: '#5b9dff',
+          status: 'idle',
+          createdAt: Date.now() / 1000,
+          messages: [],
+          queueLen: 0,
+          backend: 'loop',
+          workDir: '',
+          runtime: r.runtime ?? 'native',
+          acp:
+            r.runtime === 'acp'
+              ? { name: r.name ?? '', command: r.command ?? '', args: r.args ?? [], env: r.env ?? [] }
+              : undefined,
+          runtimeState: 'idle',
+          runtimeError: '',
+        }
+      },
       'API.SetAgentWorktree': (id: unknown, on: unknown) => ({
         id,
         messages: [],
@@ -201,6 +287,45 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
       'API.SetAgentPermission': (_id: unknown, mode: unknown) => String(mode ?? 'ask'),
       'API.ListApprovals': () => [],
       'API.DecideApproval': () => undefined,
+      // 网关：状态 / 绑定 / 审批决定。未提供 gateway 配置时回落 disabled 空态。
+      'API.GatewayStatus': () => {
+        const mode = gwConfig.mode ?? 'disabled'
+        if (mode === 'disabled') {
+          return {
+            gateway: false,
+            running: false,
+            addr: '',
+            wired: {},
+            channels: [],
+            uptimeSec: 0,
+            bindings: 0,
+            agents: [],
+            pendingApprovals: [],
+            sseSubscribers: 0,
+          }
+        }
+        const listenError =
+          mode === 'listenError' ? 'listen tcp 127.0.0.1:8780: bind: address already in use' : ''
+        return {
+          gateway: true,
+          running: mode !== 'listenError',
+          addr: '127.0.0.1:8780',
+          listenError,
+          wired: { session: true, approval: true, sender: true, binder: true },
+          channels: ['web'],
+          uptimeSec: 125,
+          bindings: gwBindings.length,
+          agents: gwAgents,
+          pendingApprovals: gwApprovals,
+          sseSubscribers: 1,
+        }
+      },
+      'API.GatewayBindings': () => gwBindings,
+      'API.GatewayDecideApproval': (id: unknown) => {
+        const idx = gwApprovals.findIndex((a) => a.id === id)
+        if (idx >= 0) gwApprovals.splice(idx, 1)
+        return undefined
+      },
     }
 
     ;(window as unknown as Record<string, unknown>).mygo = {

@@ -899,6 +899,34 @@ func TestApprovalCardDecidesFromFeishu(t *testing.T) {
 	}
 }
 
+func TestApprovalCardForSubSessionUsesRootRun(t *testing.T) {
+	var gotCard bool
+	s := New(Hooks{
+		Root: func(id string) string {
+			if id == "child" {
+				return "root"
+			}
+			return id
+		},
+		Actions: func(context.Context, string, string, string, string, []CardButton) (string, error) {
+			gotCard = true
+			return "om_card", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "root"}
+	if _, err := s.reserve("root", "om_user", "oc", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	// 子会话自己没有飞书 run；审批卡必须挂到根会话的 run 上，而不是静默丢弃。
+	s.Ask(Ask{ID: "ap-child", AgentID: "child", Tool: "bash", Title: "运行命令"})
+	if !gotCard {
+		t.Fatal("sub-session approval did not create a card")
+	}
+	if s.takeAsk("ap-child") == "" {
+		t.Fatal("sub-session approval card was not recorded")
+	}
+}
+
 func TestApprovalStrangerCannotConsumeOrDecide(t *testing.T) {
 	decided := false
 	s := New(Hooks{

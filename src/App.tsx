@@ -17,6 +17,7 @@ import GatewayPage from './components/pages/GatewayPage'
 import MemoryPage from './components/pages/MemoryPage'
 import PlanPage from './components/pages/PlanPage'
 import { useBackend } from './lib/useBackend'
+import { useGatewayStatus } from './lib/gateway'
 import type { AgentView as Agent } from './mygo'
 import { API } from './mygo'
 import { useTheme } from './lib/useTheme'
@@ -29,6 +30,8 @@ type ActiveRef = { kind: 'agent' | 'channel' | 'feishu'; id: string } | null
 
 export default function App() {
   const s = useBackend()
+  // 网关状态摘要：只喂给顶部状态条，低速轮询；明细由网关页自己再拉一次。
+  const gw = useGatewayStatus(6000)
   useTheme() // 应用主题到 document.documentElement
   const [active, setActive] = useState<ActiveRef>(null)
   const [view, setView] = useState<MainView>('fleet')
@@ -147,6 +150,7 @@ export default function App() {
         running={runningCount}
         approvals={s.approvals.length}
         queue={queueTotal}
+        gateway={{ enabled: gw.status.gateway, running: gw.status.running, listenError: gw.status.listenError ?? '' }}
         onOpenApprovals={() => setApprovalOpen(true)}
       />
       <div

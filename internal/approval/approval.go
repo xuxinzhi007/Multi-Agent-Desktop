@@ -58,6 +58,12 @@ func ParseMode(s string) Mode {
 	}
 }
 
+// defaultTimeout 是没人处理审批时的兜底上限。
+// 以前固定 5 分钟，比 Supervisor 一轮 10 分钟还短，长任务会在最后一步被
+// 误判成“等待审批超时”。这里放宽到 30 分钟；真正的取消仍由 ctx 负责，
+// 超时依旧按拒绝处理，绝不自动放行。
+const defaultTimeout = 30 * time.Minute
+
 // Center 管理所有等待中的审批。
 type Center struct {
 	mu      sync.Mutex
@@ -90,7 +96,7 @@ func New(emit func(event string, data any)) *Center {
 		pending: map[string]*waiter{},
 		allowed: map[string]map[string]bool{},
 		modes:   map[string]Mode{},
-		timeout: 5 * time.Minute,
+		timeout: defaultTimeout,
 	}
 }
 
@@ -176,6 +182,17 @@ func (c *Center) Approve(ctx context.Context, agentID, agentName string, call to
 
 	defer c.drop(id)
 
+	// 等待上限跟会话生命周期对齐：ctx 带 deadline（长会话/看门狗）时以
+	// 剩余时间为准，没有 deadline 才用默认上限。注意这只是等待时长的边界，
+	// 不会把没人批的写操作放过去——任何一路超时/取消都是拒绝。
+	wait := c.timeout
+	if dl, ok := ctx.Deadline(); ok {
+		wait = time.Until(dl)
+	}
+	if wait <= 0 {
+		wait = time.Millisecond
+	}
+
 	select {
 	case d := <-w.ch:
 		if d.remember && d.allow {
@@ -184,7 +201,7 @@ func (c *Center) Approve(ctx context.Context, agentID, agentName string, call to
 		return d.allow, d.reason
 	case <-ctx.Done():
 		return false, "这一轮已停止，审批取消"
-	case <-time.After(c.timeout):
+	case <-time.After(wait):
 		return false, "等待审批超时"
 	}
 }

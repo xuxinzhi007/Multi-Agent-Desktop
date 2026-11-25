@@ -397,6 +397,10 @@ type FeishuDraft = {
   appId: string
   secret: string
   agentId: string
+  /** 审批卡会话 owner 的 open_id，只读，来自飞书身份授权；不在草稿里编辑。 */
+  ownerOpenId?: string
+  /** 审批白名单 open_id，界面上是「每行一个」的文本，保存时解析成数组。 */
+  approverText?: string
   dirty: boolean
 }
 
@@ -429,6 +433,8 @@ function draftFromBot(bot: FeishuView): FeishuDraft {
     appId: bot.appId,
     secret: '',
     agentId: bot.agentId,
+    ownerOpenId: bot.ownerOpenId ?? '',
+    approverText: (bot.approverOpenIds ?? []).join('\n'),
     dirty: false,
   }
 }
@@ -519,6 +525,8 @@ function FeishuBoard() {
       appId: '',
       secret: '',
       agentId: '',
+      ownerOpenId: '',
+      approverText: '',
       dirty: true,
     }
     setPending((cur) => [...cur, row])
@@ -580,6 +588,15 @@ function FeishuBoard() {
     setSelected(id)
     setBusy(true)
     setErr('')
+    // 白名单：每行一个 open_id，去空行、去重；留空则不传，沿用已保存的值（契约 FeishuSave）。
+    const approvers = Array.from(
+      new Set(
+        (source.approverText ?? '')
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    )
     try {
       const view = await API.saveFeishu({
         id: source.id.startsWith('new-') ? '' : source.id,
@@ -589,6 +606,8 @@ function FeishuBoard() {
         appSecret: source.secret,
         agentId: source.agentId,
         mentionOnly: !source.joinAll,
+        ownerOpenId: source.ownerOpenId || undefined,
+        approverOpenIds: approvers.length > 0 ? approvers : undefined,
       })
       putBot(view)
       setPending((cur) => cur.filter((b) => b.id !== source.id))
@@ -999,6 +1018,34 @@ function FeishuBoard() {
                 <button type="button" className="c-btn c-btn--ghost" onClick={() => setShowSecret((v) => !v)}>
                   {showSecret ? '隐藏' : '显示'}
                 </button>
+              </span>
+            </label>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">审批 Owner OpenID</span>
+              <input
+                className="c-settings__input"
+                aria-label="审批 Owner OpenID"
+                readOnly
+                disabled
+                spellCheck={false}
+                value={draft.ownerOpenId ?? ''}
+                placeholder="未获取到；完成「用我的飞书身份授权」后自动填入"
+              />
+            </label>
+            <label className="c-settings__field">
+              <span className="c-settings__field-label">审批白名单 open_id（每行一个）</span>
+              <textarea
+                className="c-settings__input c-settings__textarea"
+                aria-label="审批白名单 open_id"
+                spellCheck={false}
+                rows={4}
+                disabled={busy}
+                value={draft.approverText ?? ''}
+                placeholder={'ou_xxx\nou_yyy'}
+                onChange={(e) => patchDraft(draft.id, { approverText: e.target.value })}
+              />
+              <span className="c-settings__hint">
+                Owner 与白名单都为空时，审批一律拒绝；留空保存表示沿用已保存的值。
               </span>
             </label>
             <details className="c-settings__fold">
