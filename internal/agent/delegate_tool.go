@@ -58,7 +58,7 @@ func (*delegateTool) Schema() json.RawMessage {
 					"additionalProperties": false
 				}
 			},
-			"max_minutes": {"type": "integer", "description": "最多等多久（分钟）。只能调小，上限 20"}
+			"max_minutes": {"type": "integer", "description": "最多等多久（分钟）。不填按 60，只能调小"}
 		},
 		"required": ["tasks"],
 		"additionalProperties": false
@@ -136,5 +136,5 @@ func registerSpawnTools(reg *tool.Registry, m *Manager, a *Agent, channelID stri
 	}
 	// ask_agent 找的是已有会话，不新增名额，任何层都能用。
 	reg.Register(&askAgentTool{m: m, fromID: a.ID})
-	reg.Register(&listAgentsTool{m: m})
+	reg.Register(&listAgentsTool{m: m, self: a.ID})
 }

@@ -10,11 +10,11 @@ import (
 )
 
 func TestLoopSystemPromptOmitsFeishuWhenOff(t *testing.T) {
-	off := loopSystemPrompt("D:/work", false)
+	off := loopSystemPrompt(identity{Name: "后端", ID: "a1"}, "D:/work", false)
 	if strings.Contains(off, "飞书里的一句") {
 		t.Fatalf("off prompt contains feishu: %s", off)
 	}
-	on := loopSystemPrompt("D:/work", true)
+	on := loopSystemPrompt(identity{Name: "后端", ID: "a1"}, "D:/work", true)
 	if !strings.Contains(on, "飞书里的一句") {
 		t.Fatal("on prompt missing feishu")
 	}

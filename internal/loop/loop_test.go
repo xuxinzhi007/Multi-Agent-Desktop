@@ -713,3 +713,83 @@ func TestStopReasonCarriesTheLastError(t *testing.T) {
 		t.Fatalf("reason = %q, want the tool error in it", st.StopReason)
 	}
 }
+
+func TestCompactUsesSummarizerAndKeepsSummary(t *testing.T) {
+	r := &Runner{}
+	var gotPrev string
+	var calls int
+	r.Summarize = func(dropped []llm.Message, previous string, budget int) string {
+		calls++
+		gotPrev = previous
+		return "目标：修好压缩。下一步：验证摘要能续上。"
+	}
+	// 造一段超预算的历史。
+	var msgs []llm.Message
+	msgs = append(msgs, llm.Message{Role: "system", Content: "sys"})
+	for i := 0; i < 60; i++ {
+		msgs = append(msgs, llm.Message{Role: "user", Content: strings.Repeat("问题内容。", 40)})
+		msgs = append(msgs, llm.Message{Role: "assistant", Content: strings.Repeat("回答内容。", 40)})
+	}
+	st := &State{Summary: "上一份摘要"}
+	out := r.compact(msgs, 600, st)
+	if calls == 0 {
+		t.Fatal("没有调用摘要器，仍在本地截断")
+	}
+	if gotPrev != "上一份摘要" {
+		t.Fatalf("没把上一份摘要当迭代上下文：%q", gotPrev)
+	}
+	if st.Summary == "上一份摘要" {
+		t.Fatal("新摘要没写回状态，下次压缩会重新丢")
+	}
+	var found bool
+	for _, m := range out {
+		if strings.Contains(m.Content, "下一步：验证摘要能续上") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("摘要没进这一轮的上下文")
+	}
+}
+
+func TestCompactFallsBackWhenSummarizerFails(t *testing.T) {
+	r := &Runner{Summarize: func([]llm.Message, string, int) string { return "" }}
+	var msgs []llm.Message
+	for i := 0; i < 40; i++ {
+		msgs = append(msgs, llm.Message{Role: "user", Content: strings.Repeat("内容。", 60)})
+	}
+	st := &State{}
+	out := r.compact(msgs, 300, st)
+	if len(out) == 0 {
+		t.Fatal("摘要失败时不该整轮丢掉")
+	}
+	if st.Summary != "" {
+		t.Fatal("摘要失败不该写回空摘要")
+	}
+}
+
+func TestDefaultBudgetDoesNotCapIterationsOrTools(t *testing.T) {
+	b := DefaultBudget()
+	if b.MaxIterations != 0 || b.MaxToolCalls != 0 {
+		t.Fatalf("默认不该再限轮次和工具次数：%+v", b)
+	}
+	if b.MaxWallMS <= 0 {
+		t.Fatal("仍要留一个墙钟看门狗防挂死")
+	}
+	// 跑很久也不该因为轮次被砍。
+	b.UsedIterations = 500
+	b.UsedToolCalls = 2000
+	if why := b.Exhausted(); why != "" {
+		t.Fatalf("大量轮次后仍被判超预算：%s", why)
+	}
+}
+
+func TestExplicitBudgetStillEnforced(t *testing.T) {
+	// 机制本身要保留：调用方显式设了上限就必须生效。
+	b := DefaultBudget()
+	b.MaxIterations = 3
+	b.UsedIterations = 3
+	if b.Exhausted() == "" {
+		t.Fatal("显式设的上限没生效")
+	}
+}

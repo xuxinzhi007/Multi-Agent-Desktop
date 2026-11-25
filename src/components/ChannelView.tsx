@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import TextareaAutosize from 'react-textarea-autosize'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
+import Modal from './Modal'
+import PermissionPicker from './PermissionPicker'
+import ProfileCard from './ProfileCard'
 import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
@@ -16,13 +19,17 @@ type Props = {
   onSend: (text: string, mentions: string[], images?: { mime: string; data: string }[]) => Promise<void> | void
   onSetSpeaker?: (agentId: string) => void
   onDelete?: () => void
+  /** 全部频道：个人主页用来算「他在哪些频道 / 最近说过什么」 */
+  allChannels?: Channel[]
+  onOpenAgent?: (id: string) => void
+  onOpenChannel?: (id: string) => void
 }
 
 /**
  * ChannelView 是「群聊」视图：一个频道里的消息对所有成员广播。
  * 与 AgentView 的区别是消息带发言人身份，且成员都是 agent。
  */
-export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete }: Props) {
+export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete, allChannels, onOpenAgent, onOpenChannel }: Props) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<DraftImage[]>([])
   const [imageNote, setImageNote] = useState('')
@@ -30,6 +37,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
   const [mentionQuery, setMentionQuery] = useState('')
   // 被 @ 的成员：结构化选择，不是从文本里解析
   const [mentioned, setMentioned] = useState<string[]>([])
+  const [profileId, setProfileId] = useState<string | null>(null)
+  const [membersOpen, setMembersOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
 
@@ -195,8 +204,12 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           </select>
         </label>
 
-        {/* 成员头像 */}
-        <div style={{ display: 'flex', marginLeft: 12 }}>
+        {/* 成员头像：点开成员名单 */}
+        <button
+          onClick={() => setMembersOpen(true)}
+          title="查看成员名单"
+          style={{ display: 'flex', alignItems: 'center', marginLeft: 12, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+        >
           {members.slice(0, 6).map((m) => (
             <span
               key={m.id}
@@ -218,7 +231,12 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               {m.name.slice(0, 1).toUpperCase()}
             </span>
           ))}
-        </div>
+          {members.length > 6 && (
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
+              +{members.length - 6}
+            </span>
+          )}
+        </button>
 
         {onDelete && (
           <button
@@ -254,6 +272,8 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             msg={m}
             agent={memberById(m.fromId)}
             mentionTargets={mentionTargets}
+            agents={agents}
+            onProfile={m.fromId !== 'user' ? setProfileId : undefined}
           />
         ))}
 
@@ -397,7 +417,13 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
               }}
             >
               {mentioned.length === 0 ? (
-                <>没 @ 人时，由默认接话人回答</>
+                channel.speaker ? (
+                  <>没 @ 人时，由默认接话人回答</>
+                ) : (
+                  <span style={{ color: 'var(--warning)' }}>
+                    未指定默认接话人：这条消息将无人接话。先 @ 成员，或在上方选「默认接话」
+                  </span>
+                )
               ) : (
                 <>
                   点名：
@@ -440,6 +466,129 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           {imageNote || 'Enter 发送 · Shift+Enter 换行'}
         </div>
       </div>
+
+      {/* 成员名单：本次只做查看 + 主页入口；增删成员需要后端新接口，不重启落不了 */}
+      <Modal open={membersOpen} onClose={() => setMembersOpen(false)} title={`成员 · ${channel.name}`} width={420}>
+        <div style={{ padding: '12px 20px 18px' }}>
+          {members.map((m) => (
+            <div
+              key={m.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                width: '100%',
+                padding: '8px 6px',
+                borderBottom: '1px solid var(--border-subtle)',
+              }}
+            >
+              <button
+                onClick={() => {
+                  setMembersOpen(false)
+                  setProfileId(m.id)
+                }}
+                title="看他的个人主页"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  flex: 1,
+                  minWidth: 0,
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                }}
+              >
+              <span
+                style={{
+                  width: 26,
+                  height: 26,
+                  borderRadius: 'var(--radius-sm)',
+                  background: m.color,
+                  color: 'var(--bg-base)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  fontSize: 'var(--text-xs)',
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                {m.name.slice(0, 1).toUpperCase()}
+              </span>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {m.name}
+                  {channel.speaker === m.id && (
+                    <span style={{ marginLeft: 6, fontSize: 'var(--text-xs)', fontWeight: 400, color: 'var(--accent-bright)' }}>
+                      默认接话
+                    </span>
+                  )}
+                </span>
+                <span style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {m.role || '没写职责'}
+                </span>
+              </span>
+              </button>
+              <span style={{ fontSize: 'var(--text-xs)', color: m.status === 'running' ? 'var(--success)' : 'var(--text-disabled)' }}>
+                {m.status === 'running' ? '干活中' : m.status === 'blocked' ? '等你处理' : '空闲'}
+              </span>
+              <PermissionPicker agentId={m.id} />
+            </div>
+          ))}
+
+          {agents.filter((a) => !(channel.members ?? []).includes(a.id)).length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginBottom: 6 }}>
+                其他同事
+              </div>
+              {agents
+                .filter((a) => !(channel.members ?? []).includes(a.id))
+                .map((a) => (
+                  <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px' }}>
+                    <span
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: 'var(--radius-sm)',
+                        background: a.color,
+                        color: 'var(--bg-base)',
+                        display: 'grid',
+                        placeItems: 'center',
+                        fontSize: 'var(--text-xs)',
+                        fontWeight: 700,
+                        flexShrink: 0,
+                        opacity: 0.6,
+                      }}
+                    >
+                      {a.name.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span style={{ flex: 1, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>{a.name}</span>
+                    <button
+                      className="c-btn c-btn--sm"
+                      disabled
+                      title="邀请入频道需要后端新接口，本次不重启后端，暂不可用"
+                    >
+                      邀请
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      <ProfileCard
+        agent={profileId ? agents.find((a) => a.id === profileId) ?? null : null}
+        channels={allChannels ?? [channel]}
+        onClose={() => setProfileId(null)}
+        onOpenChat={onOpenAgent}
+        onOpenChannel={(id) => {
+          setProfileId(null)
+          onOpenChannel?.(id)
+        }}
+      />
     </div>
   )
 }
@@ -448,10 +597,14 @@ function ChannelBubble({
   msg,
   agent,
   mentionTargets,
+  agents,
+  onProfile,
 }: {
   msg: ChannelMessage
   agent?: Agent
   mentionTargets: MentionTarget[]
+  agents: Agent[]
+  onProfile?: (id: string) => void
 }) {
   const color = agent?.color ?? 'var(--text-tertiary)'
   // 老版本写进 channels.json 的消息缺 fromName / fromId，
@@ -463,6 +616,8 @@ function ChannelBubble({
   return (
     <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
       <span
+        onClick={onProfile ? () => onProfile(msg.fromId) : undefined}
+        title={onProfile ? '看他的个人主页' : undefined}
         style={{
           width: 22,
           height: 22,
@@ -475,6 +630,7 @@ function ChannelBubble({
           fontWeight: 700,
           flexShrink: 0,
           marginTop: 1,
+          cursor: onProfile ? 'pointer' : undefined,
         }}
       >
         {name.slice(0, 1).toUpperCase()}
@@ -491,7 +647,13 @@ function ChannelBubble({
             color: isUser ? 'var(--text-disabled)' : color,
           }}
         >
-          {name}
+          {onProfile ? (
+            <span onClick={() => onProfile(msg.fromId)} style={{ cursor: 'pointer' }} title="看他的个人主页">
+              {name}
+            </span>
+          ) : (
+            name
+          )}
           <span style={{ marginLeft: 'auto', fontWeight: 400, color: 'var(--text-disabled)' }}>
             {new Date(msg.at * 1000).toLocaleTimeString('zh-CN', {
               hour: '2-digit',
@@ -514,7 +676,7 @@ function ChannelBubble({
             <MentionText text={bodyOf(msg.text)} agents={mentionTargets} selfColor={color} />
           )}
         </div>
-        <DeliveryRow msg={msg} />
+        <DeliveryRow msg={msg} agents={agents} />
       </div>
     </div>
   )
@@ -526,35 +688,58 @@ const STATUS_META: Record<string, { icon: string; color: string; label: string }
   failed: { icon: '✕', color: 'var(--danger)', label: '失败' },
 }
 
-/** 渲染投递结果：谁收到了、谁跳过了、谁失败了。 */
-function DeliveryRow({ msg }: { msg: ChannelMessage }) {
+/** 渲染投递结果：回复/失败的人突出显示，跳过的折叠成一条，点开看名字和原因。 */
+function DeliveryRow({ msg, agents }: { msg: ChannelMessage; agents: Agent[] }) {
+  const [expandSkipped, setExpandSkipped] = useState(false)
   const deliveries = msg.deliveries ?? []
   if (deliveries.length === 0) return null
 
+  // ID 是 agent-<unix秒>，前 8 位永远是 agent-17，必须解析成名字
+  const nameOf = (id: string) => agents.find((a) => a.id === id)?.name ?? id
+  const active = deliveries.filter((d) => d.status !== 'skipped')
+  const skipped = deliveries.filter((d) => d.status === 'skipped')
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 8,
-        marginTop: 5,
-        fontSize: 'var(--text-xs)',
-      }}
-    >
-      {deliveries.map((d) => {
-        const meta = STATUS_META[d.status] ?? STATUS_META.skipped
-        return (
+    <div style={{ marginTop: 5, fontSize: 'var(--text-xs)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {active.map((d) => {
+          const meta = STATUS_META[d.status] ?? STATUS_META.skipped
+          return (
+            <span
+              key={d.agentId}
+              title={d.reason || meta.label}
+              style={{ color: meta.color, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+            >
+              <span>{meta.icon}</span>
+              <span style={{ fontWeight: 600 }}>{nameOf(d.agentId)}</span>
+              <span style={{ color: 'var(--text-disabled)' }}>
+                {d.status === 'failed' ? `失败：${d.reason ?? '未知原因'}` : meta.label}
+              </span>
+            </span>
+          )
+        })}
+        {skipped.length > 0 && (
           <span
-            key={d.agentId}
-            title={d.reason || meta.label}
-            style={{ color: meta.color, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+            onClick={() => setExpandSkipped((v) => !v)}
+            title={expandSkipped ? '收起' : '展开看是谁、为什么'}
+            style={{ color: 'var(--text-disabled)', display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}
           >
-            <span>{meta.icon}</span>
-            <span>{(d.agentId ?? '?').slice(0, 8)}</span>
-            <span style={{ color: 'var(--text-disabled)' }}>{meta.label}</span>
+            <span>○</span>
+            <span>
+              {skipped.length} 人未接话 {expandSkipped ? '▾' : '▸'}
+            </span>
           </span>
-        )
-      })}
+        )}
+      </div>
+      {expandSkipped && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+          {skipped.map((d) => (
+            <span key={d.agentId} style={{ color: 'var(--text-disabled)' }}>
+              {nameOf(d.agentId)}（{d.reason || '已跳过'}）
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

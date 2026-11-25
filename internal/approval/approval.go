@@ -246,6 +246,14 @@ func (c *Center) remembered(agentID, toolName string) bool {
 	return c.allowed[agentID] != nil && c.allowed[agentID][toolName]
 }
 
+// AllowTool 记下「本会话对这个工具以后都放行」。恢复落盘的放行清单时调它。
+func (c *Center) AllowTool(agentID, toolName string) {
+	if c == nil || agentID == "" || toolName == "" {
+		return
+	}
+	c.remember(agentID, toolName)
+}
+
 func (c *Center) remember(agentID, toolName string) {
 	c.mu.Lock()
 	if c.allowed[agentID] == nil {

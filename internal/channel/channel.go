@@ -22,6 +22,7 @@ var msgSeq atomic.Uint64
 func newMessageID() string {
 	return fmt.Sprintf("msg-%d-%d", time.Now().UnixNano(), msgSeq.Add(1))
 }
+
 type Message struct {
 	ID        string      `json:"id"`
 	ChannelID string      `json:"channelId"`
@@ -395,6 +396,15 @@ func (m *Manager) RecentPosts(name, exceptID string, limit int) []string {
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			continue
+		}
+		// 只取首行并截断：这些结论会进 system prompt，全文进来等于用
+		// 别人的历史占满预算。要细节让它去 read_file 或问发帖的人。
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[:i]
+		}
+		text = strings.Join(strings.Fields(text), " ")
+		if rs := []rune(text); len(rs) > 60 {
+			text = string(rs[:60]) + "…"
 		}
 		lines = append(lines, msg.FromName+"："+text)
 	}

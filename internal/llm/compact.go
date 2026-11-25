@@ -63,7 +63,20 @@ func IsContextOverflow(msg string) bool {
 // 从最近一组往前整组保留，直到尾部预算用完。更早的收成一条摘录。
 // 带工具调用的 assistant 和它后面的 tool 结果整组保留或整组摘掉，避免协议对不上。
 // 只有最近这一组自己就放不下时才裁它。当前用户消息在预算内时不会被裁。
+// Summarizer 把被丢掉的那段历史收成一条摘要。
+//
+// 传 nil 时退回本地截断（旧行为）。传实现时由调用方去问模型，
+// 产出结构化摘要（目标 / 进度 / 决定 / 下一步），而不是把每句话砍成一行。
+// 参照 pi：压缩是一次真实的模型调用，摘要存下来后下次从保留边界继续迭代。
+type Summarizer func(dropped []Message, previous string, budget int) string
+
 func Compact(msgs []Message, budget int) []Message {
+	return CompactWith(msgs, budget, nil, "")
+}
+
+// CompactWith 同 Compact，但允许用真摘要替代本地截断。
+// previous 是上一轮的摘要，交给 summarizer 做迭代上下文。
+func CompactWith(msgs []Message, budget int, summarize Summarizer, previous string) []Message {
 	if budget <= 0 || estMessages(msgs) <= budget {
 		return msgs
 	}
@@ -102,7 +115,15 @@ func Compact(msgs []Message, budget int) []Message {
 	}
 	out := append([]Message{}, systems...)
 	if start > 0 {
-		if summary := summarize(groups[:start], summaryBudget); summary != "" {
+		dropped := flatten(groups[:start])
+		var summary string
+		if summarize != nil {
+			summary = strings.TrimSpace(summarize(dropped, previous, summaryBudget))
+		}
+		if summary == "" {
+			summary = summarizeGroups(groups[:start], summaryBudget)
+		}
+		if summary != "" {
 			out = append(out, Message{Role: "system", Content: summary})
 		}
 	}
@@ -154,7 +175,7 @@ func fitMessages(msgs []Message, max int) []Message {
 	return out
 }
 
-func summarize(groups [][]Message, max int) string {
+func summarizeGroups(groups [][]Message, max int) string {
 	if max < 80 {
 		max = 80
 	}
@@ -235,3 +256,12 @@ func estMessages(msgs []Message) int {
 // （每条消息 4 token 的结构开销、reasoning、toolCalls 的 name+input）。
 // 两处各算一遍早晚对不上，而数字一旦不可信，这个显示就毫无价值。
 func EstMessages(msgs []Message) int { return estMessages(msgs) }
+
+// flatten 把分组摊平回消息序列，交给外部摘要器。
+func flatten(groups [][]Message) []Message {
+	var out []Message
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}

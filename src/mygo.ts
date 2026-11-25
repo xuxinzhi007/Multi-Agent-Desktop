@@ -860,7 +860,8 @@ export const API = {
    *
    * 工作目录是工具层的硬边界，任何一档都放不开它；
    * shellguard 对危险命令的拦截也不受模式影响。
-   * 模式是运行期状态，重启回到 ask——默认必须是最保守的那一档。
+   * 模式落在会话上（agents.json），重启后还是你选的那一档。
+   * 之前只存在审批中心的内存 map 里，用户选了自动，下次打开又变回每次问。
    */
   setAgentPermission(agentID: string, mode: string): Promise<string> {
     return call("API.SetAgentPermission", agentID, mode);

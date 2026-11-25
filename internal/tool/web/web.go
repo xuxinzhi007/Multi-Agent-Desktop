@@ -17,11 +17,11 @@ func New() *Tool { return &Tool{} }
 func (*Tool) Name() string { return "web" }
 
 func (*Tool) Description() string {
-	return "操作应用内置浏览器。登录留在这个窗口里，不使用用户的 Chrome。" +
-		"先 snapshot 看控件编号，再用编号操作。没有 DOM 的区域用 x、y。" +
-		"op 可以是 snapshot、open、back、forward、reload、move、click、double_click、right_click、down、up、scroll、type、key、wait。" +
-		"定位页面上的结果时，用 steps 一次做完，不要每点一下就停。每步用 text 写页面上能看见的文字，例如先点「环境」再点「test」，输入用 text 指定输入框、value 写内容。下拉打开后的选项写在下一步，浏览器会自己等到它出现。最多 12 步，只有最后的页面会返回。编号过期就改用 text，不要为了试错连着 snapshot。" +
-		"引擎是 Safari/WebKit，不是 Chrome：只支持 Chrome 的页面特性这里可能没有，遇到就换路径。open 后若被重定向（如跳登录页），返回的 url 就是实际地址，先处理登录再重试。"
+	return "操作应用内置浏览器（Safari/WebKit，不是用户的 Chrome）。登录状态留在窗口里。\n" +
+		"op 的取值见参数说明。有 DOM 的页面先 snapshot 拿编号再点；没有 DOM 的区域用 x、y。\n" +
+		"要连续操作（填表单、翻筛选）就把步骤写进 steps 一次做完，每步用 text 写页面上看得见的那几个字，" +
+		"最多 12 步，只返回最后的页面。编号过期改用 text，别反复 snapshot 试错。\n" +
+		"open 被重定向时返回的 url 是实际地址，跳登录页就先登录再重试。"
 }
 
 // Writes 返回 false：web 只操作应用内置浏览器，不碰工作目录里的任何文件。

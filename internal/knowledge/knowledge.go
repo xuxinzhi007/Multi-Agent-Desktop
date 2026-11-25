@@ -1,5 +1,6 @@
 // Package knowledge 提供面向多 agent 的轻量知识库：
-// 人类编写的短笔记（约定、术语、偏好），在 agent 创建时注入 system prompt。
+// 人类编写的短笔记（约定、术语、偏好）。system prompt 里只放标题目录，
+// 正文由 agent 用 list_notes 按需取。
 package knowledge
 
 import (
@@ -7,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -289,6 +291,45 @@ func hasAllTags(have, want []string) bool {
 		}
 	}
 	return true
+}
+
+// Catalog 把笔记渲染成目录：只有标题，不包含正文。
+//
+// 参照 pi 的 skills：system prompt 里只列“有什么”和“怎么取”，
+// 全文靠 list_notes <query> 现查。直接注入正文等于把整个知识库
+// 每一轮都塞进上下文，既占预算又把模型的注意力拉向不相干的旧结论。
+func Catalog(notes []Note, limit int) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	total := len(notes)
+	if limit > 0 && len(notes) > limit {
+		notes = notes[:limit]
+	}
+	var b strings.Builder
+	b.WriteString("可查的知识（用 list_notes 取正文，别凭标题猜）：\n")
+	for _, n := range notes {
+		title := strings.TrimSpace(n.Title)
+		if title == "" {
+			title = n.ID
+		}
+		b.WriteString("- ")
+		b.WriteString(title)
+		if len(n.Tags) > 0 {
+			b.WriteString(" [")
+			b.WriteString(strings.Join(n.Tags, ","))
+			b.WriteString("]")
+		}
+		b.WriteString("\n")
+	}
+	if total > len(notes) {
+		b.WriteString("（共 ")
+		b.WriteString(strconv.Itoa(total))
+		b.WriteString(" 条，这里只列前 ")
+		b.WriteString(strconv.Itoa(len(notes)))
+		b.WriteString(" 条；用 list_notes 的 query 搜剩下的）\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // Render 把笔记渲染成 system prompt 片段，供 agent 注入。

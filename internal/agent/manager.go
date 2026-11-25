@@ -65,6 +65,12 @@ type Agent struct {
 	WorktreeFrom string `json:"worktreeFrom,omitempty"`
 	// BioPinned 为真时，简介是用户写的，一轮结束不再覆盖。
 	BioPinned bool `json:"bioPinned,omitempty"`
+	// PermissionMode 是这个会话的权限档（ask / auto / readonly）。
+	// 空等于 ask。必须落盘：之前只存在审批中心的内存 map 里，
+	// 用户选了自动，重启后又变回每次问。
+	PermissionMode string `json:"permissionMode,omitempty"`
+	// AllowedTools 是本会话勾过「以后都放行」的工具名。同样要落盘。
+	AllowedTools []string `json:"allowedTools,omitempty"`
 	// Proposal 是一轮结束后建议改成的简介。采用前不替换现在这一行。
 	Proposal string `json:"proposal,omitempty"`
 	// LearnAt 是已经写进摘要的消息条数。更早的对话由子会话整理后交给这里。
@@ -288,6 +294,8 @@ func (m *Manager) Save() error {
 				WorktreeRepo:   a.WorktreeRepo,
 				WorktreeFrom:   a.WorktreeFrom,
 				BioPinned:      a.BioPinned,
+				PermissionMode: a.PermissionMode,
+				AllowedTools:   append([]string(nil), a.AllowedTools...),
 				Proposal:       a.Proposal,
 				LearnAt:        a.LearnAt,
 				LearnText:      a.LearnText,
@@ -437,6 +445,8 @@ func (m *Manager) Load() error {
 			Knowledge:      append([]string(nil), saved.Knowledge...),
 			BlockedReason:  saved.BlockedReason,
 			BioPinned:      saved.BioPinned,
+			PermissionMode: saved.PermissionMode,
+			AllowedTools:   append([]string(nil), saved.AllowedTools...),
 			Proposal:       saved.Proposal,
 			LearnAt:        saved.LearnAt,
 			LearnText:      saved.LearnText,
@@ -843,9 +853,13 @@ func (m *Manager) assistFor(parentID, prefer string, busy map[string]bool) (stri
 		_ = m.SetAgentWorkDir(created.ID, dir)
 	}
 	// 权限模式也跟着父会话，否则助手会回到逐次审批，
-	// 在飞书里又变成「等一张看不见的卡」。
+	// 在飞书里又变成「等一张看不见的卡」。这一份同样落盘。
 	if c := m.Approvals(); c != nil {
-		c.SetMode(created.ID, c.ModeOf(parentID))
+		mode := c.ModeOf(parentID)
+		c.SetMode(created.ID, mode)
+		created.mu.Lock()
+		created.PermissionMode = string(mode)
+		created.mu.Unlock()
 	}
 	return created.ID, nil
 }
@@ -1854,6 +1868,8 @@ func (a *Agent) Snapshot() *Agent {
 		Knowledge:      append([]string(nil), a.Knowledge...),
 		BlockedReason:  a.BlockedReason,
 		BioPinned:      a.BioPinned,
+		PermissionMode: a.PermissionMode,
+		AllowedTools:   append([]string(nil), a.AllowedTools...),
 		Proposal:       a.Proposal,
 		LearnAt:        a.LearnAt,
 		LearnText:      a.LearnText,
@@ -1961,4 +1977,56 @@ func clipBio(s string) string {
 		return string(r[:48]) + "…"
 	}
 	return s
+}
+
+// SetPermissionMode 记下这个会话的权限档并落盘。
+// 审批中心的状态是运行期的，会话上的这一份才是重启后能恢复的依据。
+func (m *Manager) SetPermissionMode(id, mode string) {
+	a, ok := m.Get(id)
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	a.PermissionMode = mode
+	a.mu.Unlock()
+	m.goSave()
+}
+
+// RememberTool 记下「本会话对这个工具以后都放行」并落盘。
+func (m *Manager) RememberTool(id, toolName string) {
+	if toolName == "" {
+		return
+	}
+	a, ok := m.Get(id)
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	for _, cur := range a.AllowedTools {
+		if cur == toolName {
+			a.mu.Unlock()
+			return
+		}
+	}
+	a.AllowedTools = append(a.AllowedTools, toolName)
+	a.mu.Unlock()
+	m.goSave()
+}
+
+// RestorePermissions 把落盘的权限档和放行清单装回审批中心。
+// 在 Load 之后调一次。没装审批中心时是空操作。
+func (m *Manager) RestorePermissions() {
+	c := m.Approvals()
+	if c == nil {
+		return
+	}
+	for _, a := range m.List() {
+		sn := a.Snapshot()
+		if sn.PermissionMode != "" {
+			c.SetMode(sn.ID, approval.Mode(sn.PermissionMode))
+		}
+		for _, name := range sn.AllowedTools {
+			c.AllowTool(sn.ID, name)
+		}
+	}
 }

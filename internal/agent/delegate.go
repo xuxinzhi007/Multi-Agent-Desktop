@@ -25,10 +25,13 @@ const (
 	// maxDelegateDepth 是派活的最大嵌套层数。主会话为 0。
 	// Claude Code 默认 3 层，但那是 20 并发；本仓库 8 个名额下 3 层会撞满。
 	maxDelegateDepth = 2
-	// delegateTimeout 是一次派活的墙钟上限，只停止等待，不取消子会话。
-	delegateTimeout = 20 * time.Minute
-	// delegateChildWallMS 是子会话自己的墙钟上限，短于 delegateTimeout。
-	delegateChildWallMS = 10 * 60 * 1000
+	// delegateTimeout 是一次派活的等待上限，只停止等待，不取消子会话。
+	// 调研类子任务要开网页、读多份文档，20 分钟经常不够；放宽到 1 小时。
+	// 超时只是父会话不再等，子会话继续跑完，用户仍能进去看。
+	delegateTimeout = time.Hour
+	// delegateChildWallMS 是子会话自己的墙钟看门狗，防挂死而不是防干活。
+	// 必须长于 delegateTimeout，否则父还在等子就先被砍了。
+	delegateChildWallMS = 2 * 60 * 60 * 1000
 )
 
 // spawnTask 是一块要派出去的活。

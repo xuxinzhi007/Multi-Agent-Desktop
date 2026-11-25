@@ -23,7 +23,9 @@ func (*askAgentTool) Description() string {
 	return "把任务交给本应用里已经存在的另一个会话，并等待它的文字回复。参数 name 是会话名字，task 是要它做的事。不能问自己。"
 }
 
-func (*askAgentTool) Timeout() time.Duration { return 10 * time.Minute }
+// Timeout 要盖住对方一整轮的时间。对方现在没有轮次上限（见 loop.DefaultBudget），
+// 10 分钟会把还在干活的会话误判成超时。这里只防挂死。
+func (*askAgentTool) Timeout() time.Duration { return 2 * time.Hour }
 
 func (*askAgentTool) Writes() bool { return false }
 
@@ -166,7 +168,8 @@ func (m *Manager) idleChild(exclude map[string]bool) *Agent {
 }
 
 type listAgentsTool struct {
-	m *Manager
+	m    *Manager
+	self string
 }
 
 func (*listAgentsTool) Name() string { return "list_agents" }
@@ -185,7 +188,13 @@ func (t *listAgentsTool) Execute(context.Context, json.RawMessage) tool.Result {
 	var lines []string
 	for _, a := range t.m.List() {
 		sn := a.Snapshot()
-		lines = append(lines, sn.Name+" · "+sn.Role)
+		row := sn.Name + " · " + sn.Role
+		// 标出哪个是自己：不标的话，名字相近时 agent 会拿错身份
+		// （曾出现在自己的会话里自称别人的情况）。
+		if t.self != "" && sn.ID == t.self {
+			row += "  ← 这是你自己"
+		}
+		lines = append(lines, row)
 	}
 	if len(lines) == 0 {
 		return tool.OK("还没有其他会话")
@@ -201,12 +210,15 @@ type createAgentTool struct {
 func (*createAgentTool) Name() string { return "create_agent" }
 
 func (*createAgentTool) Description() string {
-	return "新建一个助手会话来协助当前任务。它使用和你相同的模型与工作目录。参数 name、role，可选 task。带 task 时会把任务交给它并等待回复。"
+	return "新建一个助手会话，用和你相同的模型与工作目录。参数 name、role，可选 task（带 task 会直接把任务交给它并等回复）。\n\n" +
+		"用在需要一个人长期待命时（建好后可反复 ask_agent 派活）。\n" +
+		"一次性的并行干活用 delegate，不要用这个。"
 }
 
 func (*createAgentTool) Writes() bool { return false }
 
-func (*createAgentTool) Timeout() time.Duration { return 10 * time.Minute }
+// Timeout 同 ask_agent：带 task 时会等对方跑完一整轮。
+func (*createAgentTool) Timeout() time.Duration { return 2 * time.Hour }
 
 func (*createAgentTool) Schema() json.RawMessage {
 	return json.RawMessage(`{

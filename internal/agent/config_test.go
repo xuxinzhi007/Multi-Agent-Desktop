@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/llm"
 )
 
@@ -679,7 +680,7 @@ func TestExtraDirsRejectBroadAndMissing(t *testing.T) {
 }
 
 func TestSystemPromptDeclaresNetworkCapability(t *testing.T) {
-	p := loopSystemPrompt("/tmp/work", false)
+	p := loopSystemPrompt(identity{Name: "后端", ID: "a1"}, "/tmp/work", false)
 	// agent 曾因为只看到「只能操作工作目录内的文件」就断定环境完全离线，
 	// 于是拒绝查网页。约束必须和许可一起写，否则模型会按最保守的方式理解。
 	for _, want := range []string{"可以联网", "不等于离线", "不要说环境离线"} {
@@ -689,5 +690,39 @@ func TestSystemPromptDeclaresNetworkCapability(t *testing.T) {
 	}
 	if strings.Contains(p, "你只能操作工作目录内的文件。") {
 		t.Error("旧的全称限制句会再次导致「离线」误判")
+	}
+}
+
+func TestPermissionModeSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "agents.json")
+
+	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	mustSetStore(t, m, store)
+	a := m.Create("a1", "甲", "r")
+	m.SetApprovals(approval.New(func(string, any) {}))
+	m.SetPermissionMode(a.ID, "auto")
+	m.RememberTool(a.ID, "bash")
+	m.RememberTool(a.ID, "bash") // 幂等
+	m.waitSaves()
+
+	// 重新开一份 Manager，模拟重启。
+	m2 := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	mustSetStore(t, m2, store)
+	m2.SetApprovals(approval.New(func(string, any) {}))
+	m2.RestorePermissions()
+
+	got, ok := m2.Get("a1")
+	if !ok {
+		t.Fatal("会话没读回来")
+	}
+	if v := got.Snapshot(); v.PermissionMode != "auto" {
+		t.Fatalf("权限档没恢复：%q", v.PermissionMode)
+	}
+	if c := m2.Approvals(); c.ModeOf("a1") != approval.ModeAuto {
+		t.Fatalf("审批中心没拿到自动档：%v", c.ModeOf("a1"))
+	}
+	if v := got.Snapshot(); len(v.AllowedTools) != 1 || v.AllowedTools[0] != "bash" {
+		t.Fatalf("放行清单没恢复或重复：%v", v.AllowedTools)
 	}
 }

@@ -50,13 +50,19 @@ type Budget struct {
 	PausedMS         int64 `json:"pausedMs"`
 }
 
-// DefaultBudget 给第一次跑的人一个不至于烧穿钱包的上限。
+// DefaultBudget 不再给轮次和工具次数设硬上限。
+//
+// 原来 24 轮 / 64 次工具 / 10 分钟对真实任务太紧：一次 grep + 读几个文件 + 改一处
+// 就吃掉七八次，长任务往往在快做完时被砍断。现在压缩会真的写摘要（见 Runner.Summarize），
+// 上下文装不下不再是停下来的理由。
+//
+// 真正防跑偏的是 MaxRoundsWithoutProgress（连续几轮没任何进展就停），
+// 它不受这里的额度影响。这里只留一个足够大的墙钟看门狗，防的是挂死而不是干活。
+// 三项都是 0 即不限（Exhausted 只在 > 0 时判）。
 func DefaultBudget() Budget {
 	return Budget{
-		MaxIterations: 24,
-		MaxToolCalls:  64,
-		MaxWallMS:     600_000,
-		StartedAt:     time.Now().UnixMilli(),
+		MaxWallMS: 4 * 60 * 60 * 1000, // 4 小时看门狗
+		StartedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -94,6 +100,9 @@ type State struct {
 	StopReason string        `json:"stopReason,omitempty"`
 	FinalText  string        `json:"finalText,omitempty"`
 	Checkpoint int64         `json:"checkpointAt"`
+	// Summary 是上一次压缩产出的摘要，随状态落盘。
+	// 下次压缩把它当迭代上下文交给摘要器，而不是每次从头再丢一遍。
+	Summary string `json:"summary,omitempty"`
 }
 
 // Model 是循环依赖的模型能力。
@@ -170,6 +179,9 @@ type Runner struct {
 	Sync func([]llm.Message)
 	// Steer 在每次问模型之前取出后到的用户消息，插进这一轮，而不是等整轮结束。
 	Steer func() []llm.Message
+	// Summarize 在压缩要丢历史时，用模型把那段收成结构化摘要。
+	// 为 nil 时退回本地截断（会丢信息）。参照 pi：压缩是一次真实模型调用。
+	Summarize func(dropped []llm.Message, previous string, budget int) string
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
@@ -292,7 +304,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
 		// 增量只往外推，不在这里写检查点。
-		msgs := llm.Compact(raw, budget)
+		msgs := r.compact(raw, budget, st)
 		st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
 		var turn llm.Turn
 		var streamed bool
@@ -311,7 +323,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				budget = 512
 			}
 			st.Budget.MaxPromptTokens = budget
-			msgs = llm.Compact(raw, budget)
+			msgs = r.compact(raw, budget, st)
 			st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
 		}
 		if err != nil {
@@ -661,3 +673,26 @@ func joinReason(a, b string) string {
 
 // ErrNotFound 由 Store 实现返回，表示没有可恢复的检查点。
 var ErrNotFound = errors.New("loop: checkpoint not found")
+
+// compact 收历史进窗口，并把这次的摘要记回状态。
+//
+// 有 Summarize 时用模型产出结构化摘要；没有时退回本地截断。
+// 摘要写回 st.Summary，下一轮压缩拿它做迭代上下文——这是 pi 的做法，
+// 保证被丢掉的信息不是每次重新丢，而是累积进一份能续跑的摘要里。
+func (r *Runner) compact(raw []llm.Message, budget int, st *State) []llm.Message {
+	if budget <= 0 || llm.EstMessages(raw) <= budget {
+		return raw
+	}
+	var made string
+	out := llm.CompactWith(raw, budget, func(dropped []llm.Message, previous string, b int) string {
+		if r.Summarize == nil {
+			return ""
+		}
+		made = r.Summarize(dropped, previous, b)
+		return made
+	}, st.Summary)
+	if strings.TrimSpace(made) != "" {
+		st.Summary = made
+	}
+	return out
+}

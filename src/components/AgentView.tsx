@@ -8,7 +8,7 @@ import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
-import { API, type AgentView as Agent, type Config, type Message } from '../mygo'
+import { API, type AgentView as Agent, type Channel, type Config, type Message } from '../mygo'
 import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
 import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
@@ -66,6 +66,9 @@ type Props = {
   queued?: string[]
   /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
   connection?: { provider: string; baseUrl: string; apiKey: string; model: string }
+  /** 全部频道：群工作不进单聊历史，靠它在单聊里标出「他在哪些群干活」并跳转 */
+  channels?: Channel[]
+  onOpenChannel?: (id: string) => void
 }
 
 // 空状态的一键角色。只保留 3 个 —— 选择过多反而增加决策成本。
@@ -687,6 +690,13 @@ export default function AgentView(p: Props) {
           </button>
         </div>
       </header>
+
+      {/* 频道动态：群聊回合不写进单聊历史，这里给出标识和入口，避免两边工作分不清 */}
+      <ChannelStrip
+        agent={p.agent}
+        channels={p.channels ?? []}
+        onOpenChannel={p.onOpenChannel}
+      />
 
       {/* 消息流 */}
       <div
@@ -1979,4 +1989,86 @@ function MenuSeparator() {
 
 function MenuLabel({ children }: { children: React.ReactNode }) {
   return <div className="c-ctx-label">{children}</div>
+}
+
+/**
+ * ChannelStrip —— 单聊里的频道标识。
+ * 群聊回合不写入会话历史（loop_backend 在 channelID 非空时跳过回写），
+ * 单聊里看不到群工作。这里标出他正在/曾在哪些群干活，并给跳转入口。
+ */
+function ChannelStrip({
+  agent,
+  channels,
+  onOpenChannel,
+}: {
+  agent: Agent
+  channels: Channel[]
+  onOpenChannel?: (id: string) => void
+}) {
+  if (agent.busy) {
+    const busyCh = channels.find((c) => c.name === agent.busy)
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '7px var(--space-6)',
+          background: 'var(--accent-dim)',
+          borderBottom: '1px solid var(--border-subtle)',
+          fontSize: 'var(--text-sm)',
+          color: 'var(--accent-bright)',
+          flexShrink: 0,
+        }}
+      >
+        <span className="blink">●</span>
+        <span>他正在 #{agent.busy} 里回答，对话内容记录在频道里</span>
+        {busyCh && onOpenChannel && (
+          <button
+            className="c-btn c-btn--sm"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => onOpenChannel(busyCh.id)}
+          >
+            去频道看 →
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const joined = channels
+    .filter((c) => (c.members ?? []).includes(agent.id))
+    .map((c) => ({
+      ...c,
+      mine: (c.messages ?? []).filter((m) => m.fromId === agent.id).length,
+    }))
+  if (joined.length === 0) return null
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 6,
+        padding: '5px var(--space-6)',
+        borderBottom: '1px solid var(--border-subtle)',
+        fontSize: 'var(--text-xs)',
+        color: 'var(--text-tertiary)',
+        flexShrink: 0,
+      }}
+    >
+      <span>频道动态（群聊内容记录在频道，不进下面的单聊）：</span>
+      {joined.map((c) => (
+        <button
+          key={c.id}
+          className="c-btn c-btn--sm"
+          title={`他在 #${c.name} 有 ${c.mine} 条发言，点击去频道`}
+          onClick={() => onOpenChannel?.(c.id)}
+        >
+          # {c.name} · {c.mine} 条
+        </button>
+      ))}
+    </div>
+  )
 }

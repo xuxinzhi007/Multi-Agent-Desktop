@@ -169,6 +169,15 @@ export default function App() {
             s.send('channel.speaker', { channelId: activeChannel.id, agentId })
           }
           onDelete={() => s.send('channel.delete', { id: activeChannel.id })}
+          allChannels={s.channels}
+          onOpenAgent={(id) => {
+            setActive({ kind: 'agent', id })
+            setView('chat')
+          }}
+          onOpenChannel={(id) => {
+            setActive({ kind: 'channel', id })
+            setView('chat')
+          }}
         />
       ) : (
         <AgentView
@@ -179,6 +188,11 @@ export default function App() {
           tokenUsage={activeAgent ? s.tokenUsage[activeAgent.id] : undefined}
           agents={s.agents}
           disableRoute  // 单聊模式：禁用 @ 路由
+          channels={s.channels}
+          onOpenChannel={(id) => {
+            setActive({ kind: 'channel', id })
+            setView('chat')
+          }}
           onPrompt={(text, images) => {
             if (!activeAgent) return
             return s.send('agent.prompt', { agentId: activeAgent.id, text, images })
