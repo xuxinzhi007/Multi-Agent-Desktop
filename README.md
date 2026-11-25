@@ -97,6 +97,7 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 │  main.go              mygo.Bind + 主窗口 + 事件声明       │
 │  internal/agent       会话、Queue/Worker、父子、学习摘要   │
 │  internal/loop        进程内循环：停止、预算、检查点       │
+│  internal/runtime     统一运行时协议；native / ACP 适配器   │
 │  internal/tool        工具注册；builtin 文件/bash，web 浏览器 │
 │  internal/channel     频道、回合判定、领域板               │
 │  internal/knowledge   知识库（JSONL）                     │
@@ -120,7 +121,10 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 |---|---|---|
 | 绑定层 | `main.go` 的 `API` | 参数校验、错误转换、事件发射，不做业务判断 |
 | 业务层 | `internal/agent`、`internal/loop`、`internal/channel`、`internal/knowledge`、`internal/feishu` | 会话、循环、回合、知识、飞书 |
+| 运行时层 | `internal/runtime`、`internal/runtime/acp` | 统一事件协议；native loop 与外部 ACP Agent 共用同一个 `Session` |
 | 基础设施 | `internal/llm`、`internal/tool`、`internal/browser`、`internal/pty` | 外部依赖 |
+
+运行时协议单独成文：**[docs/runtime-protocol.md](docs/runtime-protocol.md)**。
 
 **「谁该回」的判定**统一在 `channel.DecideReplies` 一个纯函数里，
 绑定层只负责投递与回填，不重复实现规则。
@@ -229,6 +233,7 @@ multi-agent-desktop/
 ├── internal/
 │   ├── agent/              ← 会话、Queue/Worker、父子、学习摘要、loop 接线
 │   ├── loop/               ← 进程内循环、预算、检查点
+│   ├── runtime/            ← 统一事件协议；native 适配器；acp/ 外部接入
 │   ├── tool/               ← 工具协议；builtin/ 文件与 bash，web/ 内置浏览器
 │   ├── channel/            ← 频道、回合判定、transcript、领域板
 │   ├── knowledge/          ← 知识库存储与注入
@@ -249,6 +254,7 @@ multi-agent-desktop/
 ├── e2e/                    ← Playwright 冒烟测试
 ├── docs/
 │   ├── design.md           ← 架构、并发模型、交互设计
+│   ├── runtime-protocol.md ← 内部运行时协议与 ACP 接入
 │   └── reviews/            ← 架构评审历史存档（不是当前行为）
 └── specs/                  ← 特性决策记录
 ```

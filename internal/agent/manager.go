@@ -40,9 +40,18 @@ type Agent struct {
 	Status    Status        `json:"status"`
 	CreatedAt int64         `json:"createdAt"`
 	Messages  []llm.Message `json:"messages"`
-	QueueLen  int           `json:"queueLen"`          // 排队中的消息数
-	Backend   string        `json:"backend"`           // loop / mock。旧的 claude / codex 读入后按 loop 跑
-	WorkDir   string        `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
+	QueueLen  int           `json:"queueLen"` // 排队中的消息数
+	Backend   string        `json:"backend"`  // loop / mock。旧的 claude / codex 读入后按 loop 跑
+	// Runtime 是执行体：""/native/loop 走进程内 loop，acp 走外部 ACP 进程。
+	// 不复用 Backend 表达：Backend 描述模型通道，Runtime 描述执行位置。
+	Runtime string     `json:"runtime,omitempty"`
+	ACP     *ACPConfig `json:"acp,omitempty"`
+	WorkDir string     `json:"workDir,omitempty"` // 会话级工作目录，空则回落 Manager.workDir
+
+	// 运行时连接状态（只读、不落盘）。重启回到 ""。
+	// 取值："" | starting | running | idle | error；失败原因见 runtimeError。
+	runtimeState string `json:"-"`
+	runtimeError string `json:"-"`
 	// ExtraDirs 是附加目录：文件工具能读写它们，bash 的 cwd 仍是 WorkDir。
 	// 用来「改这个仓库，同时读隔壁那个仓库」，不必换会话或搬目录。
 	ExtraDirs []string    `json:"extraDirs,omitempty"`
@@ -285,6 +294,8 @@ func (m *Manager) Save() error {
 				CreatedAt:      a.CreatedAt,
 				Messages:       append([]llm.Message(nil), a.Messages...),
 				Backend:        a.Backend,
+				Runtime:        a.Runtime,
+				ACP:            a.ACP.Copy(),
 				WorkDir:        a.WorkDir,
 				ExtraDirs:      append([]string(nil), a.ExtraDirs...),
 				LLMCfg:         a.LLMCfg,
@@ -434,6 +445,8 @@ func (m *Manager) Load() error {
 			CreatedAt:      saved.CreatedAt,
 			Messages:       saved.Messages,
 			Backend:        canonicalBackend(saved.Backend),
+			Runtime:        normalizeRuntime(saved.Runtime),
+			ACP:            saved.ACP.Copy(),
 			WorkDir:        saved.WorkDir,
 			ExtraDirs:      append([]string(nil), saved.ExtraDirs...),
 			LLMCfg:         saved.LLMCfg,
@@ -1470,12 +1483,14 @@ func (a *Agent) execute(m *Manager, req PromptRequest) {
 		a.mu.Unlock()
 	}
 
-	switch backend {
-	case "loop":
-		a.executeLoop(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
-	case "supervisor":
+	switch {
+	case a.EffectiveRuntime() == RuntimeACP:
+		a.executeACP(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
+	case backend == "loop":
+		a.executeNativeRuntime(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
+	case backend == "supervisor":
 		a.executeSupervisor(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
-	case "doubao":
+	case backend == "doubao":
 		a.executeDoubao(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
 	default:
 		a.executeMock(m, runCtx, req.Text, req.ChannelID, req.Context, req.Blocks)
@@ -1857,7 +1872,11 @@ func (a *Agent) Snapshot() *Agent {
 		Messages:       append([]llm.Message(nil), a.Messages...),
 		QueueLen:       a.QueueLen,
 		Backend:        a.Backend,
+		Runtime:        normalizeRuntime(a.Runtime),
+		ACP:            a.ACP.Copy(),
 		WorkDir:        a.WorkDir,
+		runtimeState:   a.runtimeState,
+		runtimeError:   a.runtimeError,
 		ExtraDirs:      append([]string(nil), a.ExtraDirs...),
 		LLMCfg:         a.LLMCfg,
 		ParentID:       a.ParentID,
@@ -1901,6 +1920,10 @@ func (a *Agent) viewMap() map[string]any {
 		"messages":       append([]llm.Message(nil), a.Messages...),
 		"queueLen":       a.QueueLen,
 		"backend":        a.Backend,
+		"runtime":        normalizeRuntime(a.Runtime),
+		"acp":            a.ACP.Copy(),
+		"runtimeState":   a.runtimeState,
+		"runtimeError":   a.runtimeError,
 		"workDir":        a.WorkDir,
 		"extraDirs":      append([]string(nil), a.ExtraDirs...),
 		"worktree":       a.Worktree,

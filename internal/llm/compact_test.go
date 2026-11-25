@@ -6,7 +6,9 @@ import (
 )
 
 func TestContextLimitUsesWindowOrProvider(t *testing.T) {
-	if got := ContextLimit(Config{Provider: "llamacpp"}); got != 4096 {
+	// llamacpp/ollama 默认按 8192 算：项目自己的本地模型常见就是 8k 窗口，
+	// 真实窗口不一致时用 ContextWindow 覆盖。
+	if got := ContextLimit(Config{Provider: "llamacpp"}); got != 8192 {
 		t.Fatalf("llamacpp=%d", got)
 	}
 	if got := ContextLimit(Config{Provider: "llamacpp", ContextWindow: 16384}); got != 16384 {

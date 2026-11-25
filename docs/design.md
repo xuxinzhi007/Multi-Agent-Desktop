@@ -87,6 +87,29 @@ events.agentCreated.on((agent) => { ... })
 - 要维护连接状态、重连逻辑
 - MyGo IPC 是编译期类型安全的
 
+### 2.4 运行时协议：统一事件 + 可替换执行体
+
+MyGo IPC 解决前端 ↔ Go，`internal/llm` 解决 Go ↔ 模型，中间的「谁在执行这一轮」由
+`internal/runtime` 统一：
+
+- `Runtime` / `Session`：`Prompt` / `Cancel` / `RespondPermission` / `Events` / `Close`
+- `Event`：`turn.started`、`text.delta`、`tool.*`、`permission.request`、`turn.finished` 等
+- `EventSink`：唯一分配 `seq`、阻塞发送形成背压、关闭时等生产者退出
+
+两个实现：
+
+| 实现 | 路径 | 说明 |
+|---|---|---|
+| `native` | `internal/runtime/native.go` | 包装进程内 loop；`loop.Event` 经 `runtimeEventFromLoop` 翻译 |
+| `acp` | `internal/runtime/acp` | JSON-RPC over stdio，接 Codex / Grok / DeepSeek Harness 等 |
+
+**为什么要这一层**：换执行体时前端不用改；未知事件可降级为 notice；ACP 的
+`sessionId` 不会污染本地会话标识。完整契约、映射表与接入步骤见
+**[runtime-protocol.md](runtime-protocol.md)**。
+
+当前状态：协议层与 ACP 客户端已实现并有单测；现有执行路径仍是 native，
+切换是独立改动，避免一次动到在用的会话。
+
 ---
 
 ## 3. 设计系统

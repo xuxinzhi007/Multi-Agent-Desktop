@@ -68,6 +68,11 @@ type FeishuBot struct {
 	// AllowChats 是用户手动放行过的群（按 chat_id 主动读过一次）。
 	// 机器人不在的群默认不自动同步，只有这里列出的才会继续补历史。
 	AllowChats []string `json:"allowChats,omitempty"`
+	// OwnerOpenID 是会话 owner 的飞书 open_id。审批卡只认这个人和白名单。
+	// 首次完成「用我的飞书身份授权」时自动写入；为空时审批一律拒绝（fail closed）。
+	OwnerOpenID string `json:"ownerOpenId,omitempty"`
+	// ApproverOpenIDs 是额外允许批准写操作的飞书 open_id 白名单。
+	ApproverOpenIDs []string `json:"approverOpenIds,omitempty"`
 }
 
 // Store 读写配置文件，并发安全。
@@ -244,17 +249,19 @@ func feishuByID(list []FeishuBot, id string) (FeishuBot, int, bool) {
 // MergeFeishuBot 把这次提交叠到已保存的机器人上。
 func MergeFeishuBot(prev, in FeishuBot) FeishuBot {
 	next := FeishuBot{
-		ID:          strings.TrimSpace(in.ID),
-		Name:        strings.TrimSpace(in.Name),
-		Enabled:     in.Enabled,
-		AppID:       strings.TrimSpace(in.AppID),
-		AppSecret:   strings.TrimSpace(in.AppSecret),
-		AgentID:     strings.TrimSpace(in.AgentID),
-		MentionOnly: in.MentionOnly,
-		UserAccess:  in.UserAccess,
-		UserRefresh: in.UserRefresh,
-		UserExpire:  in.UserExpire,
-		AllowChats:  append([]string(nil), in.AllowChats...),
+		ID:              strings.TrimSpace(in.ID),
+		Name:            strings.TrimSpace(in.Name),
+		Enabled:         in.Enabled,
+		AppID:           strings.TrimSpace(in.AppID),
+		AppSecret:       strings.TrimSpace(in.AppSecret),
+		AgentID:         strings.TrimSpace(in.AgentID),
+		MentionOnly:     in.MentionOnly,
+		UserAccess:      in.UserAccess,
+		UserRefresh:     in.UserRefresh,
+		UserExpire:      in.UserExpire,
+		AllowChats:      append([]string(nil), in.AllowChats...),
+		OwnerOpenID:     strings.TrimSpace(in.OwnerOpenID),
+		ApproverOpenIDs: append([]string(nil), in.ApproverOpenIDs...),
 	}
 	if next.ID == "" {
 		next.ID = prev.ID
@@ -266,10 +273,20 @@ func MergeFeishuBot(prev, in FeishuBot) FeishuBot {
 	if len(next.AllowChats) == 0 && prev.ID != "" {
 		next.AllowChats = append([]string(nil), prev.AllowChats...)
 	}
+	// 审批人同理：设置页暂未暴露这两个字段时不能把已有的清空。
+	if next.OwnerOpenID == "" && prev.ID != "" {
+		next.OwnerOpenID = prev.OwnerOpenID
+	}
+	if len(next.ApproverOpenIDs) == 0 && prev.ID != "" {
+		next.ApproverOpenIDs = append([]string(nil), prev.ApproverOpenIDs...)
+	}
 	if prev.ID != "" && next.AppID != prev.AppID {
 		next.UserAccess = ""
 		next.UserRefresh = ""
 		next.UserExpire = 0
+		// 换了一个飞书应用，open_id 不在同一个命名空间，审批人配置必须重来。
+		next.OwnerOpenID = ""
+		next.ApproverOpenIDs = nil
 		return next
 	}
 	if next.UserAccess == "" && next.UserRefresh == "" {

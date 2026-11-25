@@ -4,6 +4,14 @@ import { call, event } from "mygo-runtime";
 
 // ---- Types ----
 
+export interface ACPConfig {
+  name?: string;
+  command: string;
+  args?: string[];
+  env?: string[];
+  trace?: boolean;
+}
+
 /** AgentDiag 是单个 agent 的运行状态摘要。 */
 export interface AgentDiag {
   id: string;
@@ -27,6 +35,18 @@ export interface AgentLoopEvent {
 export interface AgentReasoningEvent {
   id: string;
   reasoning: string;
+}
+
+/** AgentRuntimeRequest 是设置会话运行时的参数。 */
+export interface AgentRuntimeRequest {
+  agentId: string;
+  /** native | acp */
+  runtime: string;
+  name?: string;
+  command?: string;
+  args?: string[];
+  env?: string[];
+  trace?: boolean;
 }
 
 /**
@@ -64,6 +84,12 @@ export interface AgentView {
   messages: Message[];
   queueLen: number;
   backend: string;
+  /** Runtime 是执行体：native（进程内 loop）或 acp（外部进程）。空数据按 native 输出。 */
+  runtime: string;
+  acp?: ACPConfig;
+  /** 运行时连接状态（只读、不落盘）："" | starting | running | idle | error。 */
+  runtimeState?: string;
+  runtimeError?: string;
   workDir: string;
   /** ExtraDirs 是附加目录：文件工具可读写，shell 的 cwd 仍是 WorkDir。 */
   extraDirs?: string[];
@@ -244,6 +270,9 @@ export interface FeishuSave {
   appSecret: string;
   agentId: string;
   mentionOnly: boolean;
+  /** OwnerOpenID / ApproverOpenIDs 留空表示沿用已保存的值。 */
+  ownerOpenId?: string;
+  approverOpenIds?: string[];
 }
 
 /**
@@ -281,6 +310,12 @@ export interface FeishuView {
   hasUser: boolean;
   agentId: string;
   mentionOnly: boolean;
+  /**
+   * OwnerOpenID 是审批卡的会话 owner；ApproverOpenIDs 是额外白名单。
+   * 两者都为空时审批一律拒绝，需要先授权一次飞书身份或手填 open_id。
+   */
+  ownerOpenId?: string;
+  approverOpenIds?: string[];
   status: string;
   detail?: string;
   /** UserName 是用户身份授权后问到的人名。 */
@@ -885,6 +920,13 @@ export const API = {
   /** SetAgentProfile 改给人看的名字和简介，立刻保存并显示。 */
   setAgentProfile(id: string, name: string, role: string): Promise<AgentView> {
     return call("API.SetAgentProfile", id, name, role);
+  },
+  /**
+   * SetAgentRuntime 切换会话执行体（进程内 native / 外部 ACP），并落盘、广播。
+   * 切回 native 时保留已有 ACP 配置；切到 acp 必须先有非空启动命令。
+   */
+  setAgentRuntime(req: AgentRuntimeRequest): Promise<AgentView> {
+    return call("API.SetAgentRuntime", req);
   },
   /** SetAgentWorkDir 设置某个会话自己的工作目录（会话级，不影响其他会话）。 */
   setAgentWorkDir(agentId: string, dir: string): Promise<AgentView> {

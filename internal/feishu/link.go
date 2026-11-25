@@ -666,7 +666,8 @@ func actionFromPayload(raw []byte) (Turn, bool) {
 			EventType string `json:"event_type"`
 		} `json:"header"`
 		Event struct {
-			Action struct {
+			Operator json.RawMessage `json:"operator"`
+			Action   struct {
 				Value json.RawMessage `json:"value"`
 			} `json:"action"`
 			Context struct {
@@ -684,6 +685,11 @@ func actionFromPayload(raw []byte) (Turn, bool) {
 		Act string `json:"act"`
 		ID  string `json:"id"`
 	}
+	var op struct {
+		OpenID string `json:"open_id"`
+		UserID string `json:"user_id"`
+	}
+	_ = json.Unmarshal(body.Event.Operator, &op)
 	rawValue := body.Event.Action.Value
 	if len(rawValue) > 0 && rawValue[0] == '"' {
 		var s string
@@ -695,12 +701,19 @@ func actionFromPayload(raw []byte) (Turn, bool) {
 	if v.Act == "" || v.ID == "" {
 		return Turn{}, false
 	}
+	operator := strings.TrimSpace(op.OpenID)
+	if operator == "" {
+		operator = strings.TrimSpace(op.UserID)
+	}
 	return Turn{
-		EventID:   body.Header.EventID,
-		MsgType:   "card.action",
-		Action:    v.Act,
-		ActionID:  v.ID,
-		MessageID: body.Event.Context.OpenMessageID,
+		EventID:    body.Header.EventID,
+		MsgType:    "card.action",
+		Action:     v.Act,
+		ActionID:   v.ID,
+		MessageID:  body.Event.Context.OpenMessageID,
+		Sender:     operator,
+		SenderID:   operator,
+		SenderType: "user",
 	}, true
 }
 

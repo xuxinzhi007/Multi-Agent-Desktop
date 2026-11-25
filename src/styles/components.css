@@ -2900,3 +2900,72 @@
 .c-channel-forward button:hover {
   background: var(--bg-surface-hover);
 }
+
+/* ===== 禁用态徽章：未接入 / 不可用 ===== */
+.c-badge--disabled {
+  border-color: var(--border-subtle);
+  color: var(--text-disabled);
+  background: var(--bg-surface);
+}
+
+/* ===== 侧栏导航行（助手 / 设置分组） ===== */
+.c-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.c-nav-row:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.c-nav-row.is-active {
+  background: var(--bg-surface-active);
+  color: var(--text-primary);
+}
+.c-nav-row__icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 16px;
+}
+.c-nav-row__label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== 页面加载骨架 ===== */
+.c-skeleton {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  animation: skeleton-pulse 1.4s var(--ease) infinite;
+}
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .c-skeleton {
+    animation: none;
+  }
+}

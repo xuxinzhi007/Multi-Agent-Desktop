@@ -12,10 +12,13 @@ export default function ApprovalModal({
   items,
   agents,
   onDecide,
+  open = true,
 }: {
   items: ApprovalView[]
   agents?: AgentView[]
   onDecide: (id: string, allow: boolean, remember: boolean) => Promise<void>
+  /** 顶部待审批数点击后打开队列；默认打开，保留「审批到达即弹窗」的现有行为 */
+  open?: boolean
 }) {
   const item = items[0]
   const [busy, setBusy] = useState(false)
@@ -39,7 +42,7 @@ export default function ApprovalModal({
     setErr('')
   }, [item?.id])
 
-  if (!item) return null
+  if (!open || !item) return null
 
   const decide = async (allow: boolean, remember: boolean) => {
     setBusy(true)

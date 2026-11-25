@@ -45,8 +45,8 @@ func TestCardClickIsInbound(t *testing.T) {
 	if err != nil || !strings.Contains(string(body), "已停止") {
 		t.Fatalf("ack=%s err=%v", body, err)
 	}
-	turn, ok := actionFromPayload([]byte(`{"header":{"event_id":"e1","event_type":"card.action.trigger"},"event":{"action":{"value":"{\"act\":\"stop\",\"id\":\"om_1\"}"},"context":{"open_message_id":"om_card"}}}`))
-	if !ok || turn.Action != "stop" || turn.ActionID != "om_1" {
+	turn, ok := actionFromPayload([]byte(`{"header":{"event_id":"e1","event_type":"card.action.trigger"},"event":{"operator":{"open_id":"ou_owner","user_id":"u1"},"action":{"value":"{\"act\":\"stop\",\"id\":\"om_1\"}"},"context":{"open_message_id":"om_card"}}}`))
+	if !ok || turn.Action != "stop" || turn.ActionID != "om_1" || turn.SenderID != "ou_owner" || turn.SenderType != "user" {
 		t.Fatalf("turn=%+v ok=%v", turn, ok)
 	}
 }

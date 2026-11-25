@@ -494,11 +494,14 @@ func Register(r *tool.Registry, workDir string) {
 	RegisterRoots(r, workDir, nil)
 }
 
-// RegisterRoots 装文件与 shell 工具。extra 是附加目录：
+// RegisterRoots 装文件、搜索与 shell 工具。extra 是附加目录：
 // 文件工具能读写它们，bash 的 cwd 仍是主目录——命令在哪跑必须是确定的。
 func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
 	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Bash{WorkDir: workDir})
+	r.Register(&Grep{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra})
 }

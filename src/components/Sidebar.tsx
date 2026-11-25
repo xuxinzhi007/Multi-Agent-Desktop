@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { API, type AgentView as Agent, type Channel, type Room } from '../mygo'
 import { agentTree, linkParents, type AgentNode } from '../lib/agent-tree'
 import { previewMode } from '../lib/preview-runtime'
+import type { MainView } from '../lib/nav'
 import CreateAgentModal from './CreateAgentModal'
 import SupervisorModal from './SupervisorModal'
 
@@ -27,9 +28,9 @@ type Props = {
   /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
   createOpen: boolean
   onCreateOpenChange: (open: boolean) => void
-  /** 主区域当前视图：舰队总览 / 对话 */
-  view: 'fleet' | 'chat'
-  onViewChange: (v: 'fleet' | 'chat') => void
+  /** 主区域当前视图：舰队 / 对话 / 网关 / 记忆 / 计划 */
+  view: MainView
+  onViewChange: (v: MainView) => void
 }
 
 function ViewTab({
@@ -362,6 +363,45 @@ function GroupHead({
   )
 }
 
+/** 分组标题（工作区 / 助手 / 设置），不可折叠，只做视觉分区。 */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="c-section-label" style={{ padding: '10px 4px 4px' }}>
+      {children}
+    </div>
+  )
+}
+
+/** 助手 / 设置分组下的导航行：点击切换主区域页面。 */
+function NavRow({
+  icon,
+  label,
+  active,
+  onClick,
+  badge,
+}: {
+  icon: string
+  label: string
+  active?: boolean
+  onClick: () => void
+  badge?: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      className={`c-nav-row ${active ? 'is-active' : ''}`}
+      aria-current={active ? 'true' : undefined}
+      onClick={onClick}
+    >
+      <span className="c-nav-row__icon" aria-hidden>
+        {icon}
+      </span>
+      <span className="c-nav-row__label">{label}</span>
+      {badge}
+    </button>
+  )
+}
+
 export default function Sidebar(p: Props) {
   const [groups, setGroups] = useState<Record<string, boolean>>(readGroups)
   const toggleGroup = (key: string) =>
@@ -407,7 +447,6 @@ export default function Sidebar(p: Props) {
     p.agents.map((a) => (a.parentId || !recovered[a.id] ? a : { ...a, parentId: recovered[a.id] })),
   )
   const tree = agentTree(linked)
-  const running = p.agents.filter((a) => a.status === 'running').length
 
   return (
     <aside
@@ -494,11 +533,6 @@ export default function Sidebar(p: Props) {
         <span>
           共 <b style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{p.agents.length}</b>
         </span>
-        {running > 0 && (
-          <span style={{ color: 'var(--warning)' }}>
-            运行 <b style={{ fontWeight: 600 }}>{running}</b>
-          </span>
-        )}
         <span style={{ marginLeft: 'auto', color: 'var(--text-disabled)' }}>
           {(() => {
             const n = p.agents.filter((a) => a.llm?.model && a.llm.provider !== 'mock').length
@@ -509,6 +543,69 @@ export default function Sidebar(p: Props) {
 
       {/* 列表 */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-2)' }}>
+        <SectionLabel>工作区</SectionLabel>
+
+        {/* 会话分组 */}
+        {p.agents.length > 0 && (
+          <GroupHead
+            label="会话"
+            count={p.agents.length}
+            folded={!!groups.agent}
+            onToggle={() => toggleGroup('agent')}
+          />
+        )}
+
+        {/* 视图切换：舰队总览（并排监控） / 单个对话 */}
+        {p.agents.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 2,
+              padding: 2,
+              margin: '4px 0 6px',
+              background: 'var(--bg-inset)',
+              borderRadius: 'var(--radius-md)',
+            }}
+          >
+            <ViewTab
+              active={p.view === 'fleet'}
+              onClick={() => p.onViewChange('fleet')}
+              title="并排查看所有 agent 的进度"
+            >
+              ▦ 舰队
+            </ViewTab>
+            <ViewTab
+              active={p.view === 'chat'}
+              onClick={() => p.onViewChange('chat')}
+              title="查看当前 agent 的完整对话"
+            >
+              💬 对话
+            </ViewTab>
+          </div>
+        )}
+
+        {p.agents.length === 0 && !p.createOpen && (
+          <div className="c-empty" style={{ padding: 'var(--space-6) var(--space-3)' }}>
+            {previewMode() ? '这是预览' : '还没有 agent'}
+            <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
+              {previewMode() ? '浏览器里的会话是假的。' : '点下面新建，可同时建多个并行跑'}
+            </div>
+          </div>
+        )}
+
+        {!groups.agent && tree.map((node) => (
+          <AgentBranch
+            key={node.agent.id}
+            node={node}
+            depth={0}
+            activeId={p.activeKind === 'agent' ? p.activeId : null}
+            folded={folded}
+            onToggle={(id) => setFolded((s) => ({ ...s, [id]: !s[id] }))}
+            onSelect={(id) => p.onSelect('agent', id)}
+            onDelete={p.onDelete}
+          />
+        ))}
+
         {/* 频道分组 */}
         <GroupHead
           label="频道"
@@ -673,65 +770,25 @@ export default function Sidebar(p: Props) {
           )
         })}
 
-        {p.agents.length > 0 && (
-          <GroupHead
-            label="会话"
-            count={p.agents.length}
-            folded={!!groups.agent}
-            onToggle={() => toggleGroup('agent')}
-          />
-        )}
-
-        {/* 视图切换：舰队总览（并排监控） / 单个对话 */}
-        {p.agents.length > 0 && (
-          <div
-            style={{
-              display: 'flex',
-              gap: 2,
-              padding: 2,
-              margin: '4px 0 6px',
-              background: 'var(--bg-inset)',
-              borderRadius: 'var(--radius-md)',
-            }}
-          >
-            <ViewTab
-              active={p.view === 'fleet'}
-              onClick={() => p.onViewChange('fleet')}
-              title="并排查看所有 agent 的进度"
-            >
-              ▦ 舰队
-            </ViewTab>
-            <ViewTab
-              active={p.view === 'chat'}
-              onClick={() => p.onViewChange('chat')}
-              title="查看当前 agent 的完整对话"
-            >
-              💬 对话
-            </ViewTab>
-          </div>
-        )}
-
-        {p.agents.length === 0 && !p.createOpen && (
-          <div className="c-empty" style={{ padding: 'var(--space-6) var(--space-3)' }}>
-            {previewMode() ? '这是预览' : '还没有 agent'}
-            <div style={{ fontSize: 'var(--text-xs)', marginTop: 8, color: 'var(--text-disabled)' }}>
-              {previewMode() ? '浏览器里的会话是假的。' : '点下面新建，可同时建多个并行跑'}
-            </div>
-          </div>
-        )}
-
-        {!groups.agent && tree.map((node) => (
-          <AgentBranch
-            key={node.agent.id}
-            node={node}
-            depth={0}
-            activeId={p.activeKind === 'agent' ? p.activeId : null}
-            folded={folded}
-            onToggle={(id) => setFolded((s) => ({ ...s, [id]: !s[id] }))}
-            onSelect={(id) => p.onSelect('agent', id)}
-            onDelete={p.onDelete}
-          />
-        ))}
+        <SectionLabel>助手</SectionLabel>
+        <NavRow
+          icon="🌐"
+          label="网关"
+          active={p.view === 'gateway'}
+          onClick={() => p.onViewChange('gateway')}
+        />
+        <NavRow
+          icon="🧠"
+          label="记忆"
+          active={p.view === 'memory'}
+          onClick={() => p.onViewChange('memory')}
+        />
+        <NavRow
+          icon="🗓"
+          label="计划"
+          active={p.view === 'plan'}
+          onClick={() => p.onViewChange('plan')}
+        />
 
       </div>
 

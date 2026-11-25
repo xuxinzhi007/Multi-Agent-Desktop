@@ -248,6 +248,50 @@ func (s *API) SetAgentWorktree(agentId string, on bool) (AgentView, error) {
 	return v, nil
 }
 
+// SetAgentRuntime 切换会话执行体（进程内 native / 外部 ACP），并落盘、广播。
+// 切回 native 时保留已有 ACP 配置；切到 acp 必须先有非空启动命令。
+func (s *API) SetAgentRuntime(req AgentRuntimeRequest) (AgentView, error) {
+	runtime := strings.TrimSpace(req.Runtime)
+	if runtime != agent.RuntimeNative && runtime != agent.RuntimeACP {
+		return AgentView{}, fmt.Errorf("运行时只能是 native 或 acp")
+	}
+
+	var acpCfg *agent.ACPConfig
+	if runtime == agent.RuntimeACP {
+		if strings.TrimSpace(req.Command) == "" {
+			return AgentView{}, fmt.Errorf("这个会话选了外部 ACP Agent，但还没填写启动命令")
+		}
+		acpCfg = &agent.ACPConfig{
+			Name:    strings.TrimSpace(req.Name),
+			Command: strings.TrimSpace(req.Command),
+			Args:    cleanArgList(req.Args),
+			Env:     cleanArgList(req.Env),
+			Trace:   req.Trace,
+		}
+	}
+	if err := s.mgr.SetRuntime(req.AgentID, runtime, acpCfg); err != nil {
+		return AgentView{}, err
+	}
+	a, ok := s.mgr.Get(req.AgentID)
+	if !ok {
+		return AgentView{}, fmt.Errorf("agent %s not found", req.AgentID)
+	}
+	v := toAgentView(a)
+	AgentConfig.Emit(s.win, catalogView(v))
+	return v, nil
+}
+
+// cleanArgList 去掉空白项。环境变量在这里不拆 KEY=VALUE，原样交给子进程。
+func cleanArgList(list []string) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。
 func (s *API) SetAgentLLM(agentId string, cfg LLMConfig) (AgentView, error) {
 	if err := s.mgr.SetAgentLLM(agentId, cfg); err != nil {

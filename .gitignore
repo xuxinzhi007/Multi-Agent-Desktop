@@ -11,6 +11,7 @@ dist
 # MyGo
 build/
 .mygo/
+*.syso
 
 # IDE
 .idea

@@ -39,8 +39,6 @@ function serialize(editor: Editor): { text: string; mentions: string[] } {
 const escapeHTML = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
 /** 纯文本 → 编辑器 HTML：认识的名字还原成胶囊（回填/重发用），其余按原文。 */
 function toHTML(text: string, targets: Target[]): string {
   const names = targets.map((t) => t.name).sort((a, b) => b.length - a.length)
@@ -274,10 +272,12 @@ const MentionInput = forwardRef<
                 t.id.toLowerCase().includes(query.toLowerCase()),
             ),
           command: ({ editor: ed, range, props }) => {
+            // props 实际是 items() 返回的 Target；extension-mention 的类型只声明了 MentionNodeAttrs
+            const item = props as unknown as Target
             ed.chain()
               .focus()
               .insertContentAt(range, [
-                { type: 'mention', attrs: { id: props.id, label: props.name } },
+                { type: 'mention', attrs: { id: item.id, label: item.name } },
                 { type: 'text', text: ' ' },
               ])
               .run()

@@ -12,15 +12,18 @@ import SettingsModal from './components/SettingsModal'
 import ToastContainer from './components/Toast'
 import QuickSwitch from './components/QuickSwitch'
 import CapabilityPanel from './components/CapabilityPanel'
+import StatusBar from './components/StatusBar'
+import GatewayPage from './components/pages/GatewayPage'
+import MemoryPage from './components/pages/MemoryPage'
+import PlanPage from './components/pages/PlanPage'
 import { useBackend } from './lib/useBackend'
 import type { AgentView as Agent } from './mygo'
 import { API } from './mygo'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
+import type { MainView } from './lib/nav'
 
 type ActiveRef = { kind: 'agent' | 'channel' | 'feishu'; id: string } | null
-/** 主区域展示什么：舰队总览，还是单个 agent 的对话 */
-type MainView = 'fleet' | 'chat'
 
 export default function App() {
   const s = useBackend()
@@ -29,6 +32,8 @@ export default function App() {
   const [view, setView] = useState<MainView>('fleet')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
+  // 审批队列弹窗开关：审批到达时自动弹出（现有行为），顶部待审批数也可手动打开
+  const [approvalOpen, setApprovalOpen] = useState(false)
   // 默认视图是舰队，检查器会把它挤窄，所以初始收起。
   // 进对话视图时 onViewChange 会把它展开。
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -56,6 +61,15 @@ export default function App() {
   useEffect(() => {
     if (inspectorOpen && tab === 'knowledge') s.refreshNotes()
   }, [inspectorOpen, tab, s.refreshNotes])
+
+  // 有新审批待决时自动弹出队列；队列清空后弹窗随 items 为空自然收起
+  useEffect(() => {
+    if (s.approvals.length > 0) setApprovalOpen(true)
+  }, [s.approvals.length])
+
+  // 顶部状态条数字：全部由现有 state 实时计算，不接后端推测值
+  const runningCount = s.agents.filter((a) => a.status === 'running').length
+  const queueTotal = s.agents.reduce((n, a) => n + (a.queueLen ?? 0), 0)
 
   useEffect(() => {
     if (view === 'chat' && active?.kind === 'agent') s.openAgent(active.id)
@@ -105,7 +119,21 @@ export default function App() {
   return (
     <>
       <AmbientBackground />
-      <div className="c-shell">
+      <div className="c-shell" style={{ flexDirection: 'column' }}>
+      <StatusBar
+        running={runningCount}
+        approvals={s.approvals.length}
+        queue={queueTotal}
+        onOpenApprovals={() => setApprovalOpen(true)}
+      />
+      <div
+        style={{
+          display: 'flex',
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+        }}
+      >
       <Sidebar
         agents={s.agents}
         channels={s.channels}
@@ -141,7 +169,13 @@ export default function App() {
         onCreateOpenChange={setCreateOpen}
       />
 
-      {view === 'fleet' && !activeChannel && !activeFeishu ? (
+      {view === 'gateway' ? (
+        <GatewayPage />
+      ) : view === 'memory' ? (
+        <MemoryPage onOpenKnowledge={openKnowledge} />
+      ) : view === 'plan' ? (
+        <PlanPage />
+      ) : view === 'fleet' && !activeChannel && !activeFeishu ? (
         <FleetView
           agents={s.agents}
           streaming={s.streaming}
@@ -285,6 +319,7 @@ export default function App() {
           }}
         />
       )}
+      </div>
 
       <SettingsModal
         open={settingsOpen}
@@ -294,7 +329,12 @@ export default function App() {
         onSave={(cfg: LLMConfig) => s.send('llm.config', cfg)}
       />
 
-      <ApprovalModal items={s.approvals} agents={s.agents} onDecide={s.decideApproval} />
+      <ApprovalModal
+        open={approvalOpen}
+        items={s.approvals}
+        agents={s.agents}
+        onDecide={s.decideApproval}
+      />
 
       <ToastContainer />
 

@@ -210,13 +210,15 @@ func (s *API) SaveFeishu(in FeishuSave) (FeishuView, error) {
 		}
 	}
 	next := config.MergeFeishuBot(prev, config.FeishuBot{
-		ID:          in.ID,
-		Name:        in.Name,
-		Enabled:     in.Enabled,
-		AppID:       in.AppID,
-		AppSecret:   in.AppSecret,
-		AgentID:     in.AgentID,
-		MentionOnly: in.MentionOnly,
+		ID:              in.ID,
+		Name:            in.Name,
+		Enabled:         in.Enabled,
+		AppID:           in.AppID,
+		AppSecret:       in.AppSecret,
+		AgentID:         in.AgentID,
+		MentionOnly:     in.MentionOnly,
+		OwnerOpenID:     in.OwnerOpenID,
+		ApproverOpenIDs: in.ApproverOpenIDs,
 	})
 	if next.Enabled {
 		if err := s.validateFeishu(next); err != nil {
@@ -320,6 +322,11 @@ func (s *API) syncFeishu() {
 			on = true
 		}
 		list = append(list, feishu.Bot{ID: b.ID, Config: feishuConfig(b)})
+		// 老配置只有用户令牌、没有 owner：后台用令牌问一次 open_id 补上，
+		// 否则升级后审批会因为「名单为空」全部拒绝。
+		if b.Enabled && b.UserAccess != "" && b.OwnerOpenID == "" {
+			s.probeFeishuOwner(b)
+		}
 	}
 	if s.mgr != nil {
 		s.mgr.SetFeishuOn(on)
@@ -327,18 +334,67 @@ func (s *API) syncFeishu() {
 	s.bot.Sync(list)
 }
 
+// probeFeishuOwner 用已保存的用户令牌补写 owner open_id。
+// 只对老配置做一次；失败不阻塞，用户重新授权也会写。
+func (s *API) probeFeishuOwner(b config.FeishuBot) {
+	if s.settings == nil {
+		return
+	}
+	s.ownerMu.Lock()
+	if s.ownerProbes == nil {
+		s.ownerProbes = map[string]bool{}
+	}
+	if s.ownerProbes[b.ID] {
+		s.ownerMu.Unlock()
+		return
+	}
+	s.ownerProbes[b.ID] = true
+	s.ownerMu.Unlock()
+	go func() {
+		defer func() {
+			s.ownerMu.Lock()
+			delete(s.ownerProbes, b.ID)
+			s.ownerMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		who, err := feishu.WhoAmI(ctx, feishu.Cred{
+			AppID: b.AppID, Secret: b.AppSecret,
+			UserToken: b.UserAccess, UserRefresh: b.UserRefresh, UserExpire: b.UserExpire,
+		})
+		if err != nil || who.OpenID == "" {
+			return
+		}
+		for _, cur := range s.settings.Get().FeishuBots {
+			if cur.ID != b.ID || cur.OwnerOpenID != "" {
+				continue
+			}
+			cur.OwnerOpenID = who.OpenID
+			if _, err := s.settings.SaveFeishuBot(cur); err != nil {
+				log.Printf("feishu owner: 保存失败 %v", err)
+				return
+			}
+			// 让正在跑的长连接也拿到新的 owner 配置。
+			s.syncFeishu()
+			return
+		}
+	}()
+}
+
 func (s *API) feishuView(cfg config.FeishuBot) FeishuView {
 	view := FeishuView{
-		ID:          cfg.ID,
-		Name:        cfg.Name,
-		Enabled:     cfg.Enabled,
-		AppID:       cfg.AppID,
-		HasSecret:   cfg.AppSecret != "",
-		HasUser:     cfg.UserAccess != "",
-		AgentID:     cfg.AgentID,
-		MentionOnly: cfg.MentionOnly,
-		Status:      "stopped",
-		UserExpire:  cfg.UserExpire,
+		ID:              cfg.ID,
+		Name:            cfg.Name,
+		Enabled:         cfg.Enabled,
+		AppID:           cfg.AppID,
+		HasSecret:       cfg.AppSecret != "",
+		HasUser:         cfg.UserAccess != "",
+		AgentID:         cfg.AgentID,
+		MentionOnly:     cfg.MentionOnly,
+		OwnerOpenID:     cfg.OwnerOpenID,
+		ApproverOpenIDs: cfg.ApproverOpenIDs,
+		Status:          "stopped",
+		UserExpire:      cfg.UserExpire,
 	}
 	if s.bot != nil {
 		st := s.bot.Status(cfg.ID)
@@ -409,6 +465,10 @@ func (s *API) FinishFeishuUserAuth(ctx context.Context, id string) (FeishuView, 
 	})
 	if werr != nil {
 		log.Printf("feishu whoami: %v", werr)
+	} else if cfg.OwnerOpenID == "" && who.OpenID != "" {
+		// 第一次授权的人就是会话 owner。以后审批卡只认这个 open_id 和白名单，
+		// 所以要把身份落盘，不能只留在内存里。
+		cfg.OwnerOpenID = who.OpenID
 	}
 	probe := probeUserRead(ctx, cfg)
 	saved, err := s.settings.SaveFeishuBot(cfg)

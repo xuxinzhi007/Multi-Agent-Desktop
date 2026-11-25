@@ -4,44 +4,160 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/tool/builtin"
 	"multi-agent-desktop/internal/tool/web"
 	"multi-agent-desktop/internal/workdir"
+
+	rt "multi-agent-desktop/internal/runtime"
 )
 
-// executeLoop 用自持循环执行。
-//
-// 与 executeMock 的区别不是「换个客户端」，
-// 而是控制点回到了进程内：每一轮之间我们都能检查停止、预算、
-// 重复调用，并把这些状态如实推给界面。
+// executeLoop 保留旧签名作为兼容入口；实际执行统一走运行时协议（见 executeNativeRuntime）。
 func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) {
+	a.executeNativeRuntime(m, runCtx, text, channelID, contextText, blocks)
+}
+
+// executeNativeRuntime 把进程内 loop 接进统一运行时协议：
+// Native.Start → Session.Prompt → Events() → turn.finished → Close。
+// UI 事件、落库消息、检查点、审计、停止/预算语义与旧自持循环一致。
+func (a *Agent) executeNativeRuntime(m *Manager, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) {
+	bundle, fail := prepareNativeLoop(m, a, runCtx, text, channelID, contextText, blocks)
+	if fail != "" {
+		m.finish(a, StatusError, fail)
+		return
+	}
+
+	native := &rt.Native{Label: "native", Exec: bundle.exec}
+	spec := rt.Spec{
+		ID:             a.ID,
+		AgentID:        a.ID,
+		WorkDir:        bundle.workDir,
+		ExtraDirs:      a.EffectiveExtraDirs(),
+		PermissionMode: a.PermissionMode,
+	}
+	sess, err := native.Start(runCtx, spec)
+	if err != nil {
+		m.finish(a, StatusError, "无法启动本地会话："+err.Error())
+		return
+	}
+	defer sess.Close()
+
+	// 停止信号接到会话：ctx 结束就取消当前轮，defer Close 回收会话。
+	go func() {
+		<-runCtx.Done()
+		_ = sess.Cancel("")
+	}()
+
+	if err := sess.Prompt(runCtx, rt.Prompt{Text: text}); err != nil {
+		m.finish(a, StatusError, runtimePromptError(err))
+		return
+	}
+
+	consumeRuntimeEvents(m, a, sess, channelID, runCtx)
+
+	out := bundle.state
+
+	// 循环里的消息就是完整会话。按前缀追加会在检查点更短时把回复切掉。
+	a.mu.Lock()
+	if channelID == "" {
+		a.Messages = append([]llm.Message(nil), out.Messages...)
+	}
+	a.mu.Unlock()
+
+	switch out.Phase {
+	case loop.PhaseDone:
+		// agent.loop 保留旧 loopEmitter 的终局事件形状，前端按 kind 识别轮次结束。
+		m.emit("agent.loop", map[string]any{"id": a.ID, "kind": "done", "iter": out.Iteration})
+		if channelID == "" {
+			if view, ok := oneAnswer(out); ok {
+				m.emit("agent.message", map[string]any{
+					"id":        a.ID,
+					"message":   view,
+					"tokensIn":  0,
+					"tokensOut": 0,
+				})
+			}
+		}
+		if channelID != "" && out.FinalText != "" {
+			m.emit("agent.channel.reply", map[string]any{
+				"channelId": channelID,
+				"agentId":   a.ID,
+				"agentName": a.Name,
+				"text":      out.FinalText,
+			})
+		}
+		a.setIdleOrQueued(m)
+		if channelID == "" && strings.TrimSpace(out.FinalText) != "" {
+			msgs := append([]llm.Message(nil), out.Messages...)
+			text := out.FinalText
+			go func() {
+				evolveProfile(m, a, msgs)
+				if m.NoteBook() != nil {
+					distillKnowledge(m, a.ID, a.EffectiveLLM(m), msgs, text)
+				}
+				studyHistory(m, a)
+			}()
+		}
+	case loop.PhaseStopped:
+		m.emit("agent.loop", map[string]any{"id": a.ID, "kind": "stopped", "iter": out.Iteration, "reason": out.StopReason})
+		m.emit("agent.stopped", map[string]any{
+			"id":     a.ID,
+			"reason": out.StopReason,
+			"iter":   out.Iteration,
+			"used":   out.Budget.UsedIterations,
+		})
+		a.noteStop(out.StopReason)
+		a.setIdleOrQueued(m)
+	case loop.PhaseBudget:
+		// 被预算砍断不等于这一轮白跑。摘要和检查点里的进度要留下，
+		// 否则用户下次问「上次要做什么」时手上是空的，模型只能编。
+		m.emit("agent.loop", map[string]any{"id": a.ID, "kind": "stopped", "iter": out.Iteration, "reason": out.StopReason})
+		if channelID == "" && len(out.Messages) > 0 {
+			msgs := append([]llm.Message(nil), out.Messages...)
+			go func() {
+				evolveProfile(m, a, msgs)
+				studyHistory(m, a)
+			}()
+		}
+		m.finish(a, StatusError, "预算用尽："+out.StopReason)
+	default:
+		m.emit("agent.loop", map[string]any{"id": a.ID, "kind": "failed", "iter": out.Iteration, "reason": out.StopReason})
+		m.finish(a, StatusError, out.StopReason)
+	}
+}
+
+// nativeLoopBundle 是一轮进程内 loop 的装配结果：执行体与被它填充的状态。
+type nativeLoopBundle struct {
+	workDir string
+	state   *loop.State
+	exec    rt.ExecFunc
+}
+
+// prepareNativeLoop 完成旧 executeLoop 的装配：模型/目录校验、工具注册表、
+// 历史与系统提示、检查点、循环配置。返回的 exec 在运行时会话里被调用。
+// fail 非空表示前置校验没通过，消息可直接交给 m.finish。
+func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, channelID, contextText string, blocks []llm.Block) (*nativeLoopBundle, string) {
 	cfg := a.EffectiveLLM(m)
 	if cfg.Provider == "mock" || cfg.Provider == "" || cfg.Model == "" {
-		m.finish(a, StatusError, "这个会话还没有模型")
-		return
+		return nil, "这个会话还没有模型"
 	}
 
 	workDir := a.EffectiveWorkDir(m)
 	if workDir == "" {
-		m.finish(a, StatusError, "这个会话还没有文件夹")
-		return
+		return nil, "这个会话还没有文件夹"
 	}
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
 	if workdir.TooBroad(workDir) {
-		m.finish(a, StatusError, workdir.RejectReason)
-		return
+		return nil, workdir.RejectReason
 	}
 
 	reg := tool.NewRegistry()
@@ -62,10 +178,6 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 
 	a.mu.Lock()
 	// 群回合只带该群的上文，不拼私聊历史。
-	//
-	// 以前两边都以 a.Messages 起头，于是私聊里的旧话题无条件混进每个群回合，
-	// 模型拿着远古历史回答当前群的问题。chat-isolation 守的是「不写入、不显示」，
-	// 这里守的是「不取材」：输入侧同样要按场景隔开。
 	var history []llm.Message
 	if channelID == "" {
 		history = append([]llm.Message(nil), a.Messages...)
@@ -112,8 +224,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 	}
 	store, err := loop.NewFileStore(filepath.Join(loopCheckpointRoot(m), "runs"))
 	if err != nil {
-		m.finish(a, StatusError, "无法建立检查点目录："+err.Error())
-		return
+		return nil, "无法建立检查点目录：" + err.Error()
 	}
 
 	st := &loop.State{
@@ -123,7 +234,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		Budget:   loop.DefaultBudget(),
 	}
 	if channelID == "" {
-		if prev, err := store.Load(runCtx, runID); err == nil && resumable(prev) && messagesExtend(history, prev.Messages) {
+		if prev, err := store.Load(context.Background(), runID); err == nil && resumable(prev) && messagesExtend(history, prev.Messages) {
 			st = prev
 		}
 	}
@@ -132,7 +243,6 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		Model:        llm.NewChatModel(cfg),
 		Tools:        reg,
 		Store:        store,
-		Emitter:      &loopEmitter{m: m, agent: a, channelID: channelID},
 		System:       system,
 		ContextLimit: llm.ContextLimit(cfg),
 		SaveImage: func(png []byte) (string, error) {
@@ -156,7 +266,7 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		},
 	}
 
-	// 把停止信号接到循环上。之前 CLI 路径是「UI 状态变了但进程还在跑」，
+	// 把停止信号接到循环。之前 CLI 路径是「UI 状态变了但进程还在跑」，
 	// 这里必须是同一件事：Stop 取消 ctx，循环在下一轮边界看到并落 checkpoint。
 	a.mu.Lock()
 	prevCancel := a.cancel
@@ -168,157 +278,45 @@ func (a *Agent) executeLoop(m *Manager, runCtx context.Context, text, channelID,
 		}()
 	}
 
-	out := runner.Run(runCtx, st)
-
-	// 循环里的消息就是完整会话。按前缀追加会在检查点更短时把回复切掉。
-	a.mu.Lock()
-	if channelID == "" {
-		a.Messages = append([]llm.Message(nil), out.Messages...)
+	exec := func(ctx context.Context, _ rt.Spec, _ rt.Turn, emit func(rt.Event) error) (rt.Stop, error) {
+		runner.Emitter = bridgeEmitter{emit: emit}
+		out := runner.Run(ctx, st)
+		switch out.Phase {
+		case loop.PhaseDone:
+			return rt.Stop{Reason: rt.StopEndTurn, FinalText: out.FinalText}, nil
+		case loop.PhaseStopped:
+			return rt.Stop{Reason: rt.StopCancelled}, nil
+		case loop.PhaseBudget:
+			return rt.Stop{Reason: rt.StopBudget}, nil
+		default:
+			return rt.Stop{Reason: rt.StopError, FinalText: out.FinalText}, fmt.Errorf("%s", out.StopReason)
+		}
 	}
-	a.mu.Unlock()
 
-	switch out.Phase {
-	case loop.PhaseDone:
-		if channelID == "" {
-			if view, ok := oneAnswer(out); ok {
-				m.emit("agent.message", map[string]any{
-					"id":        a.ID,
-					"message":   view,
-					"tokensIn":  0,
-					"tokensOut": 0,
-				})
-			}
-		}
-		if channelID != "" && out.FinalText != "" {
-			m.emit("agent.channel.reply", map[string]any{
-				"channelId": channelID,
-				"agentId":   a.ID,
-				"agentName": a.Name,
-				"text":      out.FinalText,
-			})
-		}
-		a.setIdleOrQueued(m)
-		if channelID == "" && strings.TrimSpace(out.FinalText) != "" {
-			msgs := append([]llm.Message(nil), out.Messages...)
-			text := out.FinalText
-			go func() {
-				evolveProfile(m, a, msgs)
-				if m.NoteBook() != nil {
-					distillKnowledge(m, a.ID, cfg, msgs, text)
-				}
-				studyHistory(m, a)
-			}()
-		}
-	case loop.PhaseStopped:
-		m.emit("agent.stopped", map[string]any{
-			"id":     a.ID,
-			"reason": out.StopReason,
-			"iter":   out.Iteration,
-			"used":   out.Budget.UsedIterations,
-		})
-		a.noteStop(out.StopReason)
-		a.setIdleOrQueued(m)
-	case loop.PhaseBudget:
-		// 被预算砍断不等于这一轮白跑。摘要和检查点里的进度要留下，
-		// 否则用户下次问「上次要做什么」时手上是空的，模型只能编。
-		if channelID == "" && len(out.Messages) > 0 {
-			msgs := append([]llm.Message(nil), out.Messages...)
-			go func() {
-				evolveProfile(m, a, msgs)
-				studyHistory(m, a)
-			}()
-		}
-		m.finish(a, StatusError, "预算用尽："+out.StopReason)
-	default:
-		m.finish(a, StatusError, out.StopReason)
-	}
+	return &nativeLoopBundle{workDir: workDir, state: st, exec: exec}, ""
 }
 
-// loopEmitter 把循环事件翻译成前端已有的事件语言。
-//
-// 不做成一对一映射：前端关心的是「现在在干什么」，
-// 而不是「循环内部第几步」。所以 iter.start 转成状态更新，
-// tool.start 转成 LastTool，tool.end 转成消息增量。
-type loopEmitter struct {
-	m         *Manager
-	agent     *Agent
-	channelID string
+// bridgeEmitter 把 loop 事件翻成协议事件；终局事件由返回的 Stop 表达，
+// 不在事件流里重复发 turn.finished。
+type bridgeEmitter struct {
+	emit func(rt.Event) error
 }
 
-func (e *loopEmitter) Emit(ev loop.Event) {
-	switch ev.Kind {
-	case "delta":
-		if ev.Text == "" {
-			return
-		}
-		e.agent.mu.Lock()
-		e.agent.Chars += len(ev.Text)
-		e.agent.mu.Unlock()
-		e.m.emit("agent.delta", map[string]any{"id": e.agent.ID, "delta": ev.Text, "channelId": e.channelID})
-	case "iter.start":
-		e.m.emit("agent.status", e.agent.statusPayload(StatusRunning))
-		// 上下文占用由前端按消息与 usage 现算（contextMeter），
-		// 不进事件流：这个量每轮都变，单独发一条会多出一份对不上号的副本。
-	case "reasoning":
-		e.m.emit("agent.reasoning", map[string]any{"id": e.agent.ID, "reasoning": ev.Text})
-	case "tool.start":
-		label := ev.Tool
-		if ev.Text != "" {
-			label = ev.Text
-		}
-		e.agent.mu.Lock()
-		e.agent.LastTool = label
-		e.agent.mu.Unlock()
-		e.m.emit("agent.tool", map[string]any{
-			"id": e.agent.ID, "tool": ev.Tool, "phase": "start", "content": label,
-		})
-	case "tool.end":
-		if ev.Result != nil {
-			e.agent.mu.Lock()
-			e.agent.Chars += len(ev.Result.Content)
-			e.agent.mu.Unlock()
-		}
-		e.m.emit("agent.tool", map[string]any{
-			"id": e.agent.ID, "tool": ev.Tool, "phase": "end",
-			"status": string(ev.Status), "content": truncate(ev.Content, 400),
-		})
-		e.audit(ev)
-	case "done", "stopped", "failed":
-		e.m.emit("agent.loop", map[string]any{
-			"id": e.agent.ID, "kind": ev.Kind, "iter": ev.Iter, "reason": ev.Reason,
-		})
-	}
-}
-
-// audit 把有副作用的工具调用写进独立日志。
-// 只记写操作和 bash：读文件也记的话，审计会被噪音淹掉。
-func (e *loopEmitter) audit(ev loop.Event) {
-	sink := e.m.Audit()
-	if sink == nil || ev.Result == nil || ev.Call == nil {
+func (b bridgeEmitter) Emit(ev loop.Event) {
+	rtEv, ok := runtimeEventFromLoop(ev)
+	if !ok {
 		return
 	}
-	if !isSideEffectTool(ev.Call.Name) {
+	if rtEv.Kind == rt.KindTurnFinished {
 		return
 	}
-	entry := audit.Entry{
-		AgentID:    e.agent.ID,
-		AgentName:  e.agent.Name,
-		Tool:       ev.Call.Name,
-		CallID:     ev.Call.ID,
-		Status:     string(ev.Result.Status),
-		DurationMS: ev.Result.Meta.DurationMS,
-		ExitCode:   ev.Result.Meta.ExitCode,
-		WorkDir:    e.agent.EffectiveWorkDir(e.m),
-		Summary:    auditSummary(ev.Call, ev.Result),
-	}
-	if err := sink.Append(entry); err != nil {
-		log.Printf("写审计日志失败：%v", err)
-	}
+	_ = b.emit(rtEv)
 }
 
+// 审计白名单：写操作与 bash 进独立日志。读文件不记，避免噪音淹掉审计。
 func isSideEffectTool(name string) bool {
 	switch name {
-	case "bash", "write_file", "edit_file":
+	case "bash", "write_file", "edit_file", "apply_patch":
 		return true
 	}
 	return false
@@ -333,7 +331,7 @@ func auditSummary(call *tool.Call, res *tool.Result) string {
 		if json.Unmarshal(call.Input, &in) == nil && strings.TrimSpace(in.Command) != "" {
 			return truncate(in.Command, 240)
 		}
-	case "write_file", "edit_file":
+	case "write_file", "edit_file", "apply_patch":
 		if res.Meta.Path != "" {
 			added, removed := diffStat(res.Meta.Diff)
 			return fmt.Sprintf("%s +%d/-%d", res.Meta.Path, added, removed)
@@ -427,9 +425,6 @@ func oneAnswer(out *loop.State) (llm.Message, bool) {
 // 声明在这里，两处必须同时存在才有意义。
 // 其他会话不写在这里，需要时用 list_agents 查。
 // identity 是这个会话在提示里必须知道的自指信息。
-//
-// 之前不写名字和 ID，agent 只能从 list_agents 的 17 个名字里猜哪个是自己，
-// 曾出现「在测试工程师的会话里自称前端 5」这类错认，进而拿错人的子会话。
 type identity struct {
 	Name string
 	ID   string
@@ -485,5 +480,3 @@ func loopCheckpointRoot(m *Manager) string {
 	}
 	return filepath.Join(filepath.Dir(store), "loop")
 }
-
-var _ = fmt.Sprintf

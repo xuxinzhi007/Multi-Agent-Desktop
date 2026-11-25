@@ -393,7 +393,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				break
 			}
 			st.Budget.UsedToolCalls++
-			r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c)})
+			r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c), Call: &c})
 
 			var res tool.Result
 			if r.Tools != nil {

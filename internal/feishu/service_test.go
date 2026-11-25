@@ -885,7 +885,7 @@ func TestApprovalCardDecidesFromFeishu(t *testing.T) {
 			return nil
 		},
 	})
-	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1", OwnerOpenID: "ou_owner"}
 	if _, err := s.reserve("a1", "om_user", "oc", func() {}); err != nil {
 		t.Fatal(err)
 	}
@@ -893,8 +893,83 @@ func TestApprovalCardDecidesFromFeishu(t *testing.T) {
 	if len(buttons) != 3 || buttons[0].Act != "deny" || buttons[1].Act != "once" || buttons[2].Act != "keep" {
 		t.Fatalf("buttons=%+v", buttons)
 	}
-	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1"})
+	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1", SenderID: "ou_owner", SenderType: "user"})
 	if painted != "已允许这一次" {
 		t.Fatalf("painted=%s", painted)
 	}
+}
+
+func TestApprovalStrangerCannotConsumeOrDecide(t *testing.T) {
+	decided := false
+	s := New(Hooks{
+		Actions: func(context.Context, string, string, string, string, []CardButton) (string, error) {
+			return "om_card", nil
+		},
+		Decide: func(string, bool, bool) error {
+			decided = true
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1", OwnerOpenID: "ou_owner"}
+	if _, err := s.reserve("a1", "om_user", "oc", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	s.Ask(Ask{ID: "ap-1", AgentID: "a1", Tool: "bash", Title: "运行命令"})
+	// 陌生人不带 MessageID，避免测试真的去发飞书消息；重点是卡不能被取走、
+	// 也不能替 owner 做决定。
+	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1", SenderID: "ou_stranger", SenderType: "user"})
+	if decided {
+		t.Fatal("stranger decided the approval")
+	}
+	if s.takeAsk("ap-1") == "" {
+		t.Fatal("stranger consumed the pending card")
+	}
+}
+
+func TestApprovalWhitelistCanDecide(t *testing.T) {
+	var painted string
+	decided := false
+	s := New(Hooks{
+		Actions: func(context.Context, string, string, string, string, []CardButton) (string, error) {
+			return "om_card", nil
+		},
+		Decide: func(id string, allow, remember bool) error {
+			decided = true
+			if id != "ap-1" || !allow || remember {
+				t.Fatalf("id=%s allow=%v remember=%v", id, allow, remember)
+			}
+			return nil
+		},
+		Patch: func(_ context.Context, _, _, _, text, _ string) error {
+			painted = text
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1", ApproverOpenIDs: []string{"ou_friend"}}
+	if _, err := s.reserve("a1", "om_user", "oc", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	s.Ask(Ask{ID: "ap-1", AgentID: "a1", Tool: "bash", Title: "运行命令"})
+	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1", SenderID: "ou_friend", SenderType: "user"})
+	if !decided || painted != "已允许这一次" {
+		t.Fatalf("decided=%v painted=%q", decided, painted)
+	}
+}
+
+func TestApprovalFailsClosedWhenNoOwnerOrWhitelist(t *testing.T) {
+	s := New(Hooks{
+		Actions: func(context.Context, string, string, string, string, []CardButton) (string, error) {
+			return "om_card", nil
+		},
+		Decide: func(string, bool, bool) error {
+			t.Fatal("decide must not run without an owner or whitelist")
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	if _, err := s.reserve("a1", "om_user", "oc", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	s.Ask(Ask{ID: "ap-1", AgentID: "a1", Tool: "bash", Title: "运行命令"})
+	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1", SenderID: "ou_anyone", SenderType: "user"})
 }

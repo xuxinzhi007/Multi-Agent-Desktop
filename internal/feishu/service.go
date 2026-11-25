@@ -129,6 +129,10 @@ type Config struct {
 	// AllowChats 是用户手动放行过的群。机器人不在的群默认不自动同步；
 	// 按 chat_id 主动读过一次、出现在这里的群才会继续补历史（仍然只读）。
 	AllowChats []string
+	// OwnerOpenID 是会话 owner。审批卡只认这个人和白名单；为空时一律拒绝。
+	OwnerOpenID string
+	// ApproverOpenIDs 是额外允许批准写操作的 open_id 白名单。
+	ApproverOpenIDs []string
 	// UserAccess 是用户授权后的令牌。空表示还没有授权。
 	UserAccess string
 	// UserRefresh 用来在用户令牌过期时换新的。
@@ -796,6 +800,15 @@ func (s *Service) CloseAsk(id string) {
 }
 
 func (s *Service) decide(cfg Config, t Turn) {
+	// 先验身份再看卡。takeAsk 会把待审批卡从表里删掉，陌生人点一下不能把
+	// owner 还没处理的审批弄没，也不能替别人做决定。
+	if !canApprove(cfg, t) {
+		msg := "只有会话 owner 或审批白名单里的人能处理这张卡。请让 owner 操作，或在设置里配置审批人。"
+		if t.MessageID != "" {
+			s.send(cfg.AppID, cfg.AppSecret, t.MessageID, msg)
+		}
+		return
+	}
 	card := s.takeAsk(t.ActionID)
 	allow := t.Action == "once" || t.Action == "keep"
 	text := "已拒绝"
@@ -817,6 +830,31 @@ func (s *Service) decide(cfg Config, t Turn) {
 	if t.MessageID != "" {
 		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, text)
 	}
+}
+
+// canApprove 判断这次卡片点击的人有没有资格批准。
+//
+// 规则按「owner + 显式白名单」：只认 open_id；sender 缺失、是应用/机器人
+// 或名单为空都拒绝（fail closed）。群场景不要求 @ 机器人，点卡本身就是
+// 明确的意图。
+func canApprove(cfg Config, t Turn) bool {
+	sender := strings.TrimSpace(t.SenderID)
+	if sender == "" {
+		return false
+	}
+	switch t.SenderType {
+	case "app", "bot":
+		return false
+	}
+	if strings.TrimSpace(cfg.OwnerOpenID) != "" && sender == strings.TrimSpace(cfg.OwnerOpenID) {
+		return true
+	}
+	for _, id := range cfg.ApproverOpenIDs {
+		if sender == strings.TrimSpace(id) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) takeAsk(id string) string {

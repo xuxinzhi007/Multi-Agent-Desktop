@@ -47,6 +47,9 @@ type API struct {
 	// 设备授权是两段式：先拿验证码给用户看，再等他确认。
 	authMu sync.Mutex
 	auths  map[string]feishu.DeviceAuth
+	// ownerProbes 防止启动时为同一个机器人重复问 WhoAmI。
+	ownerMu     sync.Mutex
+	ownerProbes map[string]bool
 	// 图片下载结果缓存一小会儿，避免界面反复轮询重复下载。
 	mediaMu sync.Mutex
 	media   map[string]mediaBlob
@@ -70,6 +73,9 @@ type Agent = AgentView
 // LLMConfig 是模型配置。
 type LLMConfig = llm.Config
 
+// ACPConfig 是外部 ACP Agent 的启动配置。
+type ACPConfig = agent.ACPConfig
+
 // PromptRequest 是一次对话请求。
 type PromptRequest = agent.PromptRequest
 
@@ -86,6 +92,17 @@ type ShellRequest struct {
 type CreateAgentRequest struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
+}
+
+// AgentRuntimeRequest 是设置会话运行时的参数。
+type AgentRuntimeRequest struct {
+	AgentID string   `json:"agentId"`
+	Runtime string   `json:"runtime"` // native | acp
+	Name    string   `json:"name,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+	Trace   bool     `json:"trace,omitempty"`
 }
 
 // SupervisorRequest 是新建「自动拆任务」会话的参数。
@@ -251,7 +268,13 @@ type AgentView struct {
 	Messages  []llm.Message `json:"messages"`
 	QueueLen  int           `json:"queueLen"`
 	Backend   string        `json:"backend"`
-	WorkDir   string        `json:"workDir"`
+	// Runtime 是执行体：native（进程内 loop）或 acp（外部进程）。空数据按 native 输出。
+	Runtime string     `json:"runtime"`
+	ACP     *ACPConfig `json:"acp,omitempty"`
+	// 运行时连接状态（只读、不落盘）："" | starting | running | idle | error。
+	RuntimeState string `json:"runtimeState,omitempty"`
+	RuntimeError string `json:"runtimeError,omitempty"`
+	WorkDir      string `json:"workDir"`
 	// ExtraDirs 是附加目录：文件工具可读写，shell 的 cwd 仍是 WorkDir。
 	ExtraDirs []string   `json:"extraDirs,omitempty"`
 	LLM       *LLMConfig `json:"llm,omitempty"`
@@ -304,6 +327,10 @@ func toAgentView(a *agent.Agent) AgentView {
 		Messages:       s.Messages,
 		QueueLen:       s.QueueLen,
 		Backend:        s.Backend,
+		Runtime:        viewRuntime(s.Runtime),
+		ACP:            s.ACP.Copy(),
+		RuntimeState:   s.RuntimeState(),
+		RuntimeError:   s.RuntimeError(),
 		WorkDir:        s.WorkDir,
 		ExtraDirs:      append([]string(nil), s.ExtraDirs...),
 		LLM:            llm.RedactedPtr(s.LLMCfg),
@@ -324,6 +351,14 @@ func toAgentView(a *agent.Agent) AgentView {
 		LearnBy:        s.LearnBy,
 		LearnBusy:      s.LearnBusy,
 	}
+}
+
+// viewRuntime 把落盘的运行时字符串收成前端视图值；空/非法一律回 native。
+func viewRuntime(r string) string {
+	if r == agent.RuntimeACP {
+		return agent.RuntimeACP
+	}
+	return agent.RuntimeNative
 }
 
 func seesModel(cfg *llm.Config) bool {
@@ -372,6 +407,14 @@ func agentViewFromMap(m map[string]any) AgentView {
 		v.Knowledge = ids
 	}
 	v.BlockedReason, _ = m["blockedReason"].(string)
+	if s, ok := m["runtime"].(string); ok {
+		v.Runtime = viewRuntime(s)
+	} else {
+		v.Runtime = agent.RuntimeNative
+	}
+	v.ACP = acpConfigFromMap(m["acp"])
+	v.RuntimeState, _ = m["runtimeState"].(string)
+	v.RuntimeError, _ = m["runtimeError"].(string)
 	v.Proposal, _ = m["proposal"].(string)
 	v.ParentID, _ = m["parentId"].(string)
 	v.Depth = mapInt(m["depth"])
@@ -415,6 +458,44 @@ func agentViewFromMap(m map[string]any) AgentView {
 	}
 	v.SeesImages = seesModel(v.LLM)
 	return v
+}
+
+// acpConfigFromMap 从 emitter 负载重建 ACP 配置；负载畸形时返回 nil，不 panic。
+func acpConfigFromMap(raw any) *ACPConfig {
+	switch c := raw.(type) {
+	case *agent.ACPConfig:
+		return c.Copy()
+	case agent.ACPConfig:
+		return c.Copy()
+	case map[string]any:
+		cfg := &ACPConfig{}
+		cfg.Name, _ = c["name"].(string)
+		cfg.Command, _ = c["command"].(string)
+		cfg.Trace, _ = c["trace"].(bool)
+		cfg.Args = toStringSlice(c["args"])
+		cfg.Env = toStringSlice(c["env"])
+		if cfg.Command == "" && cfg.Name == "" && len(cfg.Args) == 0 && len(cfg.Env) == 0 {
+			return nil
+		}
+		return cfg
+	}
+	return nil
+}
+
+func toStringSlice(raw any) []string {
+	switch list := raw.(type) {
+	case []string:
+		return append([]string(nil), list...)
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, x := range list {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 const agentMessagePage = 40
@@ -617,8 +698,12 @@ type FeishuView struct {
 	HasUser     bool   `json:"hasUser"`
 	AgentID     string `json:"agentId"`
 	MentionOnly bool   `json:"mentionOnly"`
-	Status      string `json:"status"`
-	Detail      string `json:"detail,omitempty"`
+	// OwnerOpenID 是审批卡的会话 owner；ApproverOpenIDs 是额外白名单。
+	// 两者都为空时审批一律拒绝，需要先授权一次飞书身份或手填 open_id。
+	OwnerOpenID     string   `json:"ownerOpenId,omitempty"`
+	ApproverOpenIDs []string `json:"approverOpenIds,omitempty"`
+	Status          string   `json:"status"`
+	Detail          string   `json:"detail,omitempty"`
 	// UserName 是用户身份授权后问到的人名。
 	UserName string `json:"userName,omitempty"`
 	// UserExpire 是用户令牌到期时间（Unix 秒），0 表示没授权过。
@@ -636,6 +721,9 @@ type FeishuSave struct {
 	AppSecret   string `json:"appSecret"`
 	AgentID     string `json:"agentId"`
 	MentionOnly bool   `json:"mentionOnly"`
+	// OwnerOpenID / ApproverOpenIDs 留空表示沿用已保存的值。
+	OwnerOpenID     string   `json:"ownerOpenId,omitempty"`
+	ApproverOpenIDs []string `json:"approverOpenIds,omitempty"`
 }
 
 // FeishuScopeView 是这个机器人还缺的飞书权限。
@@ -687,16 +775,18 @@ func scopeView(rep feishu.ScopeReport) FeishuScopeView {
 
 func feishuConfig(cfg config.FeishuBot) feishu.Config {
 	return feishu.Config{
-		Enabled:       cfg.Enabled,
-		AppID:         cfg.AppID,
-		AppSecret:     cfg.AppSecret,
-		AgentID:       cfg.AgentID,
-		MentionOnly:   cfg.MentionOnly,
-		UserAccess:    cfg.UserAccess,
-		UserRefresh:   cfg.UserRefresh,
-		UserExpire:    cfg.UserExpire,
-		AllowChats:    cfg.AllowChats,
-		OnUserRefresh: persistUserToken(cfg.ID),
+		Enabled:         cfg.Enabled,
+		AppID:           cfg.AppID,
+		AppSecret:       cfg.AppSecret,
+		AgentID:         cfg.AgentID,
+		MentionOnly:     cfg.MentionOnly,
+		UserAccess:      cfg.UserAccess,
+		UserRefresh:     cfg.UserRefresh,
+		UserExpire:      cfg.UserExpire,
+		AllowChats:      cfg.AllowChats,
+		OwnerOpenID:     cfg.OwnerOpenID,
+		ApproverOpenIDs: cfg.ApproverOpenIDs,
+		OnUserRefresh:   persistUserToken(cfg.ID),
 	}
 }
 

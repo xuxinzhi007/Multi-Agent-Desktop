@@ -244,12 +244,12 @@ func TestEditFileNotFoundText(t *testing.T) {
 	}
 }
 
-func TestRegisterAllFour(t *testing.T) {
+func TestRegisterAllSeven(t *testing.T) {
 	r := tool.NewRegistry()
 	Register(r, tmpDir(t))
 	specs := r.Specs()
-	if len(specs) != 4 {
-		t.Fatalf("got %d tools, want 4", len(specs))
+	if len(specs) != 7 {
+		t.Fatalf("got %d tools, want 7", len(specs))
 	}
 	names := map[string]bool{}
 	for _, s := range specs {
@@ -258,7 +258,7 @@ func TestRegisterAllFour(t *testing.T) {
 			t.Fatalf("%s has no schema", s.Name)
 		}
 	}
-	for _, want := range []string{"bash", "read_file", "write_file", "edit_file"} {
+	for _, want := range []string{"bash", "read_file", "write_file", "edit_file", "grep", "glob", "apply_patch"} {
 		if !names[want] {
 			t.Fatalf("missing tool %q", want)
 		}
@@ -276,6 +276,9 @@ func TestWriteToolsDeclareWrites(t *testing.T) {
 		{&WriteFile{WorkDir: dir}, true},
 		{&EditFile{WorkDir: dir}, true},
 		{&Bash{WorkDir: dir}, true},
+		{&Grep{WorkDir: dir}, false},
+		{&Glob{WorkDir: dir}, false},
+		{&ApplyPatch{WorkDir: dir}, true},
 	}
 	for _, c := range cases {
 		if got := c.tool.Writes(); got != c.want {
