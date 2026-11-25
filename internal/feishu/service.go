@@ -37,6 +37,27 @@ type Hooks struct {
 	// Claim 给这条消息挑一个会话。busy 是还在答飞书的会话。
 	// 主会话空闲时返回它。都在忙时返回内容为 busy 的错误，调用方等一轮结束再要。
 	Claim func(parentID string, busy map[string]bool) (string, error)
+	// Roster 是本机可以接手的会话。/status 和 /use 用它。
+	Roster func() []Named
+	// Actions 回复一张带按钮的卡片。批准写操作时用。
+	Actions func(ctx context.Context, appID, secret, messageID, text string, buttons []CardButton) (string, error)
+	// Decide 把飞书卡片上的允许或拒绝送回审批。
+	Decide func(id string, allow, remember bool) error
+}
+
+// Named 是一条指令里能点名的本机会话。
+type Named struct {
+	ID     string
+	Name   string
+	Status string
+}
+
+// CardButton 是飞书卡片上的一个按钮。
+type CardButton struct {
+	Text  string
+	Act   string
+	ID    string
+	Style string
 }
 
 // liveRun 是一条飞书消息正在由哪个会话回答。多条消息各有一轮。
@@ -44,6 +65,7 @@ type liveRun struct {
 	agent  string
 	card   string
 	key    string
+	chat   string
 	cancel context.CancelFunc
 	lines  []string
 	say    string
@@ -90,6 +112,7 @@ type Service struct {
 	once  sync.Once
 	jobs  chan Turn
 	runs  map[string]*liveRun
+	asks  map[string]string
 	wake  *sync.Cond
 	epoch int
 }
@@ -400,6 +423,17 @@ func (s *Service) dispatch(t Turn) {
 	if !d.Pass {
 		return
 	}
+	if reply, ok := s.command(t); ok {
+		sent := s.send(cfg.AppID, cfg.AppSecret, t.MessageID, reply)
+		if s.log != nil && t.ChatID != "" {
+			id := sent
+			if id == "" {
+				id = "self:" + t.MessageID
+			}
+			s.log.Add(Line{ID: id, ChatID: t.ChatID, From: "你", Text: reply, At: time.Now().Unix(), Self: true})
+		}
+		return
+	}
 	s.markSeen(cfg, t.MessageID)
 	s.expand(cfg, &t)
 	pieces, miss := s.attach(cfg, t)
@@ -420,7 +454,7 @@ func (s *Service) dispatch(t Turn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	parent := s.AgentFor(t.ChatID)
-	run, pickErr := s.reserve(parent, t.MessageID, cancel)
+	run, pickErr := s.reserve(parent, t.MessageID, t.ChatID, cancel)
 	if pickErr != nil {
 		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, pickErr.Error())
 		return
@@ -541,6 +575,273 @@ func (s *Service) halt(id string) {
 	if cardID != "" && s.paint(cfg, cardID, "已停止", "") == nil && s.log != nil {
 		s.log.Release(cardID)
 	}
+}
+
+const commandHelp = "/help  列出这些指令\n/stop  停掉正在处理的这一轮\n/status  看现在交给哪个会话\n/use 名字  从下一条起换一个会话回答\n\n写操作需要批准时，卡片会发在这条对话里，直接点允许或拒绝。"
+
+func slashLine(text string) (name, arg string, ok bool) {
+	text = strings.TrimSpace(text)
+	for strings.HasPrefix(text, "@") {
+		i := strings.IndexAny(text, " \t")
+		if i < 0 {
+			return "", "", false
+		}
+		text = strings.TrimSpace(text[i+1:])
+	}
+	if !strings.HasPrefix(text, "/") || strings.Contains(text, "\n") {
+		return "", "", false
+	}
+	head, rest, _ := strings.Cut(text, " ")
+	name = strings.ToLower(strings.TrimPrefix(head, "/"))
+	if name == "" {
+		return "", "", false
+	}
+	for _, r := range name {
+		if r < 'a' || r > 'z' {
+			return "", "", false
+		}
+	}
+	return name, strings.TrimSpace(rest), true
+}
+
+func (s *Service) command(t Turn) (string, bool) {
+	name, arg, ok := slashLine(t.Text)
+	if !ok {
+		return "", false
+	}
+	switch name {
+	case "help":
+		return commandHelp, true
+	case "stop":
+		n := s.haltChat(t.ChatID)
+		if n == 0 {
+			return "现在没有在处理的这一轮。", true
+		}
+		return "已停止。", true
+	case "status":
+		return s.statusLine(t.ChatID), true
+	case "use":
+		return s.useLine(t.ChatID, arg), true
+	default:
+		return "没有这条指令。发 /help 看可用的。", true
+	}
+}
+
+func (s *Service) haltChat(chatID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	var runs []*liveRun
+	for _, cur := range s.runs {
+		if cur == nil || cur.closed || cur.cancel == nil {
+			continue
+		}
+		if cur.chat != chatID {
+			continue
+		}
+		cur.closed = true
+		runs = append(runs, cur)
+	}
+	cfg := s.cfg
+	s.mu.Unlock()
+	for _, run := range runs {
+		run.cancel()
+		if run.card != "" && s.paint(cfg, run.card, "已停止", "") == nil && s.log != nil {
+			s.log.Release(run.card)
+		}
+	}
+	return len(runs)
+}
+
+func (s *Service) statusLine(chatID string) string {
+	id := s.AgentFor(chatID)
+	list := s.roster()
+	for _, n := range list {
+		if n.ID == id {
+			name := n.Name
+			if name == "" {
+				name = n.ID
+			}
+			return "现在交给「" + name + "」。" + statusWord(n.Status)
+		}
+	}
+	if id == "" {
+		return "还没有指定本机会话。"
+	}
+	return "现在交给「" + id + "」。"
+}
+
+func (s *Service) useLine(chatID, name string) string {
+	name = strings.TrimSpace(name)
+	list := s.roster()
+	if len(list) == 0 {
+		return "还看不到本机会话。"
+	}
+	if name == "" {
+		var b strings.Builder
+		b.WriteString("可以换成这些会话：")
+		for _, n := range list {
+			label := n.Name
+			if label == "" {
+				label = n.ID
+			}
+			b.WriteString("\n")
+			b.WriteString(label)
+		}
+		return b.String()
+	}
+	var hit []Named
+	for _, n := range list {
+		if n.Name == name || n.ID == name {
+			hit = append(hit, n)
+		}
+	}
+	if len(hit) == 0 {
+		return "没有叫「" + name + "」的会话。发 /use 看名单。"
+	}
+	if len(hit) > 1 {
+		return "有多个叫「" + name + "」的会话，说不过来换哪一个。"
+	}
+	s.BindRoom(chatID, hit[0].ID)
+	label := hit[0].Name
+	if label == "" {
+		label = hit[0].ID
+	}
+	return "从下一条起交给「" + label + "」。"
+}
+
+func (s *Service) roster() []Named {
+	if s == nil || s.hooks.Roster == nil {
+		return nil
+	}
+	return s.hooks.Roster()
+}
+
+func statusWord(status string) string {
+	switch status {
+	case "running":
+		return "它正在处理。"
+	case "queued":
+		return "它在排队。"
+	case "blocked":
+		return "它在等你。"
+	case "error":
+		return "它刚才出错了。"
+	default:
+		return "它现在空闲。"
+	}
+}
+
+// Ask 是一次写操作审批。这条飞书对话正在由该会话回答时，把批准卡片发到飞书。
+type Ask struct {
+	ID      string
+	AgentID string
+	Tool    string
+	Title   string
+	Detail  string
+}
+
+func (s *Service) Ask(v Ask) {
+	if s == nil || v.ID == "" || s.hooks.Actions == nil {
+		return
+	}
+	s.mu.Lock()
+	var run *liveRun
+	for _, cur := range s.runs {
+		if cur != nil && !cur.closed && cur.agent == v.AgentID && cur.key != "" {
+			run = cur
+			break
+		}
+	}
+	cfg := s.cfg
+	s.mu.Unlock()
+	if run == nil {
+		return
+	}
+	text := approvalText(v)
+	card, err := s.hooks.Actions(context.Background(), cfg.AppID, cfg.AppSecret, run.key, text, []CardButton{
+		{Text: "拒绝", Act: "deny", ID: v.ID, Style: "danger"},
+		{Text: "允许一次", Act: "once", ID: v.ID, Style: "primary"},
+		{Text: "本会话允许", Act: "keep", ID: v.ID},
+	})
+	if err != nil || card == "" {
+		if err != nil {
+			log.Printf("feishu approval: %v", err)
+		}
+		return
+	}
+	s.mu.Lock()
+	if s.asks == nil {
+		s.asks = map[string]string{}
+	}
+	s.asks[v.ID] = card
+	s.mu.Unlock()
+}
+
+func (s *Service) CloseAsk(id string) {
+	card := s.takeAsk(id)
+	if card == "" {
+		return
+	}
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	_ = s.paint(cfg, card, "已经处理过了", "")
+}
+
+func (s *Service) decide(cfg Config, t Turn) {
+	card := s.takeAsk(t.ActionID)
+	allow := t.Action == "once" || t.Action == "keep"
+	text := "已拒绝"
+	if t.Action == "once" {
+		text = "已允许这一次"
+	}
+	if t.Action == "keep" {
+		text = "本会话之后都允许这个工具"
+	}
+	if s.hooks.Decide == nil {
+		text = "批准还没接上"
+	} else if err := s.hooks.Decide(t.ActionID, allow, t.Action == "keep"); err != nil {
+		text = err.Error()
+	}
+	if card != "" {
+		_ = s.paint(cfg, card, text, "")
+		return
+	}
+	if t.MessageID != "" {
+		s.send(cfg.AppID, cfg.AppSecret, t.MessageID, text)
+	}
+}
+
+func (s *Service) takeAsk(id string) string {
+	if s == nil || id == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	card := s.asks[id]
+	delete(s.asks, id)
+	return card
+}
+
+func approvalText(v Ask) string {
+	var b strings.Builder
+	b.WriteString("需要你的批准")
+	if v.Title != "" {
+		b.WriteString("\n")
+		b.WriteString(v.Title)
+	}
+	if v.Tool != "" {
+		b.WriteString("\n工具：")
+		b.WriteString(v.Tool)
+	}
+	if strings.TrimSpace(v.Detail) != "" {
+		b.WriteString("\n\n")
+		b.WriteString(v.Detail)
+	}
+	b.WriteString("\n\n在这里点即可。允许一次只放行这一次；本会话允许只对这个工具生效。")
+	return b.String()
 }
 
 const droppedLine = "服务已经停了，这一轮没有做完"
@@ -733,7 +1034,7 @@ func busyClaim(err error) bool {
 }
 
 // reserve 占住一个还没在答飞书的会话。主会话忙时由 Claim 交给它的助手。
-func (s *Service) reserve(parent, key string, cancel context.CancelFunc) (*liveRun, error) {
+func (s *Service) reserve(parent, key, chat string, cancel context.CancelFunc) (*liveRun, error) {
 	for {
 		s.mu.Lock()
 		busy := map[string]bool{}
@@ -773,7 +1074,7 @@ func (s *Service) reserve(parent, key string, cancel context.CancelFunc) (*liveR
 		if s.runs == nil {
 			s.runs = map[string]*liveRun{}
 		}
-		run := &liveRun{agent: id, key: key, cancel: cancel}
+		run := &liveRun{agent: id, key: key, chat: chat, cancel: cancel}
 		s.runs[id] = run
 		s.mu.Unlock()
 		return run, nil
@@ -902,6 +1203,11 @@ type held struct {
 }
 
 func (s *Service) onAction(cfg Config, t Turn) {
+	switch t.Action {
+	case "once", "keep", "deny":
+		s.decide(cfg, t)
+		return
+	}
 	s.mu.Lock()
 	h, ok := s.holds[t.ActionID]
 	if ok {

@@ -1269,7 +1269,35 @@ func cardMessage(text, stopID string) ([]byte, error) {
 	}{MsgType: "interactive", Content: string(card)})
 }
 
+// ReplyActions 回复一张带按钮的卡片，返回这张卡片的 message_id。
+func ReplyActions(ctx context.Context, appID, secret, messageID, text string, buttons []CardButton) (string, error) {
+	body, err := cardMessageButtons(text, buttons)
+	if err != nil {
+		return "", err
+	}
+	return postReply(ctx, appID, secret, messageID, body)
+}
+
+func cardMessageButtons(text string, buttons []CardButton) ([]byte, error) {
+	card, err := cardWith(text, buttons)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		MsgType string `json:"msg_type"`
+		Content string `json:"content"`
+	}{MsgType: "interactive", Content: string(card)})
+}
+
 func cardBody(text, stopID string) ([]byte, error) {
+	var buttons []CardButton
+	if stopID != "" {
+		buttons = append(buttons, CardButton{Text: "停止", Act: "stop", ID: stopID, Style: "danger"})
+	}
+	return cardWith(text, buttons)
+}
+
+func cardWith(text string, buttons []CardButton) ([]byte, error) {
 	rs := []rune(strings.TrimSpace(text))
 	if len(rs) > 4000 {
 		text = string(rs[:4000]) + "…"
@@ -1279,17 +1307,23 @@ func cardBody(text, stopID string) ([]byte, error) {
 	elements := []any{
 		map[string]any{"tag": "markdown", "content": text},
 	}
-	if stopID != "" {
+	if len(buttons) > 0 {
+		actions := make([]any, 0, len(buttons))
+		for _, b := range buttons {
+			style := b.Style
+			if style == "" {
+				style = "default"
+			}
+			actions = append(actions, map[string]any{
+				"tag":   "button",
+				"type":  style,
+				"text":  map[string]any{"tag": "plain_text", "content": b.Text},
+				"value": map[string]string{"act": b.Act, "id": b.ID},
+			})
+		}
 		elements = append(elements, map[string]any{
-			"tag": "action",
-			"actions": []any{
-				map[string]any{
-					"tag":   "button",
-					"type":  "danger",
-					"text":  map[string]any{"tag": "plain_text", "content": "停止"},
-					"value": map[string]string{"act": "stop", "id": stopID},
-				},
-			},
+			"tag":     "action",
+			"actions": actions,
 		})
 	}
 	card, err := json.Marshal(map[string]any{

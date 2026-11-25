@@ -8,6 +8,7 @@ package approval
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,36 @@ type View struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
+// Mode 是这个会话的权限模式。
+//
+// 三档语义不重叠，各自对应真实场景：
+//   - ask：每次写操作都问（默认）
+//   - auto：工作目录内的写与命令自动执行，不再逐次问
+//   - readonly：只读，写操作直接拒，不问也不等人
+//
+// 注意：auto 不等于「完整权限」。工作目录是工具层的硬边界（文件工具不出目录，
+// bash 的 cwd 就是它），审批模式不应该能把这条边界放开。
+// 无论哪一档，shellguard 对危险命令的拦截都照旧生效。
+type Mode string
+
+const (
+	ModeAsk      Mode = "ask"
+	ModeAuto     Mode = "auto"
+	ModeReadOnly Mode = "readonly"
+)
+
+// ParseMode 把界面传来的字符串收成合法模式，不认识的一律回到最保守的 ask。
+func ParseMode(s string) Mode {
+	switch Mode(strings.ToLower(strings.TrimSpace(s))) {
+	case ModeAuto:
+		return ModeAuto
+	case ModeReadOnly:
+		return ModeReadOnly
+	default:
+		return ModeAsk
+	}
+}
+
 // Center 管理所有等待中的审批。
 type Center struct {
 	mu      sync.Mutex
@@ -35,6 +66,8 @@ type Center struct {
 	order   []string
 	// allowed 记「本会话对这个工具以后都放行」。
 	allowed map[string]map[string]bool
+	// modes 是每个会话的权限模式，空则 ask。
+	modes   map[string]Mode
 	timeout time.Duration
 	seq     atomic.Uint64
 }
@@ -56,8 +89,29 @@ func New(emit func(event string, data any)) *Center {
 		emit:    emit,
 		pending: map[string]*waiter{},
 		allowed: map[string]map[string]bool{},
+		modes:   map[string]Mode{},
 		timeout: 5 * time.Minute,
 	}
+}
+
+// SetMode 改一个会话的权限模式。
+func (c *Center) SetMode(agentID string, m Mode) {
+	if c == nil || agentID == "" {
+		return
+	}
+	c.mu.Lock()
+	c.modes[agentID] = ParseMode(string(m))
+	c.mu.Unlock()
+}
+
+// ModeOf 读一个会话当前的权限模式。
+func (c *Center) ModeOf(agentID string) Mode {
+	if c == nil {
+		return ModeAsk
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ParseMode(string(c.modes[agentID]))
 }
 
 // SetTimeout 改等待上限，测试用；<=0 表示不改。
@@ -85,6 +139,14 @@ func (a *sessionApprover) Approve(ctx context.Context, call tool.Call) (bool, st
 // Approve 阻塞到用户决定、ctx 取消或超时。
 func (c *Center) Approve(ctx context.Context, agentID, agentName string, call tool.Call) (bool, string) {
 	if c == nil {
+		return true, ""
+	}
+	// 权限模式先于逐次审批。readonly 直接拒，不要挂一张没人能批的卡；
+	// auto 直接放，不要让用户在飞书里等一张他看不见的卡。
+	switch c.ModeOf(agentID) {
+	case ModeReadOnly:
+		return false, "这个会话是只读模式，不执行写操作。要改东西先把权限模式改成逐次审批或自动。"
+	case ModeAuto:
 		return true, ""
 	}
 	if c.remembered(agentID, call.Name) {

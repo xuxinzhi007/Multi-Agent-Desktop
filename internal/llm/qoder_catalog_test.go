@@ -1,6 +1,11 @@
 package llm
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -72,5 +77,55 @@ func TestCatalogEffortReplacesUnsupportedLevel(t *testing.T) {
 	}
 	if chatBudget(cfg) != 180*time.Second {
 		t.Fatalf("budget = %s", chatBudget(cfg))
+	}
+}
+
+func TestQoderResolveUsesCatalogResponse(t *testing.T) {
+	var fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		if r.URL.Path != "/algo/api/v2/model/list" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"chat":[{"key":"from-api","display_name":"FromAPI","enable":true}]}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	prevAuth := qoderAuthPath
+	qoderAuthPath = filepath.Join(dir, "auth.json")
+	t.Cleanup(func() { qoderAuthPath = prevAuth })
+	if err := writeQoderCreds(qoderCreds{
+		Access: "dt-cat", Expires: time.Now().Add(time.Hour), UserID: "user-cat", MachineID: "machine-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	qoderCatalogMu.Lock()
+	prevSnap := qoderCatalogSnap
+	qoderCatalogSnap = qoderCatalogSnapshot{}
+	qoderCatalogMu.Unlock()
+	t.Cleanup(func() {
+		qoderCatalogMu.Lock()
+		qoderCatalogSnap = prevSnap
+		qoderCatalogMu.Unlock()
+	})
+
+	got, err := qoderResolve(context.Background(), Config{Provider: "qoder", BaseURL: srv.URL, APIKey: "dt-cat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].id != "FromAPI" || got[0].key != "from-api" {
+		t.Fatalf("models = %+v", got)
+	}
+
+	fail.Store(true)
+	qoderCatalogMu.Lock()
+	qoderCatalogSnap = qoderCatalogSnapshot{}
+	qoderCatalogMu.Unlock()
+	if _, err := qoderResolve(context.Background(), Config{Provider: "qoder", BaseURL: srv.URL, APIKey: "dt-cat"}); err == nil {
+		t.Fatal("catalog failure still returned a model list")
 	}
 }

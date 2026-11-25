@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -176,5 +177,50 @@ func TestTimeoutDenies(t *testing.T) {
 	}
 	if time.Since(start) < 40*time.Millisecond {
 		t.Fatal("returned before timeout")
+	}
+}
+
+// 权限模式先于逐次审批：auto 不该挂卡，readonly 不该等人。
+func TestModeAutoSkipsTheCard(t *testing.T) {
+	var events []string
+	c := New(func(e string, _ any) { events = append(events, e) })
+	c.SetMode("a1", ModeAuto)
+	ok, why := c.Approve(context.Background(), "a1", "A", tool.Call{Name: "bash"})
+	if !ok || why != "" {
+		t.Fatalf("auto 应当直接放行：%v %q", ok, why)
+	}
+	if len(events) != 0 {
+		t.Fatalf("auto 不该发审批卡：%v", events)
+	}
+}
+
+func TestModeReadOnlyRejectsImmediately(t *testing.T) {
+	c := New(nil)
+	c.SetMode("a1", ModeReadOnly)
+	done := make(chan struct{})
+	var ok bool
+	var why string
+	go func() {
+		ok, why = c.Approve(context.Background(), "a1", "A", tool.Call{Name: "write_file"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("只读模式应当立刻拒绝，而不是挂着等人")
+	}
+	if ok || !strings.Contains(why, "只读") {
+		t.Fatalf("ok=%v why=%q", ok, why)
+	}
+	if len(c.Pending()) != 0 {
+		t.Fatal("只读模式不该留下待批卡")
+	}
+}
+
+func TestUnknownModeFallsBackToAsk(t *testing.T) {
+	c := New(nil)
+	c.SetMode("a1", Mode("sudo-everything"))
+	if got := c.ModeOf("a1"); got != ModeAsk {
+		t.Fatalf("不认识的模式必须回到最保守的 ask，实际 %q", got)
 	}
 }

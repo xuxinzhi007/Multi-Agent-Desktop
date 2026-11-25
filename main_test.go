@@ -14,9 +14,11 @@ import (
 	"github.com/egoist/mygo"
 
 	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/tool"
 )
 
 // newTestAPI 构造一个不连真实窗口的 API。
@@ -1113,5 +1115,63 @@ func TestLastSentenceStripsInternalMarks(t *testing.T) {
 	got := lastSentence([]llm.Message{{Role: "user", Content: "[ch-1794486860541966000] 你: 在吗"}})
 	if got != "在吗" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// 切权限模式时，还挂着的审批卡要立刻有结果，不能继续等到超时。
+// 用户在飞书里问、卡片弹在应用内，等 5 分钟自动拒是最难受的失败方式。
+func TestSetAgentPermissionResolvesPendingCards(t *testing.T) {
+	s := newTestAPI(t)
+	defer stopAll(t, s)
+	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "r"})
+	s.mgr.SetApprovals(approval.New(nil))
+	c := s.mgr.Approvals()
+
+	for _, tc := range []struct {
+		mode  string
+		allow bool
+	}{{"auto", true}, {"readonly", false}} {
+		done := make(chan bool, 1)
+		go func() {
+			ok, _ := c.Approve(context.Background(), a.ID, a.Name, tool.Call{Name: "bash"})
+			done <- ok
+		}()
+		// 等卡片真的挂上
+		deadline := time.Now().Add(2 * time.Second)
+		for len(c.Pending()) == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if len(c.Pending()) == 0 {
+			t.Fatal("审批卡没有挂上")
+		}
+		if _, err := s.SetAgentPermission(a.ID, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-done:
+			if got != tc.allow {
+				t.Fatalf("%s 模式下应当 allow=%v，实际 %v", tc.mode, tc.allow, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s 模式下卡片没有被立刻处理", tc.mode)
+		}
+		if _, err := s.SetAgentPermission(a.ID, "ask"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// 不认识的模式必须回到最保守的一档，不能静默变成放行。
+func TestSetAgentPermissionRejectsUnknownMode(t *testing.T) {
+	s := newTestAPI(t)
+	defer stopAll(t, s)
+	s.mgr.SetApprovals(approval.New(nil))
+	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "r"})
+	got, err := s.SetAgentPermission(a.ID, "sudo-everything")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ask" {
+		t.Fatalf("未知模式应当落到 ask，实际 %q", got)
 	}
 }

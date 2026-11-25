@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
 import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
 import ModelPicker from './ModelPicker'
+import PermissionPicker from './PermissionPicker'
 import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
@@ -895,6 +896,7 @@ export default function AgentView(p: Props) {
             >
               {/* 模型选择直接长在输入框底栏：用户换模型时不用离开对话。
                   工作目录仍然走弹层（它不常改，且需要输入路径）。 */}
+              <PermissionPicker agentId={p.agent.id} />
               <ModelPicker
                 agentId={p.agent.id}
                 model={p.agent.llm?.model || ''}

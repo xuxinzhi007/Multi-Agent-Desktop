@@ -195,6 +195,8 @@ export async function mockRuntime(page: Page, state: MockState = EMPTY_STATE) {
         { name: 'web', kind: '工具', detail: '操作内置浏览器', ready: false, why: '内置浏览器还没打开' },
         { name: '排查慢SQL', kind: '技能', detail: '生产慢 SQL 的定位顺序', ready: true },
       ],
+      'API.AgentPermission': () => 'ask',
+      'API.SetAgentPermission': (_id: unknown, mode: unknown) => String(mode ?? 'ask'),
       'API.ListApprovals': () => [],
       'API.DecideApproval': () => undefined,
     }

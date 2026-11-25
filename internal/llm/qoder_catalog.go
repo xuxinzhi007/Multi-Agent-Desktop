@@ -47,7 +47,10 @@ func ListModelMetas(ctx context.Context, cfg Config) ([]ModelMeta, error) {
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("%w", ErrMissingAPIKey)
 		}
-		models := qoderResolve(ctx, cfg)
+		models, err := qoderResolve(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]ModelMeta, len(models))
 		for i, m := range models {
 			out[i] = ModelMeta{Name: m.id, Reasoning: m.reasoning, Efforts: append([]string(nil), m.efforts...)}
@@ -68,24 +71,27 @@ func ListModelMetas(ctx context.Context, cfg Config) ([]ModelMeta, error) {
 	return out, nil
 }
 
-func qoderResolve(ctx context.Context, cfg Config) []qoderModel {
+func qoderResolve(ctx context.Context, cfg Config) ([]qoderModel, error) {
 	qoderCatalogMu.Lock()
 	snap := qoderCatalogSnap
 	qoderCatalogMu.Unlock()
 	if snap.token == cfg.APIKey && len(snap.models) > 0 && time.Since(snap.at) < qoderCatalogTTL {
-		return snap.models
+		return snap.models, nil
 	}
 	fetched, err := fetchQoderCatalog(ctx, cfg)
 	if err == nil && len(fetched) > 0 {
 		qoderCatalogMu.Lock()
 		qoderCatalogSnap = qoderCatalogSnapshot{at: time.Now(), token: cfg.APIKey, models: fetched}
 		qoderCatalogMu.Unlock()
-		return fetched
+		return fetched, nil
 	}
 	if snap.token == cfg.APIKey && len(snap.models) > 0 {
-		return snap.models
+		return snap.models, nil
 	}
-	return qoderStatic()
+	if err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("qoder: 模型目录是空的")
 }
 
 func qoderCatalogLookup(id string) (qoderModel, bool) {

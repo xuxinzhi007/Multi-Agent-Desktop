@@ -760,11 +760,27 @@ func (m *Manager) Assist(parentID string, busy map[string]bool) (string, error) 
 	name := helperName(m, from.Name)
 	role := fmt.Sprintf("协助「%s」直接回答飞书里的一条消息。", from.Name)
 	created := m.create("", name, role, parentID)
-	if from.LLMCfg != nil && from.LLMCfg.Provider != "" {
-		_ = m.SetAgentLLM(created.ID, *from.LLMCfg)
+	// 模型要跟着父会话真正在用的那份，而不是只看它有没有显式选过。
+	// 父会话用全局默认时 LLMCfg 是 nil，旧写法会让助手开出来就没模型，
+	// 第一条消息必失败（截图里的「未选模型和文件夹」就是这么来的）。
+	cfg := parent.EffectiveLLM(m)
+	if cfg.Provider == "" {
+		cfg = m.LLMConfig()
 	}
-	if dir := parent.EffectiveWorkDir(m); dir != "" {
+	if cfg.Provider != "" {
+		_ = m.SetAgentLLM(created.ID, cfg)
+	}
+	dir := parent.EffectiveWorkDir(m)
+	if dir == "" {
+		dir = m.defaultWorkDir()
+	}
+	if dir != "" {
 		_ = m.SetAgentWorkDir(created.ID, dir)
+	}
+	// 权限模式也跟着父会话，否则助手会回到逐次审批，
+	// 在飞书里又变成「等一张看不见的卡」。
+	if c := m.Approvals(); c != nil {
+		c.SetMode(created.ID, c.ModeOf(parentID))
 	}
 	return created.ID, nil
 }
@@ -1415,6 +1431,13 @@ func (a *Agent) EffectiveWorkDir(m *Manager) string {
 	dir := a.WorkDir
 	a.mu.Unlock()
 	return dir
+}
+
+// defaultWorkDir 是全局工作目录，子会话没拿到父目录时的兵底。
+func (m *Manager) defaultWorkDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.workDir
 }
 
 // EffectiveLLM 只使用这个会话自己选的模型。

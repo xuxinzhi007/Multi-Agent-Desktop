@@ -633,6 +633,26 @@ func (s *API) agentSees(id string) bool {
 	return llm.SeesImages(cfg.Provider, cfg.Model)
 }
 
+func (s *API) feishuRoster() []feishu.Named {
+	if s.mgr == nil {
+		return nil
+	}
+	list := s.mgr.List()
+	out := make([]feishu.Named, 0, len(list))
+	for _, a := range list {
+		sn := a.Snapshot()
+		out = append(out, feishu.Named{ID: sn.ID, Name: sn.Name, Status: string(sn.Status)})
+	}
+	return out
+}
+
+func (s *API) decideFeishu(id string, allow, remember bool) error {
+	if s.mgr == nil || s.mgr.Approvals() == nil {
+		return fmt.Errorf("批准还没接上")
+	}
+	return s.mgr.Approvals().Decide(id, allow, remember, "")
+}
+
 func (s *API) claimFeishu(parent string, busy map[string]bool) (string, error) {
 	if s.mgr == nil {
 		return "", fmt.Errorf("会话还没准备好")
@@ -1268,7 +1288,12 @@ func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved 
 	cfg = llm.ApplyDefaults(cfg)
 	ep.BaseURL = cfg.BaseURL
 	ep.HasKey = cfg.APIKey != ""
-	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	// Qoder 的模型名单和额度各发一次请求。名单请求失败不能改用内置名单。
+	listBudget := 3 * time.Second
+	if id == "qoder" {
+		listBudget = 15 * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, listBudget)
 	defer cancel()
 	models, err := s.listModelsWithSavedCreds(cctx, cfg)
 	if err != nil {
@@ -1276,7 +1301,9 @@ func (s *API) endpointFor(ctx context.Context, id string, cfg llm.Config, saved 
 		return ep
 	}
 	if id == "qoder" && cfg.APIKey != "" {
-		quota, qerr := llm.QoderAccountStatus(cctx, cfg.APIKey)
+		qctx, qcancel := context.WithTimeout(ctx, 8*time.Second)
+		quota, qerr := llm.QoderAccountStatus(qctx, cfg.APIKey)
+		qcancel()
 		if qerr != nil {
 			ep.Reason = qerr.Error()
 			return ep
@@ -3085,6 +3112,18 @@ func main() {
 				api.bot.NoteDelta(data)
 			}
 		}
+		if api != nil && api.bot != nil && event == "tool.approval" {
+			if v, ok := toApprovalEvent(data); ok {
+				api.bot.Ask(feishu.Ask{
+					ID: v.ID, AgentID: v.AgentID, Tool: v.Tool, Title: v.Title, Detail: v.Detail,
+				})
+			}
+		}
+		if api != nil && api.bot != nil && event == "tool.approval.done" {
+			if id, ok := approvalDoneID(data); ok {
+				api.bot.CloseAsk(id)
+			}
+		}
 		emitToWindow(win, mgr, chMgr, event, data)
 	}
 
@@ -3199,6 +3238,9 @@ func main() {
 		Dial:    feishu.Dial,
 		React:   feishu.React,
 		Claim:   api.claimFeishu,
+		Roster:  api.feishuRoster,
+		Actions: feishu.ReplyActions,
+		Decide:  api.decideFeishu,
 	})
 	api.bot.SetLog(filepath.Join(dataDir, "feishu-rooms.json"))
 	api.syncFeishu()
@@ -3525,4 +3567,48 @@ func (s *API) AgentCapabilities(agentID string) []Capability {
 		}
 	}
 	return out
+}
+
+// AgentPermission 返回这个会话的权限模式：ask / auto / readonly。
+func (s *API) AgentPermission(agentID string) string {
+	c := s.mgr.Approvals()
+	if c == nil {
+		return string(approval.ModeAsk)
+	}
+	return string(c.ModeOf(agentID))
+}
+
+// SetAgentPermission 改这个会话的权限模式。
+//
+//	ask      每次写操作都问（默认）
+//	auto     工作目录内的写与命令自动执行
+//	readonly 只读，写操作直接拒绝
+//
+// 工作目录是工具层的硬边界，任何一档都放不开它；
+// shellguard 对危险命令的拦截也不受模式影响。
+// 模式是运行期状态，重启回到 ask——默认必须是最保守的那一档。
+func (s *API) SetAgentPermission(agentID, mode string) (string, error) {
+	if _, ok := s.mgr.Get(agentID); !ok {
+		return "", fmt.Errorf("会话不存在")
+	}
+	c := s.mgr.Approvals()
+	if c == nil {
+		return "", fmt.Errorf("这个部署没有装审批中心")
+	}
+	m := approval.ParseMode(mode)
+	c.SetMode(agentID, m)
+	// 改成自动或只读后，还挂着的卡已经没有意义：
+	// 自动就放行，只读就拒绝，别让它们继续等到超时。
+	for _, v := range c.Pending() {
+		if v.AgentID != agentID {
+			continue
+		}
+		switch m {
+		case approval.ModeAuto:
+			_ = c.Decide(v.ID, true, false, "已切到自动")
+		case approval.ModeReadOnly:
+			_ = c.Decide(v.ID, false, false, "已切到只读")
+		}
+	}
+	return string(m), nil
 }

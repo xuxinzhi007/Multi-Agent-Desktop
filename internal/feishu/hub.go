@@ -194,6 +194,20 @@ func (h *Hub) NoteTool(data any) {
 	}
 }
 
+// Ask 让正在回答的机器人把批准卡片发到对应的飞书对话。
+func (h *Hub) Ask(v Ask) {
+	for _, svc := range h.snapshot() {
+		svc.Ask(v)
+	}
+}
+
+// CloseAsk 桌面已经处理过这张批准时，收起飞书上还挂着的按钮。
+func (h *Hub) CloseAsk(id string) {
+	for _, svc := range h.snapshot() {
+		svc.CloseAsk(id)
+	}
+}
+
 func (h *Hub) snapshot() []*Service {
 	if h == nil {
 		return nil

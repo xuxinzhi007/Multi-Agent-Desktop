@@ -123,13 +123,22 @@ func (a *Agent) isLearner() bool {
 	return marked || strings.Contains(role, learnerRoleMark)
 }
 
+// isHelper 判断这个会话是不是飞书协助。协助是临时的手，不是长期工作台。
+func (a *Agent) isHelper() bool {
+	a.mu.Lock()
+	name, role := a.Name, a.Role
+	a.mu.Unlock()
+	return strings.Contains(name, "的协助") || strings.Contains(role, "协助「")
+}
+
 func ensureLearner(m *Manager, parent *Agent) (string, llm.Config) {
 	cfg := parent.EffectiveLLM(m)
 	if cfg.Provider == "" {
 		cfg = m.LLMConfig()
 	}
 	// 学习助手自身不再建学习助手：它没有可学的新对话，只会无意义地套娃。
-	if parent.isLearner() {
+	// 飞书协助同理：它只答一条消息就交还，给它配个「协助的学习」纯属占名额。
+	if parent.isLearner() || parent.isHelper() {
 		return "", cfg
 	}
 	var idleName string

@@ -820,3 +820,79 @@ func TestTwoMessagesReplyAtOnce(t *testing.T) {
 		t.Fatalf("patches=%v", patches)
 	}
 }
+
+func TestSlashHelpSkipsModel(t *testing.T) {
+	ran := false
+	var reply string
+	s := New(Hooks{
+		Run: func(context.Context, RunRequest) (string, error) {
+			ran = true
+			return "不该走到这", nil
+		},
+		Reply: func(_ context.Context, _, _, _, text string) (string, error) {
+			reply = text
+			return "om_help", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	s.dispatch(Turn{EventID: "e", ChatType: "p2p", MsgType: "text", Text: "/help", MessageID: "om"})
+	if ran || !strings.Contains(reply, "/stop") || !strings.Contains(reply, "/use") {
+		t.Fatalf("ran=%v reply=%s", ran, reply)
+	}
+}
+
+func TestSlashStopCancelsTheChatRun(t *testing.T) {
+	s := New(Hooks{
+		Reply: func(context.Context, string, string, string, string) (string, error) {
+			return "om_r", nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := s.reserve("a1", "om_job", "oc_1", cancel); err != nil {
+		t.Fatal(err)
+	}
+	s.dispatch(Turn{EventID: "e", ChatType: "p2p", ChatID: "oc_1", MsgType: "text", Text: "/stop", MessageID: "om_stop"})
+	if ctx.Err() == nil {
+		t.Fatal("stop did not cancel the run")
+	}
+}
+
+func TestApprovalCardDecidesFromFeishu(t *testing.T) {
+	var buttons []CardButton
+	var painted string
+	s := New(Hooks{
+		Actions: func(_ context.Context, _, _, _, text string, got []CardButton) (string, error) {
+			if !strings.Contains(text, "echo hi") || !strings.Contains(text, "bash") {
+				t.Fatalf("text=%s", text)
+			}
+			buttons = got
+			return "om_card", nil
+		},
+		Decide: func(id string, allow, remember bool) error {
+			if id != "ap-1" || !allow || remember {
+				t.Fatalf("id=%s allow=%v remember=%v", id, allow, remember)
+			}
+			return nil
+		},
+		Patch: func(_ context.Context, _, _, _, text, stopID string) error {
+			painted = text
+			if stopID != "" {
+				t.Fatalf("stop=%s", stopID)
+			}
+			return nil
+		},
+	})
+	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1"}
+	if _, err := s.reserve("a1", "om_user", "oc", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	s.Ask(Ask{ID: "ap-1", AgentID: "a1", Tool: "bash", Title: "运行命令", Detail: "echo hi"})
+	if len(buttons) != 3 || buttons[0].Act != "deny" || buttons[1].Act != "once" || buttons[2].Act != "keep" {
+		t.Fatalf("buttons=%+v", buttons)
+	}
+	s.dispatch(Turn{EventID: "act", MsgType: "card.action", Action: "once", ActionID: "ap-1"})
+	if painted != "已允许这一次" {
+		t.Fatalf("painted=%s", painted)
+	}
+}

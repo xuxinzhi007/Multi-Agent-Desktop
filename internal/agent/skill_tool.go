@@ -87,8 +87,8 @@ type saveSkillTool struct{ m *Manager }
 func (*saveSkillTool) Name() string { return "save_skill" }
 func (*saveSkillTool) Description() string {
 	return "把一套可复用的做事步骤存成技能，之后任何会话都能用。" +
-		 "和 save_note 的区别：note 存这个项目的事实与结论，skill 存跨项目复用的步骤。" +
-		 "只在你真的走通了一套流程、且下次还会用到时才写。参数 name、description（一句话说明什么时候用）、body（步骤正文）。"
+		"和 save_note 的区别：note 存这个项目的事实与结论，skill 存跨项目复用的步骤。" +
+		"只在你真的走通了一套流程、且下次还会用到时才写。参数 name、description（一句话说明什么时候用）、body（步骤正文）。"
 }
 func (*saveSkillTool) Writes() bool { return true }
 func (*saveSkillTool) Schema() json.RawMessage {

@@ -2666,3 +2666,84 @@
   color: var(--text-disabled);
   word-break: break-all;
 }
+
+/* ===== 权限档位 ===== */
+.c-perm {
+  position: relative;
+  flex-shrink: 0;
+}
+.c-perm__chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.c-perm__chip:hover {
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+.c-perm__chip--auto {
+  border-color: var(--success-border);
+  background: var(--success-dim);
+  color: var(--success);
+}
+.c-perm__chip--readonly {
+  border-color: var(--info-dim);
+  background: var(--info-dim);
+  color: var(--info);
+}
+.c-perm__menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: 232px;
+  padding: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+.c-perm__item {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+.c-perm__item:hover {
+  background: var(--bg-surface-hover);
+}
+.c-perm__item.is-on {
+  background: var(--accent-dim);
+}
+.c-perm__itemlabel {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.c-perm__tick {
+  color: var(--accent-bright);
+  font-size: var(--text-xs);
+}
+.c-perm__itemhint {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.c-perm__note {
+  margin-top: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-disabled);
+}

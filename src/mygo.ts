@@ -545,6 +545,10 @@ export const API = {
   agentMessages(id: string, limit: number): Promise<Message[]> {
     return call("API.AgentMessages", id, limit);
   },
+  /** AgentPermission 返回这个会话的权限模式：ask / auto / readonly。 */
+  agentPermission(agentID: string): Promise<string> {
+    return call("API.AgentPermission", agentID);
+  },
   /**
    * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，
    * 后续对话会把它作为上下文。返回更新后的会话视图。
@@ -825,6 +829,20 @@ export const API = {
   /** SetAgentLLM 设置某个会话自己的模型配置（会话级，不影响其他会话）。 */
   setAgentLLM(agentId: string, cfg: Config): Promise<AgentView> {
     return call("API.SetAgentLLM", agentId, cfg);
+  },
+  /**
+   * SetAgentPermission 改这个会话的权限模式。
+   *
+   * 	ask      每次写操作都问（默认）
+   * 	auto     工作目录内的写与命令自动执行
+   * 	readonly 只读，写操作直接拒绝
+   *
+   * 工作目录是工具层的硬边界，任何一档都放不开它；
+   * shellguard 对危险命令的拦截也不受模式影响。
+   * 模式是运行期状态，重启回到 ask——默认必须是最保守的那一档。
+   */
+  setAgentPermission(agentID: string, mode: string): Promise<string> {
+    return call("API.SetAgentPermission", agentID, mode);
   },
   /** SetAgentProfile 改给人看的名字和简介，立刻保存并显示。 */
   setAgentProfile(id: string, name: string, role: string): Promise<AgentView> {

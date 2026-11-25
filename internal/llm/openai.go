@@ -146,7 +146,10 @@ func ListModels(ctx context.Context, cfg Config) ([]string, error) {
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("%w", ErrMissingAPIKey)
 		}
-		models := qoderResolve(ctx, cfg)
+		models, err := qoderResolve(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
 		names := make([]string, len(models))
 		for i, m := range models {
 			names[i] = m.id
