@@ -296,7 +296,8 @@ sink.Emit(event)      // 盖 v/seq/session/at 后发出
 
 ### 8.4 一个进程一个会话
 
-`acp.Runtime.Start` 每次起一个新进程。理由：
+`acp.Runtime.Start` 每次起一个新进程。当前实现是**每轮一个进程**：一轮结束（含停止、失败）立即 `Close`，
+理由：
 
 - 崩溃隔离：一个 Agent 挂了不影响别的会话；
 - 登录态隔离：不同 Agent 的凭据不混；
@@ -307,11 +308,18 @@ sink.Emit(event)      // 盖 v/seq/session/at 后发出
 
 ---
 
-## 9. 接入 native loop
+## 9. native loop 已接入统一协议（2026-11-25）
 
-映射函数已经实现：`internal/agent/loop_runtime.go` 的 `runtimeEventFromLoop`。
+现状：
 
-它覆盖：
+- `internal/agent/loop_backend.go` 的 `prepareNativeLoop` 完成原有装配（模型/目录校验、工具注册表、系统提示、检查点、loop 配置），返回一个 `rt.ExecFunc`；
+- `executeNativeRuntime` 用 `rt.Native` 启动会话：`Prompt` 提交即返回，事件经 `EventSink` 出来，`consumeRuntimeEvents` 翻译回现有 UI 事件，`turn.finished` 收尾，`Close` 结束；
+- `executeLoop` 只保留为兼容入口，内部直接转到 `executeNativeRuntime`；`loopEmitter` 已移除，`runtimeEventFromLoop` 是唯一的 loop → 协议翻译层（`tool.finished` 额外带 `meta.loopToolStatus`，保留 `denied / truncated / timeout` 的区别）；
+- 落库消息、检查点、审计、频道回复、学习摘要仍沿用原语义；`stop`/`budget` 仍分别以 `agent.stopped` 与 `agent.error` 呈现。
+
+`Manager` 的选择顺序是 `EffectiveRuntime()`：`Runtime == "acp"` 覆盖 backend；其余按 backend 走 `executeMock / executeSupervisor / executeDoubao`。字段、API 与错误语义见 `docs/runtime-api-contract.md`。
+
+下面是接入初期的形态，保留作为新增 Runtime 的参考。它覆盖：
 
 | loop event | 协议事件 |
 |---|---|
@@ -325,7 +333,6 @@ sink.Emit(event)      // 盖 v/seq/session/at 后发出
 | `failed` | `turn.finished(error)` + `error` |
 
 切换到统一协议的最小改法（不改 loop 本体）：
-
 ```go
 exec := func(ctx context.Context, spec rt.Spec, turn rt.Turn, emit func(rt.Event) error) (rt.Stop, error) {
     r := &loop.Runner{ /* 与现在 executeLoop 相同的装配 */ }
@@ -343,15 +350,20 @@ n := &rt.Native{Exec: exec, Approver: autoApprover}
 sess, _ := n.Start(ctx, spec)
 ```
 
-接上之后，`agent.Manager` 只需要按 `Backend` 选择 `Native` 或 `acp.Runtime`，
-`loopEmitter` 不再直接发前端事件，而是先走 `EventSink`。
-
-**本轮没有动现有执行路径**：协议层与 ACP 客户端已可用，native 仍是原路径，
-这样不会影响正在用的功能。切换是下一步的独立改动，可按上面代码渐进完成。
+当前实现已按同一思路落地（见本节开头的现状）。新增 Runtime 时沿用同一套：
+`Exec` 只负责装配与事件翻译，生命周期（Prompt / Cancel / Close / Seq）交给 `rt.Native`。
 
 ---
 
 ## 10. 接入 ACP Agent
+
+桌面端不在代码里写死命令：会话的 `ACPConfig`（name / command / args / env / trace）
+经 `SetAgentRuntime` 落盘到 `agents.json`，`executeACP` 每轮构造下面的 `acp.Runtime`。
+`command` 为空时直接给中文错误，不启动进程。审批桥在 `runtime_backend.go` 的
+`handleRuntimePermission`：允许取 `allow_once → allow_always → allow_*`，拒绝取
+`reject_once → reject_always → reject_*`；没有可用选项、超时、用户停止、会话关闭
+一律回 `""`（对端按 cancelled 处理），不会自动放行。原始帧 trace 写到
+`<数据目录>/acp/<agentId>.jsonl`。
 
 ```go
 r := &acp.Runtime{
@@ -419,7 +431,7 @@ go run ./cmd/acp-probe -cmd codex-acp -cwd . -allow -trace /tmp/acp.jsonl
 ## 13. 验证
 
 ```bash
-go test ./internal/runtime/... ./internal/agent/ -count=1
+go test ./internal/runtime/... ./internal/tool/... ./internal/agent/... -count=1
 go build ./...
 go run ./cmd/acp-probe -h
 ```
@@ -429,7 +441,10 @@ go run ./cmd/acp-probe -h
 - `internal/runtime`：事件校验、未知 kind 降级、native 流式/忙/取消/审批/关闭
 - `internal/runtime/acp`：握手、流式文本与工具、计划、用量、审批往返、取消、
   未知 update 容错、版本不匹配、`fs` 读写
-- `internal/agent`：loop 事件映射
+- `internal/agent`：loop 事件映射；native 经协议跑通一轮并回到 idle；ACP 未配置命令报中文错误；
+  ACP 事件映射与收尾；只读/超时按拒绝回传；老 `agents.json` 默认 native
+- `internal/tool/builtin`：grep 输出与 include/exclude、glob `**` 稳定排序、
+  apply_patch 多文件增/改/删与陈旧/歧义锚点整体拒绝
 
 `go test -race` 在 Windows 需要 `CGO_ENABLED=1` 和 C 编译器；CI 的 macOS/Linux
 环境会跑，Windows 本地可先只跑普通测试。

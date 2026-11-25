@@ -442,6 +442,16 @@
   font-weight: 600;
   border: 1px solid transparent;
 }
+.c-fleet-pill--muted {
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+}
+.c-fleet-pill--accent {
+  color: var(--accent-bright);
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+}
 .c-fleet-pill--danger {
   color: var(--danger);
   background: var(--danger-dim);

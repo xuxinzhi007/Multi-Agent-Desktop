@@ -20,6 +20,7 @@
 - Queue + Worker 串行执行，队列长度 32，满了会返回错误。这一轮还在跑时，接着发来的本会话消息会在下一步模型调用前插进去；频道消息留到这一轮结束。停止会取消当前执行并清空队列
 - token 级流式渲染，运行中可中断。进程内循环里，文字和推理按增量推到界面；工具调用等这一轮流结束、参数拼成完整 JSON 后再执行
 - **进程内 agent loop** 是默认执行路径。空 backend，以及读进来的旧 `claude` / `codex`，都按 loop 跑。`mock` 仍是本地假回复。一轮有迭代、工具次数和墙钟上限，检查点在用户数据目录的 `loop/runs`，同一会话可以接着上次没跑完的预算
+- **会话执行体可选 native / 外部 ACP**：每个会话可以选 `native`（默认，进程内 loop）或外部 ACP Agent（grok / codex-acp / dsh 等）。ACP 的命令、参数、环境变量与展示名可配置并落盘；未填命令时给中文可读错误，不会崩。两条路径共用 `internal/runtime` 的 `Session` 与事件协议：native 每一轮都经 `rt.Native` 的 Prompt → Events → `turn.finished` → Close，ACP 的正式文本、思考、工具开始/结束映射回现有流式 UI，审批走同一张卡片。ACP 每轮起一个子进程，停止或删除会话会取消并杀掉进程组，轮末状态回到 `idle`
 - 模型 provider：Mock / 本地 llama.cpp / Ollama / OpenAI 兼容 / DeepSeek / Claude（走 OpenAI 兼容网关）/ Qoder / 豆包（方舟 API）/ 豆包 CLI。Qoder 不是兼容接口，走它自己的对话协议；可以浏览器授权，也可以填 `pt-` 开头的 Personal Access Token 或访问令牌。豆包 CLI 直接复用本机已登录的 `doubao` 命令，不填 Key
 - **会话级配置**：每个 agent 可独立设置模型、推理强度与工作目录，未设置则回落全局。输入栏里的模型列表用已经保存的连接，不在这里重填 API Key
 - **Agent 间协作**：`Route` 可以把一条消息派给另一个会话。loop 里模型还能调用 `list_agents`、`ask_agent`、`create_agent`、`delete_agent`。`create_agent` 记下 `ParentID`，侧栏把子会话嵌在父会话下面。模型或用户都能显式建这层关系；批量拆任务走下面的 Supervisor
@@ -29,8 +30,8 @@
 - **群聊频道**：共享 transcript、@提及、三种回合策略（discuss / direct / roundrobin）。discuss 里没人被 @ 时，只由当前接话人回复；接话人可以改，从下一条生效
 - **知识库**：手写笔记（约定、术语、偏好），标签筛选 + 全文检索。列表按「被谁引用」排序，能挂到会话或摘下来。挂上的笔记在下一轮 loop 里进提示词；新建会话时不会把全局笔记塞进首条 system。一轮结束时，模型可能再写一条值得留下的笔记
 - **学习摘要**：历史超过最近 8 条之后，用一次单独的模型调用把更早的对话收成摘要，不挡住用户正在看的回复。有空闲子会话时用它的名字和模型；还没有子会话、子会话数没到 6 时，先建一个「…的学习」（飞书协助和学习助手自身不再建）。已经有子会话但都不空闲，或人数满了，就用本会话自己的模型。摘要写在下一轮上下文开头，里面的路径必须能在原文里对上
-- **文件与 shell**：`read_file` / `write_file` / `edit_file` 限制在该会话的**主目录 + 附加目录**内。`bash` 把整段 stdout/stderr 交回来，默认 60 秒，到点杀整个进程组，输出有上限。界面上另有一条手动执行命令的路径，同样是跑完再显示，没有自己的超时
-- **写操作审批与审计**：`write_file` / `edit_file` / `bash` 执行前弹卡片，带标题、命令或结构化 diff；可选择拒绝、允许一次、本会话允许（按会话 + 工具记忆）。等待 5 分钟超时，停止即取消。每次副作用调用追加到 `<数据目录>/audit.jsonl`，记会话、命令或文件、状态、退出码、耗时。危险命令（根目录递归删除、格式化、写块设备、关机重启、fork bomb）在执行前拦截
+- **文件与 shell**：`read_file` / `write_file` / `edit_file` / `apply_patch` 限制在该会话的**主目录 + 附加目录**内。`grep` 输出 `路径:行号: 文本`，支持 include/exclude 与正则开关；`glob` 支持 `**` 跨层匹配；两者只读、纯 Go、跨平台，不依赖 `rg`。`apply_patch` 一次新增/更新/删除多个文件，更新必须带上下文锚点且唯一匹配，锚点陈旧或歧义时整批拒绝、一个字节都不写。`bash` 把整段 stdout/stderr 交回来，默认 60 秒，到点杀整个进程组，输出有上限。界面上另有一条手动执行命令的路径，同样是跑完再显示，没有自己的超时
+- **写操作审批与审计**：`write_file` / `edit_file` / `apply_patch` / `bash` 执行前弹卡片，带标题、命令或结构化 diff；可选择拒绝、允许一次、本会话允许（按会话 + 工具记忆）。外部 ACP Agent 的 `session/request_permission` 也进同一张卡：允许回传 `allow_*` 选项，拒绝回传 `reject_*`，超时、停止或关闭一律按拒绝（cancelled）回传，不会自动放行。等待 5 分钟超时，停止即取消。每次副作用调用追加到 `<数据目录>/audit.jsonl`，记会话、命令或文件、状态、退出码、耗时。危险命令（根目录递归删除、格式化、写块设备、关机重启、fork bomb）在执行前拦截
 - **内置浏览器**：单独的 WebView，登录留在名为 workbench 的会话里，不进用户的 Chrome。模型用 `web` 工具按控件编号或页面上的文字操作，一次最多 12 步，只把最后一页交回。上次打开的地址记在 `browser-page.json`
 - **飞书多机器人**：每个机器人一条长连接，会话记录共用 `feishu-rooms.json`。群可以设成只在被 @ 或被回复时回答。设置里能核对发消息、表情、历史、单聊、群消息和群列表这些权限，并打开开通页。主会话忙时，会认领它名下空闲的助手；没有空闲助手就新建，最多 3 个，沿用主会话的模型和工作目录。飞书房间视图只看记录，从下一条起可以改由另一个本机会话回答
 - **三档权限模式**：输入栏底栏切换 `逐次审批 / 自动 / 只读`。自动＝工作目录内的写与命令直接执行；只读＝写操作直接拒，适合生产环境排查。**刻意不做「完整权限」**：工作目录是工具层的硬边界，审批模式不该能放开它；危险命令的拦截不受档位影响。切档位时还挂着的卡立刻有结果，不会继续等到超时
@@ -134,8 +135,11 @@ Go 侧 `mygo.Bind(api)` 暴露方法，`mygo.NewEvent[T](name)` 声明事件，
 每个 agent 一个 goroutine 消费自己的队列：
 
 ```
-Prompt → queue(chan, 32) → workerLoop → executeLoop | executeMock → idle/queued
+Prompt → queue(chan, 32) → workerLoop → executeNativeRuntime(native) | executeACP | executeMock → idle/queued
 ```
+
+- native 的每一轮都经 `rt.Native`：`Prompt` 提交即返回，事件走 `EventSink`，`turn.finished` 收尾，`Close` 结束；loop 只是它的执行体，不再直接向界面发事件
+- 选了 ACP 的会话每轮起一个子进程，`session/cancel` + 杀进程组回收；`runtimeState`（starting / running / idle / error）只存在进程内，重启回到未启动
 
 - 队列满时 `Prompt` 返回错误，不静默丢弃
 - `StopAgent` 取消当前执行并清空队列
@@ -157,6 +161,7 @@ Prompt → queue(chan, 32) → workerLoop → executeLoop | executeMock → idle
 | `browser-page.json` | 内置浏览器上次的地址和页面状态 | 关窗或重开时读回 |
 | `images/` | 对话和飞书里的图片字节 | 按 id 存文件 |
 | `loop/runs/` | 进程内循环的检查点 | 按运行 id 读写 |
+| `acp/<agentId>.jsonl` | 外部 ACP Agent 的原始收发帧（会话开了 trace 才写） | 追加写，含仓库内容与命令，只留本地 |
 | 窗口位置尺寸 | 主窗口 | MyGo 管理 |
 
 ---
@@ -234,7 +239,7 @@ multi-agent-desktop/
 │   ├── agent/              ← 会话、Queue/Worker、父子、学习摘要、loop 接线
 │   ├── loop/               ← 进程内循环、预算、检查点
 │   ├── runtime/            ← 统一事件协议；native 适配器；acp/ 外部接入
-│   ├── tool/               ← 工具协议；builtin/ 文件与 bash，web/ 内置浏览器
+│   ├── tool/               ← 工具协议；builtin/ 文件、bash、grep/glob/apply_patch，web/ 内置浏览器
 │   ├── channel/            ← 频道、回合判定、transcript、领域板
 │   ├── knowledge/          ← 知识库存储与注入
 │   ├── llm/                ← mock / llama.cpp / ollama / 兼容网关 / Qoder
@@ -255,6 +260,7 @@ multi-agent-desktop/
 ├── docs/
 │   ├── design.md           ← 架构、并发模型、交互设计
 │   ├── runtime-protocol.md ← 内部运行时协议与 ACP 接入
+│   ├── runtime-api-contract.md ← native/ACP 的字段、API、事件与错误契约
 │   └── reviews/            ← 架构评审历史存档（不是当前行为）
 └── specs/                  ← 特性决策记录
 ```
@@ -271,6 +277,9 @@ multi-agent-desktop/
 - **审计只落文件**，界面还没有只读的审计页。日志在用户数据目录的 `audit.jsonl`
 - **worktree 只在 git 仓库里生效**。不是仓库的文件夹开不了隔离，Supervisor 会自动退回共用目录，并在汇总里写明
 - **豆包 CLI 一次只能跑一件任务**。同一个账号已经有任务在跑时（比如正在用豆包办公本身），新的 `doubao -p` 会排队或等不到结果；停止按钮会杀掉整组进程。装 CLI 用 `npm i -g @bytedance/doubao-cli`，找不到原生命令时可用 `MAD_DOUBAO_BIN` 指定路径
+- **ACP 只传文本**。本轮不会把图片/附件随 prompt 发给外部 Agent；ACP 的 plan / usage 事件不展示，上下文用量仍按消息粗估
+- **ACP 每轮一个进程**。换轮要重新握手，首字延迟比 native 高；空闲时不保留后台进程，也因此不存在「进程还活着但界面不知道」的悬挂状态
+- **ACP 运行状态不落盘**。`runtimeState` / `runtimeError` 只在进程内，重启后显示未启动；失败原因随 `agent.error` 留在对话里
 - **API Key 与飞书 Secret 明文落盘**（`config.json` 权限 600，会话级 Key 在 `agents.json`）—— 计划迁移到系统钥匙串
 - **会话历史是整份 JSON**，不是数据库。界面只拿当前会话的最近一页
 
@@ -278,7 +287,7 @@ multi-agent-desktop/
 
 ## 开发约定
 
-- 改 Go 结构体后跑 `npx mygo generate` 重新生成 `src/mygo.ts`
+- 改 Go 结构体后跑 `npx mygo generate` 重新生成 `src/mygo.ts`（需要 Bun 或 Node.js ≥ 22.6；Node 20 会直接报错）
 - `src/mygo.ts` 是生成文件，**不要手改**
 - 跨 goroutine 的返回值必须是副本（`channel` 包的 `clone()`），不要泄漏内部指针
 - 新增事件必须同时有前端订阅，否则 `TestEveryBackendEventIsSubscribed` 会失败

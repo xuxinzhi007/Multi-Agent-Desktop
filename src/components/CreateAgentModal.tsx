@@ -3,14 +3,24 @@ import { ROLE_PRESETS } from '../lib/presets'
 import { AGENT_COLORS } from '../lib/presets'
 import Modal from './Modal'
 import DirectoryPicker from './DirectoryPicker'
+import type { AcpForm, RuntimeKind } from '../lib/runtime'
+import { runtimeBadge, splitLines } from '../lib/runtime'
 
 type Props = {
   open: boolean
   onClose: () => void
-  onCreate: (name: string, role: string, backend: string, workDir?: string) => void
+  onCreate: (
+    name: string,
+    role: string,
+    backend: string,
+    workDir?: string,
+    runtime?: RuntimeKind,
+    acp?: AcpForm,
+  ) => void
   /** 已有 agent 数量，用来预填一个合理的默认名，避免用户卡在起名 */
   existingCount?: number
 }
+
 
 const FIELD_STYLE = {
   width: '100%',
@@ -50,6 +60,12 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
   const [workDir, setWorkDir] = useState('')
   const [nameTouched, setNameTouched] = useState(false)
   const [colorIdx, setColorIdx] = useState(0)
+  // 运行时二选一：native 进程内 loop / acp 外部 Agent（契约 §1）
+  const [runtime, setRuntime] = useState<RuntimeKind>('native')
+  const [acpName, setAcpName] = useState('')
+  const [command, setCommand] = useState('')
+  const [argsText, setArgsText] = useState('')
+  const [envText, setEnvText] = useState('')
 
   useEffect(() => {
     if (open) {
@@ -59,6 +75,11 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
       setWorkDir('')
       setNameTouched(false)
       setColorIdx(existingCount % AGENT_COLORS.length)
+      setRuntime('native')
+      setAcpName('')
+      setCommand('')
+      setArgsText('')
+      setEnvText('')
     }
   }, [open, existingCount])
 
@@ -75,11 +96,22 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
 
   // 文件夹可以后补：先让人和 agent 说上话，比卡在选目录更重要。
   // 没选目录时文件与命令工具会明确报错，会话本身仍然能用。
-  const canSubmit = name.trim().length > 0
+  // 选了 ACP 则启动命令必填（契约 §4.2：空命令后端也会拒）。
+  const acpCommandMissing = runtime === 'acp' && command.trim().length === 0
+  const canSubmit = name.trim().length > 0 && !acpCommandMissing
 
   const submit = () => {
     if (!canSubmit) return
-    onCreate(name.trim(), role, 'loop', workDir.trim())
+    const acp: AcpForm | undefined =
+      runtime === 'acp'
+        ? {
+            name: acpName.trim(),
+            command: command.trim(),
+            args: splitLines(argsText),
+            env: splitLines(envText),
+          }
+        : undefined
+    onCreate(name.trim(), role, 'loop', workDir.trim(), runtime, acp)
     onClose()
   }
 
@@ -108,6 +140,115 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
       <div style={{ display: 'flex', gap: 16, padding: 18 }}>
         {/* 左：可配置项 */}
         <div style={{ flex: 1, minWidth: 0, display: 'grid', gap: 14 }}>
+          <div>
+            <label style={LABEL_STYLE}>运行时</label>
+            <div
+              style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}
+              role="group"
+              aria-label="运行时"
+            >
+              <button
+                type="button"
+                onClick={() => setRuntime('native')}
+                aria-pressed={runtime === 'native'}
+                className={`c-role-card ${runtime === 'native' ? 'c-role-card--active' : ''}`}
+              >
+                <span className="c-role-card__icon" aria-hidden>
+                  🖥
+                </span>
+                <span style={{ minWidth: 0, flex: 1, textAlign: 'left' }}>
+                  <span style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 600 }}>原生</span>
+                  <span
+                    style={{
+                      display: 'block',
+                      fontSize: 'var(--text-xs)',
+                      color: 'var(--text-tertiary)',
+                      marginTop: 1,
+                    }}
+                  >
+                    进程内 loop
+                  </span>
+                </span>
+                {runtime === 'native' && <span style={{ color: 'var(--accent-bright)' }}>✓</span>}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRuntime('acp')}
+                aria-pressed={runtime === 'acp'}
+                className={`c-role-card ${runtime === 'acp' ? 'c-role-card--active' : ''}`}
+              >
+                <span className="c-role-card__icon" aria-hidden>
+                  🔌
+                </span>
+                <span style={{ minWidth: 0, flex: 1, textAlign: 'left' }}>
+                  <span style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 600 }}>外部 ACP</span>
+                  <span
+                    style={{
+                      display: 'block',
+                      fontSize: 'var(--text-xs)',
+                      color: 'var(--text-tertiary)',
+                      marginTop: 1,
+                    }}
+                  >
+                    拉起外部 Agent 子进程
+                  </span>
+                </span>
+                {runtime === 'acp' && <span style={{ color: 'var(--accent-bright)' }}>✓</span>}
+              </button>
+            </div>
+          </div>
+
+          {runtime === 'acp' && (
+            <div style={{ display: 'grid', gap: 10 }}>
+              <div>
+                <label style={LABEL_STYLE}>展示名（可选）</label>
+                <input
+                  value={acpName}
+                  onChange={(e) => setAcpName(e.target.value)}
+                  placeholder="例如：grok；留空用命令名"
+                  style={FIELD_STYLE}
+                />
+              </div>
+              <div>
+                <label style={LABEL_STYLE}>启动命令（必填）</label>
+                <input
+                  value={command}
+                  onChange={(e) => setCommand(e.target.value)}
+                  placeholder="例如：grok / codex-acp"
+                  aria-invalid={acpCommandMissing}
+                  style={{ ...FIELD_STYLE, borderColor: acpCommandMissing ? 'var(--danger)' : undefined }}
+                />
+                {acpCommandMissing && (
+                  <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 4 }}>
+                    选了外部 ACP Agent，必须填写启动命令
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={LABEL_STYLE}>参数（每行一个）</label>
+                  <textarea
+                    rows={3}
+                    value={argsText}
+                    onChange={(e) => setArgsText(e.target.value)}
+                    placeholder={'acp\n--xxx'}
+                    style={{ ...FIELD_STYLE, resize: 'vertical', lineHeight: 1.6 }}
+                  />
+                </div>
+                <div>
+                  <label style={LABEL_STYLE}>环境变量（每行一个）</label>
+                  <textarea
+                    rows={3}
+                    value={envText}
+                    onChange={(e) => setEnvText(e.target.value)}
+                    placeholder={'KEY=VALUE'}
+                    style={{ ...FIELD_STYLE, resize: 'vertical', lineHeight: 1.6 }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
           <div>
             <label style={LABEL_STYLE}>选一个角色</label>
             <div
@@ -213,6 +354,15 @@ export default function CreateAgentModal({ open, onClose, onCreate, existingCoun
             </div>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: 2 }}>
               {activePreset.name}
+            </div>
+            <div
+              style={{
+                marginTop: 6,
+                fontSize: 'var(--text-xs)',
+                color: acpCommandMissing ? 'var(--danger)' : 'var(--text-secondary)',
+              }}
+            >
+              {runtimeBadge({ runtime, acp: { name: acpName, command } }).label}
             </div>
             <div
               style={{

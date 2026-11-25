@@ -22,6 +22,8 @@ import { API } from './mygo'
 import { useTheme } from './lib/useTheme'
 import type { LLMConfig } from './lib/useBackend'
 import type { MainView } from './lib/nav'
+import type { AcpForm, RuntimeKind } from './lib/runtime'
+import { toastError } from './components/Toast'
 
 type ActiveRef = { kind: 'agent' | 'channel' | 'feishu'; id: string } | null
 
@@ -91,7 +93,14 @@ export default function App() {
   const streaming = activeAgent ? s.streaming[activeAgent.id] ?? '' : ''
   const err = activeAgent ? s.errors[activeAgent.id] : undefined
 
-  const createAgent = async (name: string, role: string, backend: string, workDir?: string) => {
+  const createAgent = async (
+    name: string,
+    role: string,
+    backend: string,
+    workDir?: string,
+    runtime: RuntimeKind = 'native',
+    acp?: AcpForm,
+  ) => {
     const created = await s.send<Agent | null>(
       backend === 'mock' ? 'agent.create' : 'agent.createCLI',
       backend === 'mock' ? { name, role } : { name, role, backend },
@@ -99,6 +108,20 @@ export default function App() {
     // 两阶段：先创建，再写入会话级工作目录（避免改 CreateAgentRequest 形状）
     if (created && workDir) {
       await s.send('agent.workDir', { id: created.id, dir: workDir })
+    }
+    // 运行时同样两阶段：CreateAgentRequest 不带 runtime，创建后用 setAgentRuntime 落盘 ACP 配置。
+    // 失败时会话仍是 native 兜底，错误原文走 toast，不假装已切到 ACP。
+    if (created && runtime === 'acp' && acp?.command) {
+      API.setAgentRuntime({
+        agentId: created.id,
+        runtime: 'acp',
+        name: acp.name,
+        command: acp.command,
+        args: acp.args,
+        env: acp.env,
+      }).catch((e: unknown) => {
+        toastError(`保存运行时配置失败：${e instanceof Error ? e.message : String(e)}`)
+      })
     }
     // 评审/审查/规划类角色默认只读，降低多 Agent 并发写文件冲突
     if (created && /review|审查|评审|规划|planner/i.test(`${created.name} ${created.role}`)) {

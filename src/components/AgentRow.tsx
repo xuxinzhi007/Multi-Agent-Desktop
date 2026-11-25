@@ -10,6 +10,8 @@
  */
 
 import { bodyOf } from '../lib/message'
+import type { ACPConfig } from '../mygo'
+import RuntimeBadge from './RuntimeBadge'
 
 export type AgentRowData = {
   id: string
@@ -27,6 +29,11 @@ export type AgentRowData = {
   chars?: number
   /** 最近一次工具调用 */
   lastTool?: string
+  /** 运行时：native / acp（契约 §1） */
+  runtime?: string
+  acp?: ACPConfig
+  runtimeState?: string
+  runtimeError?: string
 }
 
 const GLYPH: Record<string, string> = {
@@ -148,6 +155,7 @@ export default function AgentRow({
           >
             {agent.name}
           </span>
+          <RuntimeBadge agent={agent} />
         </div>
         <div
           style={{

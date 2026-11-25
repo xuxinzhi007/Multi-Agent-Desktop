@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { AgentView as Agent } from '../mygo'
 import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
+import RuntimeBadge from './RuntimeBadge'
 
 /**
  * FleetView —— 多 agent 并排监控台。
@@ -224,6 +225,7 @@ function FleetColumn({
           >
             {agent.name}
           </span>
+          <RuntimeBadge agent={agent} />
           <span
             className={`c-fleet-status ${active ? 'c-fleet-status--live' : ''}`}
             style={{ color: status.color, marginLeft: 'auto' }}

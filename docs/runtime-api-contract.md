@@ -114,7 +114,7 @@ await API.setAgentRuntime({
 
 | 情况 | 行为 |
 |---|---|
-| `runtime` 不是 `native`/`acp`（空串按 `native` 归一） | 返回错误：`运行时只能是 native 或 acp` |
+| `runtime` 不是 `native`/`acp`（API 要求显式二选一，空串也报错） | 返回错误：`运行时只能是 native 或 acp` |
 | `runtime == "acp"` 且 `command` 去空白为空 | 返回错误：`这个会话选了外部 ACP Agent，但还没填写启动命令` |
 | 会话 id 不存在 | 返回错误：`agent <id> not found` |
 | 成功 | 返回最新 `AgentView`，并发 `agent.config`（`catalogView`，不含消息） |

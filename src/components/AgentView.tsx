@@ -8,7 +8,8 @@ import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import MentionText, { type MentionTarget } from './MentionText'
 import remarkGfm from 'remark-gfm'
-import { API, type AgentView as Agent, type Channel, type Config, type Message } from '../mygo'
+import { API, type AgentRuntimeRequest, type AgentView as Agent, type Channel, type Config, type Message } from '../mygo'
+import { runtimeBadge, runtimeStateOf, splitLines, type RuntimeKind } from '../lib/runtime'
 import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
 import type { SessionError, ShellLog } from '../lib/useBackend'
 import { parseMessage } from '../lib/message'
@@ -953,6 +954,9 @@ export default function AgentView(p: Props) {
                 }}
               />
               <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
+                <RuntimeChip agent={p.agent} />
+              </div>
+              <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
                 <WorkDirChip agent={p.agent} onConfig={p.onConfig} />
               </div>
             </div>
@@ -1237,6 +1241,248 @@ function WorkDirChip({
   )
 }
 
+/**
+ * RuntimeChip —— 本会话运行时（native / 外部 ACP），范式与 WorkDirChip 一致：
+ * chip 按钮 + 绝对定位弹层 + Escape/点遮罩关闭 + 后端错误原文展示。
+ *
+ * 回填读 agent.acp；保存走 API.setAgentRuntime；成功后以 agent.config 事件
+ * 刷新为准，这里不乐观地改本地状态。
+ */
+function RuntimeChip({ agent }: { agent: Agent }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [draftRuntime, setDraftRuntime] = useState<RuntimeKind>(agent.runtime === 'acp' ? 'acp' : 'native')
+  const [draftName, setDraftName] = useState(agent.acp?.name ?? '')
+  const [draftCommand, setDraftCommand] = useState(agent.acp?.command ?? '')
+  const [argsText, setArgsText] = useState((agent.acp?.args ?? []).join('\n'))
+  const [envText, setEnvText] = useState((agent.acp?.env ?? []).join('\n'))
+
+  // 切换会话时收起，并按当前 agent 的配置回填
+  useEffect(() => {
+    setOpen(false)
+    setBusy(false)
+    setErr('')
+    setDraftRuntime(agent.runtime === 'acp' ? 'acp' : 'native')
+    setDraftName(agent.acp?.name ?? '')
+    setDraftCommand(agent.acp?.command ?? '')
+    setArgsText((agent.acp?.args ?? []).join('\n'))
+    setEnvText((agent.acp?.env ?? []).join('\n'))
+  }, [agent.id, agent.runtime, agent.acp])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const badge = runtimeBadge(agent)
+  const state = runtimeStateOf(agent.runtimeState, agent.runtimeError)
+  const commandMissing = draftRuntime === 'acp' && draftCommand.trim() === ''
+
+  const save = async () => {
+    if (commandMissing || busy) return
+    setBusy(true)
+    setErr('')
+    try {
+      const req: AgentRuntimeRequest = { agentId: agent.id, runtime: draftRuntime }
+      if (draftRuntime === 'acp') {
+        req.name = draftName.trim()
+        req.command = draftCommand.trim()
+        req.args = splitLines(argsText)
+        req.env = splitLines(envText)
+      }
+      await API.setAgentRuntime(req)
+      setOpen(false)
+    } catch (e) {
+      setErr(e instanceof Error && e.message ? e.message : '保存失败，稍后再试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const chipIcon = agent.runtime === 'acp' ? '🔌' : '🖥'
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        className="mono"
+        onClick={() => setOpen((v) => !v)}
+        title={`${badge.label}${state.label ? ` · ${state.label}` : ''}${
+          agent.runtimeError ? `\n${agent.runtimeError}` : ''
+        }（点击修改，仅影响本会话）`}
+        style={chipStyle(open)}
+      >
+        {chipIcon} {badge.label}
+        <span style={{ opacity: 0.5, marginLeft: 3 }}>▾</span>
+      </button>
+
+      {open && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 900 }} onClick={() => setOpen(false)} />
+          <div
+            className="fade-up"
+            style={{
+              position: 'absolute',
+              bottom: 'calc(100% + 6px)',
+              right: 0,
+              width: 320,
+              zIndex: 901,
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: 'var(--shadow-lg)',
+              padding: 12,
+            }}
+          >
+            <div style={popoverLabel}>这个会话的运行时</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <RuntimeSeg active={draftRuntime === 'native'} onClick={() => setDraftRuntime('native')}>
+                🖥 原生
+              </RuntimeSeg>
+              <RuntimeSeg active={draftRuntime === 'acp'} onClick={() => setDraftRuntime('acp')}>
+                🔌 外部 ACP
+              </RuntimeSeg>
+            </div>
+
+            {draftRuntime === 'acp' && (
+              <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+                <div>
+                  <label style={LABEL_INLINE}>展示名（可选）</label>
+                  <input
+                    value={draftName}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    placeholder="例如：grok；留空用命令名"
+                    style={RUNTIME_FIELD}
+                  />
+                </div>
+                <div>
+                  <label style={LABEL_INLINE}>启动命令（必填）</label>
+                  <input
+                    value={draftCommand}
+                    onChange={(e) => setDraftCommand(e.target.value)}
+                    placeholder="例如：grok / codex-acp"
+                    aria-invalid={commandMissing}
+                    style={{ ...RUNTIME_FIELD, borderColor: commandMissing ? 'var(--danger)' : undefined }}
+                  />
+                  {commandMissing && (
+                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 4 }}>
+                      选了外部 ACP Agent，必须填写启动命令
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <label style={LABEL_INLINE}>参数（每行一个）</label>
+                    <textarea
+                      rows={3}
+                      value={argsText}
+                      onChange={(e) => setArgsText(e.target.value)}
+                      placeholder={'acp\n--xxx'}
+                      style={{ ...RUNTIME_FIELD, resize: 'vertical', lineHeight: 1.6 }}
+                    />
+                  </div>
+                  <div>
+                    <label style={LABEL_INLINE}>环境变量（每行一个）</label>
+                    <textarea
+                      rows={3}
+                      value={envText}
+                      onChange={(e) => setEnvText(e.target.value)}
+                      placeholder={'KEY=VALUE'}
+                      style={{ ...RUNTIME_FIELD, resize: 'vertical', lineHeight: 1.6 }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {state.tone !== 'none' && (
+              <div style={{ marginTop: 8, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+                状态：{state.label}
+              </div>
+            )}
+            {err && (
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', marginTop: 6, wordBreak: 'break-all' }}>
+                {err}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+              <button
+                className="c-btn c-btn--ghost c-btn--sm"
+                style={{ flex: 1 }}
+                disabled={busy}
+                onClick={() => setOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="c-btn c-btn--primary c-btn--sm"
+                style={{ flex: 1 }}
+                disabled={busy || commandMissing}
+                onClick={() => void save()}
+              >
+                {busy ? '保存中…' : '应用'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function RuntimeSeg({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      style={{
+        flex: 1,
+        padding: '6px 8px',
+        borderRadius: 'var(--radius-sm)',
+        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+        background: active ? 'var(--accent-dim)' : 'var(--bg-surface)',
+        color: active ? 'var(--accent-bright)' : 'var(--text-tertiary)',
+        fontSize: 'var(--text-xs)',
+        fontFamily: 'inherit',
+        cursor: 'pointer',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+const RUNTIME_FIELD: CSSProperties = {
+  width: '100%',
+  padding: '7px 10px',
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--border-default)',
+  background: 'var(--bg-surface)',
+  color: 'var(--text-primary)',
+  fontSize: 'var(--text-sm)',
+  fontFamily: 'inherit',
+}
+
+const LABEL_INLINE: CSSProperties = {
+  display: 'block',
+  fontSize: 'var(--text-xs)',
+  color: 'var(--text-secondary)',
+  marginBottom: 6,
+}
 
 /**
  * ExtraDirs —— 附加目录：文件工具能读写它们，命令仍在主目录跑。

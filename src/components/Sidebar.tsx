@@ -5,6 +5,7 @@ import { previewMode } from '../lib/preview-runtime'
 import type { MainView } from '../lib/nav'
 import CreateAgentModal from './CreateAgentModal'
 import SupervisorModal from './SupervisorModal'
+import RuntimeBadge from './RuntimeBadge'
 
 type Props = {
   agents: Agent[]
@@ -202,6 +203,7 @@ function AgentLine({
               ⎇
             </span>
           )}
+          <RuntimeBadge agent={a} />
           <span
             className={`c-dot c-dot--${a.status} ${a.status === 'running' || a.status === 'queued' || a.status === 'blocked' ? 'blink' : ''}`}
             style={{ width: 5, height: 5 }}

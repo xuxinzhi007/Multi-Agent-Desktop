@@ -3,6 +3,7 @@ import Modal from './Modal'
 import PermissionPicker from './PermissionPicker'
 import { API, type AgentView as Agent, type Channel } from '../mygo'
 import { bodyOf } from '../lib/message'
+import RuntimeBadge from './RuntimeBadge'
 
 const STATUS_TEXT: Record<string, { label: string; color: string }> = {
   idle: { label: '空闲', color: 'var(--text-tertiary)' },
@@ -115,6 +116,10 @@ export default function ProfileCard({
         </div>
 
         {row('模型', agent.llm?.model || agent.backend || '默认')}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 'var(--text-sm)', lineHeight: 1.8 }}>
+          <span style={{ width: 64, flexShrink: 0, color: 'var(--text-tertiary)' }}>运行时</span>
+          <RuntimeBadge agent={agent} />
+        </div>
         {agent.workDir ? row('工作目录', agent.workDir) : null}
         {agent.createdAt ? row('入职时间', new Date(agent.createdAt * 1000).toLocaleString('zh-CN')) : null}
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 'var(--text-sm)', lineHeight: 1.8 }}>

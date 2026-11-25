@@ -2,6 +2,8 @@
 
 > 收工时间：本次会话结束。配套交接单：`docs/reviews/backend-delivery-handoff.md`
 > **本次没有重启任何服务**，线上进程未受影响。所有验证走 `go test` / e2e（浏览器 mock）。
+>
+> **2026-11-25 更新（主 Agent）**：§11 第 1 项已拍板并落地——飞书审批改为 owner + 显式白名单（P0-1 已修），ContextLimit 取 8192（测试已对齐），bash 沿用当前权限模型、不单列高危。下面 §0 的拍板项已不再阻塞；仍有效的剩余项是 P0-2 / P0-3、B 的前端收尾、C/D/E。
 
 ## 0. 转交时必须强调的两点
 
@@ -10,9 +12,9 @@
    - 产品定位收窄 A 还是 B，或「A 为主 + B 三件事」
    - 审批身份策略：飞书卡仅会话 owner 可点，还是显式白名单？群场景是否保留「@ 机器人的人」作批准人
    - bash 是否单列高危：永不 remember、默认不进 auto 自动放行
-2. **P0-1 是直接越权安全洞，优先级最高**（详见下方，已核实为真）。
+2. **P0-1 已修（2026-11-25）**：`decide()` 先 `canApprove` 再 `takeAsk`，只认 owner open_id 与白名单；卡片回调解析 `event.operator`；陌生人点卡不会取走待审批卡。原越权路径保留在下方作历史记录。
 
-## 1. P0-1 已核实为真（不是推测）
+## 1. P0-1 已核实为真（历史记录，已在 2026-11-25 修复）
 
 `internal/feishu/service.go:798` `func (s *Service) decide(cfg Config, t Turn)`：
 
@@ -28,7 +30,7 @@ s.hooks.Decide(t.ActionID, allow, t.Action == "keep")
 放开本机文件写入与命令执行。`keep` 那一下还会写进 remembered，长期生效。
 
 改法（交接单 §2）：卡片回调拿 `t.Sender` 比对会话 owner / 白名单，不匹配则拒绝并回权限提示。
-**这一条依赖 §11 第 3 项先拍板身份策略。**
+**已按「owner + 显式白名单」落地；群场景不要求 @ 机器人。**
 
 ## 2. 本次编译状态（已验证）
 
@@ -71,19 +73,9 @@ npx tsc --noEmit    → 干净
 P0-2 子会话卡静默消失、P0-3 必然超时、P1-4 remember 粒度、P1-5 审计缺批准人。
 **全部依赖 §11 拍板。**
 
-## 5. 已知既存失败（不是本次引入，未修）
+## 5. 已知既存失败（已在 2026-11-25 修复）
 
-`internal/llm` · `TestContextLimitUsesWindowOrProvider`
-
-```
-compact_test.go:10: llamacpp=8192
-```
-
-工作树里已 staged 的他人改动把 `ContextLimit` 本地默认窗口 `4096 → 8192`
-（`git diff --cached internal/llm/compact.go`），但 `compact_test.go:9` 仍断言 4096。
-
-**这正是 §11 第 1 项要拍板的事** —— 拍板后改代码或改测试，一次解决。
-本次未动，避免替别人做决定。
+`internal/llm` · `TestContextLimitUsesWindowOrProvider` 已通过；`compact_test.go` 断言改为 8192，与 `compact.go` 的本地模型默认窗口一致。
 
 ## 6. 发布注意
 
