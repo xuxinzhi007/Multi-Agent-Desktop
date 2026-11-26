@@ -66,16 +66,19 @@ async function openCh2(page: import('@playwright/test').Page) {
 test('agent 消息渲染 markdown 表格与标题', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS2, channels: CH2, notes: [] })
   await openCh2(page)
-  await expect(page.locator('.c-channel-card h2', { hasText: '评估结论' })).toBeVisible()
-  await expect(page.locator('.c-channel-card table')).toBeVisible()
-  await expect(page.locator('.c-channel-card td', { hasText: '需调整' })).toBeVisible()
+  const body = page.locator('[data-msg-row="agent"] .c-msg-card').first()
+  await expect(body.locator('h2', { hasText: '评估结论' })).toBeVisible()
+  await expect(body.locator('table')).toBeVisible()
+  await expect(body.locator('td', { hasText: '需调整' })).toBeVisible()
 })
 
 test('agent 消息可转派给其他成员', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS2, channels: CH2, notes: [] })
   await openCh2(page)
+  // 操作条统一为悬停显示（与单聊一致），先悬停再点
+  await page.locator('[data-msg-row="agent"]').first().hover()
   await page.getByRole('button', { name: '转派' }).click()
-  await page.locator('.c-channel-forward').getByRole('button', { name: '@后端 10' }).click()
+  await page.locator('.c-route__menu').getByRole('button', { name: '@后端 10' }).click()
   await page.waitForTimeout(300)
   const calls = await page.evaluate(() => (window as unknown as { __mockCalls: { method: string; args: unknown[] }[] }).__mockCalls)
   const sent = calls.filter((c) => c.method === 'API.SendToChannel')
@@ -87,5 +90,6 @@ test('agent 消息可转派给其他成员', async ({ page }) => {
 test('agent 消息有复制按钮', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS2, channels: CH2, notes: [] })
   await openCh2(page)
+  await page.locator('[data-msg-row="agent"]').first().hover()
   await expect(page.getByRole('button', { name: '复制' })).toBeVisible()
 })

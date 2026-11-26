@@ -523,22 +523,43 @@ export function useBackend() {
           : oneLine(e.content) || (status === 'cancelled' ? '调用被用户插话打断，未完成' : '')
       setState((s) => {
         if (e.phase === 'start') {
+          // 同一个 callId 的 start 可能来两次（流式 content_block_start 先到、
+          // 完整 assistant 消息带着入参后到）。第二次只补细节，不再加一行。
+          const at = s.tools.findIndex(
+            (t) => t.id === e.id && e.callId && t.callId === e.callId && t.status === 'running',
+          )
+          const row = {
+            id: e.id,
+            callId: e.callId,
+            tool: e.tool,
+            target: e.content ?? '',
+            status,
+            input: e.input,
+            path: e.path,
+            at: Date.now(),
+          }
+          if (at >= 0) {
+            const tools = s.tools.slice()
+            const prev = tools[at]
+            tools[at] = {
+              ...prev,
+              tool: e.tool || prev.tool,
+              target: e.content || prev.target,
+              input: e.input || prev.input,
+              path: e.path || prev.path,
+            }
+            return {
+              ...s,
+              streaming: omit(s.streaming, e.id),
+              pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
+              tools,
+            }
+          }
           return {
             ...s,
             streaming: omit(s.streaming, e.id),
             pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
-            tools: [
-              ...s.tools,
-              {
-                id: e.id,
-                callId: e.callId,
-                tool: e.tool,
-                target: e.content ?? '',
-                status,
-                input: e.input,
-                at: Date.now(),
-              },
-            ].slice(-120),
+            tools: [...s.tools, row].slice(-120),
           }
         }
         const tools = s.tools.slice()
@@ -558,14 +579,15 @@ export function useBackend() {
         const finished: ToolCall = {
           id: e.id,
           callId: e.callId,
-          tool: e.tool,
+          // end 事件只带 callId，工具名是占位的 "tool"。别把行名从 Bash 改成 tool。
+          tool: previous?.tool ?? e.tool,
           target: previous?.target ?? e.tool,
           status,
           detail: detail || previous?.detail,
           input: e.input || previous?.input,
           output: e.output ?? e.content ?? '',
-          path: e.path,
-          diff: e.diff,
+          path: e.path || previous?.path,
+          diff: e.diff || previous?.diff,
           truncated: e.truncated,
           exitCode: e.exitCode,
           durationMs: e.durationMs,

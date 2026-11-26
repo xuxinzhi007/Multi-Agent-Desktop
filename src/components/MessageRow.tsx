@@ -10,7 +10,7 @@ import type { Block } from '../mygo'
  *
  * 两套历史实现曾各自维护一套正文解析 / 复制 / 转派 / 折叠逻辑，这里收成一处：
  *  - 纯展示层：不读存储、不做排序（排序只走 src/lib/message.ts）；
- *  - 会话与频道的身份差异（用户右气泡、频道发言人头像行）通过 props 表达，不 fork 组件；
+ *  - 外壳视觉口径统一为单聊风格：用户右气泡、agent 无卡片正文 + 悬停操作条；
  *  - 只在一边有意义的能力（会话的模型/耗时/peer 调用卡、频道的投递回执/回填）以可选
  *    prop 或外层 children 落点放在各自视图里。
  */
@@ -233,9 +233,10 @@ export function ForwardMenu({
 }
 
 /**
- * MessageRow —— 频道风格的整行消息（头像 + 姓名行 + 正文 + 操作行 + 尾部附加）。
- * 会话视图因左右分栏气泡与头部元信息布局不同，保留自己的外壳，但正文 / 复制 /
- * 转派 / 头像等原语都复用本文件导出的共享件。
+ * MessageRow —— 会话与频道共用的整行消息外壳，视觉口径统一为「消息卡片」：
+ * 用户消息右侧卡片气泡（c-user-bubble），agent 消息头像 + 姓名行 + 带边框卡片正文
+ * （c-msg-card），复制 / 转派收进悬停操作条（c-msg-actions）。频道特有能力（投递回执
+ * footer、点击回填、流式停止）通过可选 prop 表达，不再另起第二套卡片样式。
  */
 export function MessageRow({
   side,
@@ -252,6 +253,7 @@ export function MessageRow({
   onForward,
   onProfile,
   onRefill,
+  onStop,
   footer,
   onContextMenu,
   bodyClassName,
@@ -272,6 +274,8 @@ export function MessageRow({
   onForward?: (id: string, text: string) => void
   onProfile?: () => void
   onRefill?: (text: string) => void
+  /** 流式进行中：姓名旁挂呼吸点，并给停止按钮 */
+  onStop?: () => void
   /** 尾部附加（频道投递回执行等） */
   footer?: ReactNode
   onContextMenu?: (e: MouseEvent) => void
@@ -281,21 +285,57 @@ export function MessageRow({
   const [expanded, setExpanded] = useState(false)
   const isUser = side === 'user'
   const letter = name.slice(0, 1).toUpperCase()
-  const clock = formatClock(timestamp)
-  const bodyClass =
-    !isUser && (blocks?.length ?? 0) === 0 ? ['markdown-body', 'c-channel-card', bodyClassName].filter(Boolean).join(' ') : bodyClassName
+  const clock = formatClock(timestamp, true)
+
+  if (isUser) {
+    return (
+      <div
+        data-msg-row="user"
+        className="c-msg c-msg--user fade-up"
+        style={{ marginBottom: 'var(--space-4)' }}
+        onContextMenu={onContextMenu}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', minWidth: 0, maxWidth: 'min(100%, 34rem)' }}>
+          <div
+            className="c-user-bubble"
+            data-msg-body
+            onClick={onRefill ? () => onRefill(text) : undefined}
+            title={onRefill ? '点击回填到输入框，修改后重发' : undefined}
+            style={{
+              fontSize: 'var(--text-md)',
+              lineHeight: 1.7,
+              wordBreak: 'break-word',
+              whiteSpace: (blocks?.length ?? 0) > 0 ? undefined : 'pre-wrap',
+              cursor: onRefill ? 'pointer' : undefined,
+            }}
+          >
+            <MessageBody blocks={blocks} text={text} mentionTargets={mentionTargets} selfColor={color} variant="user" />
+            {clock && (
+              <time style={{ display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                {clock}
+              </time>
+            )}
+          </div>
+          {footer}
+        </div>
+      </div>
+    )
+  }
+
+  const bodyClass = ['c-msg-card', live ? 'c-msg-card--live' : '', (blocks?.length ?? 0) === 0 ? 'markdown-body' : '', bodyClassName]
+    .filter(Boolean)
+    .join(' ')
 
   return (
     <div
-      data-msg-row={side}
-      className="fade-up"
+      data-msg-row="agent"
+      className="c-msg c-msg--agent fade-up"
       style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}
       onContextMenu={onContextMenu}
     >
       <Avatar
         letter={letter}
-        color={isUser ? 'var(--bg-surface-active)' : color}
-        textColor={isUser ? 'var(--text-secondary)' : undefined}
+        color={color}
         onClick={onProfile}
         title={onProfile ? '看他的个人主页' : undefined}
       />
@@ -305,10 +345,10 @@ export function MessageRow({
             display: 'flex',
             alignItems: 'center',
             gap: 6,
-            marginBottom: 3,
+            marginBottom: 6,
             fontSize: 'var(--text-xs)',
             fontWeight: 600,
-            color: isUser ? 'var(--text-disabled)' : color,
+            color,
           }}
         >
           {onProfile ? (
@@ -318,22 +358,40 @@ export function MessageRow({
           ) : (
             name
           )}
-          {clock && (
-            <span style={{ marginLeft: 'auto', fontWeight: 400, color: 'var(--text-disabled)' }}>{clock}</span>
-          )}
+          {live && <span className="blink" style={{ color: 'var(--warning)' }}>●</span>}
+          <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {clock && <span style={{ fontWeight: 400, color: 'var(--text-disabled)' }}>{clock}</span>}
+            {onStop && (
+              <button className="c-btn c-btn--danger c-btn--sm" onClick={onStop}>
+                停止
+              </button>
+            )}
+          </span>
+          {(copyable ?? forwardItems?.length) ? (
+            <div className="c-msg-actions">
+              {copyable && <CopyButton text={text} variant="icon" onCopy={(t) => navigator.clipboard.writeText(t)} />}
+              {onForward && forwardItems && forwardItems.length > 0 && (
+                <ForwardMenu
+                  label="转派"
+                  items={forwardItems}
+                  triggerClassName="c-icon-btn"
+                  wrapperClassName="c-route"
+                  menuClassName="c-route__menu"
+                  itemClassName="c-ctx-item"
+                  onPick={(id) => onForward(id, text)}
+                />
+              )}
+            </div>
+          ) : null}
         </div>
         <div
           data-msg-body
-          onClick={onRefill ? () => onRefill(text) : undefined}
-          title={onRefill ? '点击回填到输入框，修改后重发' : undefined}
           className={bodyClass}
           style={{
             fontSize: 'var(--text-md)',
             lineHeight: 1.7,
             wordBreak: 'break-word',
             color: 'var(--text-secondary)',
-            whiteSpace: isUser ? 'pre-wrap' : undefined,
-            cursor: onRefill ? 'pointer' : undefined,
             maxHeight: clamp && !expanded ? '10.2em' : undefined,
             overflow: clamp && !expanded ? 'hidden' : undefined,
           }}
@@ -343,7 +401,7 @@ export function MessageRow({
             text={text}
             mentionTargets={mentionTargets}
             selfColor={color}
-            variant={side}
+            variant="agent"
             live={live}
             tableScroll={tableScroll}
           />
@@ -353,20 +411,6 @@ export function MessageRow({
             {expanded ? '收起' : '展开全文'}
           </button>
         )}
-        {!isUser && ((copyable ?? forwardItems?.length) ? (
-          <div className="c-channel-actions">
-            {copyable && <CopyButton text={text} onCopy={(t) => navigator.clipboard.writeText(t)} />}
-            {onForward && forwardItems && forwardItems.length > 0 && (
-              <ForwardMenu
-                label="转派"
-                items={forwardItems}
-                triggerClassName="c-btn c-btn--ghost c-btn--sm"
-                menuClassName="c-channel-forward"
-                onPick={(id) => onForward(id, text)}
-              />
-            )}
-          </div>
-        ) : null)}
         {footer}
       </div>
     </div>

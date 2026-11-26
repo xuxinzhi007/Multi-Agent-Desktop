@@ -7,6 +7,7 @@ import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
 import type { MentionTarget } from './MentionText'
 import { CopyButton, ForwardMenu, MessageBody, StreamingMarkdown } from './MessageRow'
+import { ReasoningCard, Thinking } from './ThinkRail'
 import { API, type AgentRuntimeRequest, type AgentView as Agent, type Channel, type Config, type Message } from '../mygo'
 import { runtimeBadge, runtimeStateOf, splitLines, type RuntimeKind } from '../lib/runtime'
 import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
@@ -37,10 +38,12 @@ type Props = {
   hasOlder?: boolean
   onLoadOlder?: () => void
   onShell: (command: string) => void
+  /** 打开检查器的「改动」页：对话里的改动清单点击后跳到这里看 diff */
+  onOpenChanges?: () => void
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
   /** 这一轮已经发生的工具步骤。思考中靠它显示在读什么、跑了什么。 */
-  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'; detail?: string }[]
+  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'; detail?: string; path?: string; diff?: string }[]
   /** 模型这一轮的思考文本，还没写进消息时先显示在这里。 */
   reasoning?: string
   /** 这一轮请求的等待计时。first 是到首个推理或正文的毫秒。 */
@@ -76,22 +79,6 @@ const quickRoles = [
   { emoji: '🔍', label: '审查', name: 'Reviewer', role: '代码审查者，指出风险、代码异味与不符合规范的地方' },
 ] as const
 
-const TOOL_LABEL: Record<string, string> = {
-  read_file: '读取',
-  write_file: '写入',
-  edit_file: '修改',
-  bash: '执行',
-}
-
-function stepText(tool: string, target: string) {
-  const label = TOOL_LABEL[tool] ?? tool
-  const prefix = tool + ' '
-  const detail = target.startsWith(prefix) ? target.slice(prefix.length) : target
-  const line = detail.replace(/\s+/g, ' ').trim()
-  if (!line || line === tool) return label
-  return line.length > 80 ? `${label} ${line.slice(0, 80)}…` : `${label} ${line}`
-}
-
 type Shown = { m: Message; calls: PeerCall[] }
 
 type TranscriptRow = { kind: 'msg'; m: Message; calls: PeerCall[]; idx: number } | { kind: 'err'; text: string }
@@ -119,112 +106,91 @@ function presentTranscript(messages: Message[]): Shown[] {
   return out
 }
 
-function formatWait(secs: number): string {
-  if (secs < 60) return `${secs}s`
-  const m = Math.floor(secs / 60)
-  const s = secs % 60
-  return `${m}分${String(s).padStart(2, '0')}秒`
-}
-
-function ThinkRail({
-  live,
-  title,
-  meta,
-  tone,
-  children,
+/**
+ * TurnChanges 把「这一轮到底动了哪些文件」摆在对话里。
+ *
+ * 之前这些信息只散在检查器的工具列表里，还混着 Bash 的原始 JSON；
+ * 用户看完一段回答仍然不知道改了哪个文件、能不能点开看 diff。
+ * 这里按路径去重，给一行可点击的清单，点击直接跳到检查器的 diff。
+ */
+function TurnChanges({
+  steps,
+  onOpen,
 }: {
-  live?: boolean
-  title: string
-  meta?: string
-  tone?: 'wait' | 'think' | 'tool'
-  children?: ReactNode
+  steps: NonNullable<Props['steps']>
+  onOpen?: () => void
 }) {
-  const [open, setOpen] = useState(!!live)
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const pin = useRef(true)
-  const onBodyScroll = () => {
-    const el = bodyRef.current
-    if (!el) return
-    pin.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  const files = new Map<string, { path: string; diff?: string }>()
+  for (const s of steps) {
+    if (!s.path) continue
+    const prev = files.get(s.path)
+    if (!prev || (!prev.diff && s.diff)) files.set(s.path, { path: s.path, diff: s.diff ?? prev?.diff })
   }
-  useEffect(() => {
-    const el = bodyRef.current
-    if (!el || !open || !pin.current) return
-    el.scrollTop = el.scrollHeight
-  }, [children, open])
-  const hasBody = children != null && children !== false && children !== ''
-  const pulse = live ? `c-think__pulse c-think__pulse--${tone ?? 'wait'}` : 'c-think__pulse c-think__pulse--done'
+  if (files.size === 0) return null
+  const stat = (d?: string) => {
+    if (!d) return ''
+    const lines = d.split('\n')
+    const add = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
+    const del = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length
+    if (add === 0 && del === 0) return ''
+    return `+${add} −${del}`
+  }
   return (
-    <div className={live ? 'c-think c-think--live' : 'c-think'}>
-      <button
-        type="button"
-        className="c-think__bar"
-        onClick={() => hasBody && setOpen((v) => !v)}
-        aria-expanded={hasBody ? open : undefined}
-      >
-        <span className={pulse} />
-        <span className="c-think__title">{title}</span>
-        {meta && <span className="c-think__meta">{meta}</span>}
-        {hasBody && <span className="c-think__toggle">{open ? '收起' : '展开'}</span>}
-      </button>
-      {open && hasBody && (
-        <div className="c-think__body" ref={bodyRef} onScroll={onBodyScroll}>
-          {children}
-        </div>
-      )}
+    <div
+      style={{
+        marginTop: 'var(--space-3)',
+        border: '1px solid var(--border-subtle)',
+        borderRadius: 'var(--radius-md)',
+        background: 'var(--bg-surface)',
+        padding: '9px 11px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
+          本轮改了 {files.size} 个文件
+        </span>
+        {onOpen && (
+          <button
+            className="c-btn c-btn--ghost c-btn--sm"
+            style={{ marginLeft: 'auto' }}
+            onClick={onOpen}
+          >
+            在检查器里看 diff
+          </button>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {[...files.values()].map((f) => (
+          <button
+            key={f.path}
+            type="button"
+            onClick={onOpen}
+            title={f.diff || f.path}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              textAlign: 'left',
+              padding: '3px 6px',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--bg-inset)',
+              color: 'var(--text-secondary)',
+              fontSize: 'var(--text-xs)',
+              cursor: onOpen ? 'pointer' : 'default',
+            }}
+          >
+            <span className="mono" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {f.path}
+            </span>
+            {f.diff && <span style={{ color: 'var(--text-tertiary)' }}>{stat(f.diff)}</span>}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
 
-function ReasoningCard({ text, live }: { text: string; live?: boolean }) {
-  return (
-    <ThinkRail live={live} title={live ? '思考中' : '思考'}>
-      {text}
-    </ThinkRail>
-  )
-}
-
-function Thinking({
-  steps,
-  reasoning,
-  pace,
-}: {
-  steps: NonNullable<Props['steps']>
-  reasoning?: string
-  pace?: Props['pace']
-}) {
-  const current = [...steps].reverse().find((s) => s.status === 'running')
-  const latest = [...steps].reverse().find((s) => s.status !== 'running' && s.detail)
-  const thinking = !current && pace?.heard === 'reason'
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!pace) return
-    const id = window.setInterval(() => setNow(Date.now()), 500)
-    return () => window.clearInterval(id)
-  }, [pace?.since])
-  const waited = pace ? Math.max(0, Math.round((now - pace.since) / 1000)) : 0
-  const label = current
-    ? stepText(current.tool, current.target)
-    : thinking
-      ? '思考中'
-      : latest?.detail
-        ? latest.detail
-        : waited >= 20
-          ? '模型还没有返回'
-          : '在等模型'
-  const parts = [label]
-  const showingResult = !current && !thinking && !!latest?.detail
-  if (!showingResult && pace) parts.push(`已等 ${formatWait(waited)}`)
-  if (!showingResult && pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
-  return (
-    <ThinkRail live title={parts.join(' · ')} tone={current ? 'tool' : thinking ? 'think' : 'wait'}>
-      {reasoning || undefined}
-    </ThinkRail>
-  )
-}
-
-function LearnProgress({ agent }: { agent: Agent }) {
-  const total = agent.learnTotal ?? 0
+function LearnProgress({ agent }: { agent: Agent }) {  const total = agent.learnTotal ?? 0
   if (total <= 0) return null
   const at = Math.min(agent.learnAt ?? 0, total)
   const pct = Math.round((at / total) * 100)
@@ -771,6 +737,8 @@ export default function AgentView(p: Props) {
         {!!p.streaming && !p.agent.busy && ((p.steps?.length ?? 0) > 0 || !!p.reasoning) && (
           <Thinking steps={p.steps ?? []} reasoning={p.reasoning} pace={p.pace} />
         )}
+
+        {!running && <TurnChanges steps={p.steps ?? []} onOpen={p.onOpenChanges} />}
 
         {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}
         </div>
@@ -1985,7 +1953,7 @@ function BubbleImpl({
         onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
       >
         <AgentFace name={fromAgent.name} color={fromAgent.color} note="发来的任务" />
-        <div data-msg-body style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+        <div data-msg-body className="c-msg-card" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
           {displayContent}
         </div>
       </div>
@@ -2066,7 +2034,7 @@ function BubbleImpl({
           )}
         </div>
       </div>
-      <div data-msg-body className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+      <div data-msg-body className={live ? 'markdown-body c-msg-card c-msg-card--live' : 'markdown-body c-msg-card'} style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
         {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
         <StreamingMarkdown text={displayContent} live={!!live} />
         <PeerCallList calls={calls} agents={agents} />

@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,11 +33,15 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 		m.finish(a, StatusError, workdir.RejectReason)
 		return
 	}
-	// CLI 只能收文本：图片要么被静默丢掉（用户以为模型看见了），
-	// 要么在这里说清楚。选后者。
+	// CLI 的 -p 只吃文本，但它的 Read 能直接打开图片文件（本机实测：png 会被当作图像载入）。
+	// 所以不丢图，也不硬拒：把已经落盘的图给成绝对路径，让 CLI 自己看。
+	var images []string
 	if len(blocks) > 0 {
-		m.finish(a, StatusError, "豆包 CLI 通道暂不支持图片，切回 API 模型再发")
-		return
+		images = doubaoImagePaths(m, blocks)
+		if len(images) == 0 {
+			m.finish(a, StatusError, "图片没有落盘，这条发不出去：请重发一次，或切回 API 模型")
+			return
+		}
 	}
 
 	a.mu.Lock()
@@ -53,6 +60,15 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 	}
 
 	prompt := buildDoubaoPrompt(role, workDir, history)
+	if len(images) > 0 {
+		var b strings.Builder
+		b.WriteString(prompt)
+		b.WriteString("\n\n附图（先用 Read 工具打开这些本地图片，再回答最后一条请求）：")
+		for _, p := range images {
+			b.WriteString("\n- " + p)
+		}
+		prompt = b.String()
+	}
 	run := llm.DoubaoCLIRun{WorkDir: workDir, Prompt: prompt, Model: cfg.Model, Effort: cfg.Thinking}
 
 	stream, err := llm.StreamDoubaoCLI(runCtx, run)
@@ -87,13 +103,28 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 				a.mu.Lock()
 				a.LastTool = label
 				a.mu.Unlock()
-				m.emit("agent.tool", map[string]any{"id": a.ID, "tool": c.Tool, "phase": "start", "content": label})
+				m.emit("agent.tool", map[string]any{
+					"id": a.ID, "tool": c.Tool, "phase": "start", "content": label,
+					"callId": c.CallID, "input": c.Input, "path": shortPath(workDir, c.Path),
+				})
 			} else {
 				status := c.ToolStatus
 				if status == "" {
 					status = "ok"
 				}
-				m.emit("agent.tool", map[string]any{"id": a.ID, "tool": c.Tool, "phase": "end", "status": status, "content": c.Content})
+				payload := map[string]any{
+					"id": a.ID, "tool": c.Tool, "phase": "end", "status": status,
+					"content": c.Content, "callId": c.CallID, "output": clipResult(c.Content, 4000),
+				}
+				// 文件类工具带上路径与 diff：界面据此把「改过哪个文件」摆出来，
+				// 而不是只留一句「改了」。Bash 没有路径，就不硬编。
+				if c.Path != "" {
+					payload["path"] = shortPath(workDir, c.Path)
+					if d := gitFileDiff(workDir, c.Path); d != "" {
+						payload["diff"] = d
+					}
+				}
+				m.emit("agent.tool", payload)
 			}
 		}
 		// 正文一个增量都没流出来时，result 里的最终答案兜底。
@@ -176,4 +207,65 @@ func buildDoubaoPrompt(role, workDir string, history []llm.Message) string {
 	}
 	b.WriteString("请处理上面的最后一条请求。")
 	return b.String()
+}
+
+// doubaoImagePaths 把消息里的图片块换成磁盘上的绝对路径。
+// 图片在 Prompt 阶段已经按 id 落盘（llm.SaveImage），这里只负责找到它。
+func doubaoImagePaths(m *Manager, blocks []llm.Block) []string {
+	dir := m.ImageDir()
+	if dir == "" {
+		return nil
+	}
+	var out []string
+	for _, b := range blocks {
+		if b.ID == "" {
+			continue
+		}
+		for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
+			p := filepath.Join(dir, b.ID+ext)
+			if _, err := os.Stat(p); err == nil {
+				out = append(out, p)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// shortPath 把绝对路径收成工作目录内的相对路径，超出目录就原样保留。
+// 界面里显示一长串 C:\Users\... 没有信息量，用户只关心「改了哪个文件」。
+func shortPath(workDir, p string) string {
+	if p == "" || workDir == "" {
+		return p
+	}
+	rel, err := filepath.Rel(workDir, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return p
+	}
+	return rel
+}
+
+// gitFileDiff 取单个文件的统一 diff，最多留 3000 字符。
+// 非 git 仓库、未跟踪文件、git 不可用都返回空串——界面会退化成「只显示路径」。
+func gitFileDiff(workDir, path string) string {
+	if workDir == "" || path == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "diff", "--no-color", "--", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		// 新文件：git diff 看不到，但 git status 会标 ??，给一句说明就够。
+		st := exec.CommandContext(ctx, "git", "-C", workDir, "status", "--porcelain", "--", path)
+		if b, e := st.Output(); e == nil && strings.HasPrefix(strings.TrimSpace(string(b)), "??") {
+			return "新文件（未跟踪），完整内容以磁盘为准。"
+		}
+		return ""
+	}
+	return clipResult(s, 3000)
 }

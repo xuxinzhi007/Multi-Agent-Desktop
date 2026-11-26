@@ -4,9 +4,10 @@ import { expect, mockRuntime, test, type Page } from './mock-runtime'
  * 消息层统一（i）：会话视图与频道视图必须走同一套行渲染。
  *
  * 取证方式：DOM 侧稳定钩子 `data-msg-row`（行级，取值 user/agent）+ 内嵌
- * `data-msg-body`（正文容器）。两侧同类消息都必须带这对钩子，且助手正文
- * 都落在同一个 markdown 容器上。以后若有人在某一侧再分叉出第二套行渲染，
- * 这条用例的钩子 / 结构断言会直接挂掉。
+ * `data-msg-body`（正文容器）。两侧同类消息都必须带这对钩子，且两边正文都落在
+ * 同一个消息卡片（`c-msg-card`）里——单聊、频道、飞书三处一律「一条消息一个带边框
+ * 的卡片」，不再允许某一侧无边框裸排。以后若有人在某一侧再分叉出第二套行渲染
+ * 或私自取掉卡片，这条用例会直接挂掉。
  */
 
 const AGENTS = [
@@ -81,6 +82,7 @@ test('会话与频道走同一套消息行渲染（data-msg-row + data-msg-body�
   expect(sessionUser.every((r) => r.hasBody), '会话用户行缺正文钩子').toBe(true)
   expect(sessionAgent.every((r) => r.hasBody), '会话助手行缺正文钩子').toBe(true)
   expect(sessionAgent[0].bodyClass, '会话助手正文应落在 markdown-body 容器').toContain('markdown-body')
+  expect(sessionAgent[0].bodyClass, '会话助手正文必须带消息卡片边框').toContain('c-msg-card')
 
   // 频道视图：切到评审群。
   await page.locator('div').filter({ hasText: /^评审群/ }).first().click()
@@ -94,6 +96,7 @@ test('会话与频道走同一套消息行渲染（data-msg-row + data-msg-body�
   expect(channelUser.every((r) => r.hasBody), '频道用户行缺正文钩子').toBe(true)
   expect(channelAgent.every((r) => r.hasBody), '频道助手行缺正文钩子').toBe(true)
   expect(channelAgent[0].bodyClass, '频道助手正文应落在 markdown-body 容器').toContain('markdown-body')
+  expect(channelAgent[0].bodyClass, '频道助手正文必须带消息卡片边框').toContain('c-msg-card')
 
   // 两侧结构对齐：同类行都带行钩子 + 正文钩子，助手正文共用同一容器类。
   expect(channelUser[0].hasBody).toBe(sessionUser[0].hasBody)

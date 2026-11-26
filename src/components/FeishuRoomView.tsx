@@ -343,7 +343,10 @@ export default function FeishuRoomView({ room }: { room: Room }) {
                       </span>
                     )}
                   </div>
-                  <LineBody line={line} />
+                  {/* 正文统一进消息卡片：和单聊、频道同一套边框/圆角/内边距 */}
+                  <div className="c-msg-card">
+                    <LineBody line={line} />
+                  </div>
                 </div>
               </div>
             )

@@ -1815,7 +1815,7 @@
   max-width: min(100%, 34rem);
   padding: 8px 12px 6px;
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
-  border: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
   border-radius: 16px 16px 6px 16px;
 }
 
@@ -2876,49 +2876,19 @@
   color: var(--text-disabled);
 }
 
-/* ===== 频道 agent 消息卡片 + 快捷流转 ===== */
-.c-channel-card {
+/* ===== 消息卡片：单聊 / 频道 / 飞书三个视图共用的正文卡片外壳 =====
+   一条消息一个带边框的卡片是全局口径；用户气泡（c-user-bubble）同样带边框。
+   各视图只在自己的外壳上挂 c-msg-card，不再各写一份边框 / 圆角 / 内边距。 */
+.c-msg-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 8px 12px;
 }
-.c-channel-card > :first-child { margin-top: 0; }
-.c-channel-card > :last-child { margin-bottom: 0; }
-.c-channel-actions {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
-}
-.c-channel-forward {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  min-width: 140px;
-  max-height: 220px;
-  overflow-y: auto;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-}
-.c-channel-forward button {
-  text-align: left;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  color: var(--text-primary);
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.c-channel-forward button:hover {
-  background: var(--bg-surface-hover);
+.c-msg-card > :first-child { margin-top: 0; }
+.c-msg-card > :last-child { margin-bottom: 0; }
+.c-msg-card--live {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
 }
 
 /* ===== 禁用态徽章：未接入 / 不可用 ===== */

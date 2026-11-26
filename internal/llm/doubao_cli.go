@@ -318,6 +318,7 @@ func ParseDoubaoEvent(line string) []Chunk {
 			} `json:"delta"`
 			ContentBlock *struct {
 				Type string `json:"type"`
+				ID   string `json:"id"`
 				Name string `json:"name"`
 				Text string `json:"text"`
 			} `json:"content_block"`
@@ -361,7 +362,7 @@ func ParseDoubaoEvent(line string) []Chunk {
 			}
 		case "content_block_start":
 			if ev.Event.ContentBlock != nil && ev.Event.ContentBlock.Type == "tool_use" {
-				return []Chunk{{Tool: ev.Event.ContentBlock.Name, ToolPhase: "start"}}
+				return []Chunk{{Tool: ev.Event.ContentBlock.Name, ToolPhase: "start", CallID: ev.Event.ContentBlock.ID}}
 			}
 		}
 	case "result":
@@ -403,13 +404,15 @@ func chunksFromContent(raw json.RawMessage) []Chunk {
 		return []Chunk{{Delta: s}}
 	}
 	var blocks []struct {
-		Type     string          `json:"type"`
-		Text     string          `json:"text"`
-		Thinking string          `json:"thinking"`
-		Name     string          `json:"name"`
-		Input    json.RawMessage `json:"input"`
-		Content  json.RawMessage `json:"content"`
-		IsError  bool            `json:"is_error"`
+		Type      string          `json:"type"`
+		ID        string          `json:"id"`
+		ToolUseID string          `json:"tool_use_id"`
+		Text      string          `json:"text"`
+		Thinking  string          `json:"thinking"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
+		Content   json.RawMessage `json:"content"`
+		IsError   bool            `json:"is_error"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil
@@ -426,16 +429,95 @@ func chunksFromContent(raw json.RawMessage) []Chunk {
 				out = append(out, Chunk{Reasoning: b.Thinking})
 			}
 		case "tool_use":
-			out = append(out, Chunk{Tool: b.Name, ToolPhase: "start", Content: summarizeInput(b.Input)})
+			// 入参要留全一点：界面靠它显示「改哪个文件、改了什么」，
+			// 只留 160 字符会把路径截在中间，改动面板就认不出来。
+			out = append(out, Chunk{
+				Tool:      b.Name,
+				ToolPhase: "start",
+				CallID:    b.ID,
+				Content:   summarizeInput(b.Input),
+				Input:     clipText(rawString(b.Input), 2000),
+				Path:      pathFromInput(b.Input),
+			})
 		case "tool_result":
 			status := "ok"
 			if b.IsError {
 				status = "error"
 			}
-			out = append(out, Chunk{Tool: "tool", ToolPhase: "end", ToolStatus: status})
+			out = append(out, Chunk{
+				Tool:       "tool",
+				ToolPhase:  "end",
+				ToolStatus: status,
+				CallID:     b.ToolUseID,
+				Content:    clipText(textFromContent(b.Content), 4000),
+			})
 		}
 	}
 	return out
+}
+
+func rawString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v any
+	if json.Unmarshal(raw, &v) != nil || v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func clipText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// pathFromInput 从工具入参里取文件路径。不同 CLI 叫法不同，按优先级取第一个命中的。
+func pathFromInput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	for _, k := range []string{"file_path", "path", "notebook_path"} {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// textFromContent 把 tool_result 的 content（可能是字符串或 [{text:...}]）摊平成文本。
+func textFromContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if b.Len() > 0 && p.Text != "" {
+			b.WriteString("\n")
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
 }
 
 func summarizeInput(raw json.RawMessage) string {

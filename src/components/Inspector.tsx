@@ -24,6 +24,52 @@ const TOOL_META = {
   cancelled: { icon: '⊘', color: 'var(--text-tertiary)', label: '已打断' },
 } as const
 
+const TOOL_LABEL_CN: Record<string, string> = {
+  read_file: '读取',
+  write_file: '写入',
+  edit_file: '修改',
+  apply_patch: '改文件',
+  bash: '执行',
+  Read: '读取',
+  Write: '写入',
+  Edit: '修改',
+  MultiEdit: '修改',
+  Bash: '执行',
+  Glob: '找文件',
+  Grep: '搜索',
+  TodoWrite: '列计划',
+  WebFetch: '抓网页',
+  WebSearch: '联网搜索',
+}
+
+/** 工具名一律给中文名 + 英文原名，避免「Bash Bash」这种重复。 */
+function toolTitle(name: string) {
+  const cn = TOOL_LABEL_CN[name]
+  return cn ? `${cn} · ${name}` : name
+}
+
+/**
+ * 列表里只放一行有用的话：优先路径，其次命令，再其次原始参数。
+ * 之前整段 JSON 直接上屏，一条就占满三行，还看不出改的是哪个文件。
+ */
+function toolSummary(t: ToolCall) {
+  if (t.path) return t.path
+  const raw = (t.target || '').trim()
+  if (!raw) return ''
+  if (raw.startsWith('{')) {
+    try {
+      const v = JSON.parse(raw) as Record<string, unknown>
+      for (const k of ['file_path', 'path', 'command', 'cmd', 'pattern', 'query']) {
+        const s = v[k]
+        if (typeof s === 'string' && s.trim()) return s
+      }
+    } catch {
+      /* 截断过的 JSON 解析不了，退回原文 */
+    }
+  }
+  return raw
+}
+
 type Tab = 'tools' | 'changes' | 'knowledge' | 'caps'
 
 export default function Inspector({
@@ -43,7 +89,10 @@ export default function Inspector({
   /** 能力面板：这个会话有哪些工具与技能，哪些现在用不了 */
   caps?: { node: React.ReactNode }
 }) {
-  const changes = tools.filter((t) => t.path || t.diff)
+  // 结束事件里偶尔只有占位名 "tool"（老版本 CLI 不带 callId），
+  // 拿不到路径也没有入参的这类行没有信息量，列表里直接不展示。
+  const visible = tools.filter((t) => t.tool !== 'tool' || !!t.path || !!t.input || t.status === 'error')
+  const changes = visible.filter((t) => t.path || t.diff)
   const changeCount = new Set(
     changes.flatMap((t) => (t.path || '未标注路径').split(',').map((p) => p.trim()).filter(Boolean)),
   ).size
@@ -92,7 +141,7 @@ export default function Inspector({
       >
         <TabBtn
           label="工具"
-          count={tools.length}
+          count={visible.length}
           active={tab === 'tools'}
           onClick={() => onTab('tools')}
         />
@@ -116,7 +165,7 @@ export default function Inspector({
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {tab === 'tools' && <ToolList tools={tools} />}
+        {tab === 'tools' && <ToolList tools={visible} />}
         {tab === 'changes' && <ChangeList tools={changes} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
         {tab === 'caps' && caps && caps.node}
@@ -210,9 +259,9 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
               </span>
               <span
                 className="mono"
-                style={{ fontSize: 'var(--text-xs)', color: 'var(--accent-bright)' }}
+                style={{ fontSize: 'var(--text-xs)', color: 'var(--accent-bright)', flexShrink: 0 }}
               >
-                {t.tool}
+                {toolTitle(t.tool)}
               </span>
               <span
                 className="mono"
@@ -224,9 +273,9 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                 }}
-                title={t.target}
+                title={toolSummary(t)}
               >
-                {t.target}
+                {toolSummary(t)}
               </span>
             </div>
             {t.detail && (

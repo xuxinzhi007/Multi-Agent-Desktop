@@ -46,3 +46,13 @@ test('飞书 text 类机器人消息仍渲染 markdown', async ({ page }) => {
   await openRoom(page)
   await expect(page.locator('.markdown-body h3', { hasText: '文本回复' })).toBeVisible()
 })
+
+test('飞书每条消息正文都落在带边框的消息卡片里', async ({ page }) => {
+  await mockRuntime(page, { agents: [], channels: [], notes: [], feishu: ROOMS })
+  await openRoom(page)
+  const cards = page.locator('.c-transcript .c-msg-card')
+  await expect(cards).toHaveCount(ROOMS[0].messages.length)
+  const border = await cards.first().evaluate((el) => getComputedStyle(el).borderTopWidth)
+  expect(border).toBe('1px')
+  await expect(cards.first()).toContainText('评估结论')
+})

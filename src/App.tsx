@@ -254,6 +254,9 @@ export default function App() {
           channel={activeChannel}
           agents={s.agents}
           streaming={s.channelStreaming}
+          trail={s.tools}
+          pace={s.pace}
+          reasoning={s.reasoning}
           onSend={async (text, mentions, images) => {
             // 同对象抢占：新消息再 @ 正在本群输出的人 → 先停旧回合再投新指令；
             // 异对象并行：空闲成员不受影响。精确只断群回合需后端，见交接单。
@@ -343,6 +346,10 @@ export default function App() {
           }}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
+          onOpenChanges={() => {
+            setTab('changes')
+            setInspectorOpen(true)
+          }}
           onQuickCreate={async (name, role) => {
             const created = await s.send<Agent | null>('agent.create', { name, role })
             if (created) setActive({ kind: 'agent', id: created.id })
