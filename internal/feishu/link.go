@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -980,6 +981,24 @@ func HistoryAs(ctx context.Context, c Cred, chatID string, since int64) ([]Line,
 	return HistoryPages(ctx, c, chatID, since, 1)
 }
 
+// historyRetryBackoff 是 429/5xx 退避一次前的等待；测试可调到 0。
+var historyRetryBackoff = 300 * time.Millisecond
+
+// historyHTTPError 区分可重试（429/5xx）和永久失败（权限缺失、业务 code 非 0）。
+type historyHTTPError struct {
+	status    int
+	code      int
+	msg       string
+	retryable bool
+}
+
+func (e *historyHTTPError) Error() string {
+	if e.code != 0 {
+		return fmt.Sprintf("feishu history http %d code %d: %s", e.status, e.code, e.msg)
+	}
+	return fmt.Sprintf("feishu history http %d: %s", e.status, http.StatusText(e.status))
+}
+
 // HistoryPages 按 page_token 往前翻，最多 pages 页（每页 50 条）。
 // 返回的消息按时间正序。
 func HistoryPages(ctx context.Context, c Cred, chatID string, since int64, pages int) ([]Line, error) {
@@ -994,9 +1013,22 @@ func HistoryPages(ctx context.Context, c Cred, chatID string, since int64, pages
 	names := memberNameCache(ctx, token, chatID)
 	var all []Line
 	page := ""
+	retried := false
 	for i := 0; i < pages; i++ {
 		lines, next, more, err := historyPage(ctx, token, chatID, since, page)
 		if err != nil {
+			var he *historyHTTPError
+			if errors.As(err, &he) && he.retryable && !retried {
+				// 429/5xx 退避一次再拉当前页；仍失败就把错误交回调用方降级。
+				retried = true
+				select {
+				case <-time.After(historyRetryBackoff):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				i--
+				continue
+			}
 			return nil, err
 		}
 		all = append(all, lines...)
@@ -1042,6 +1074,10 @@ func historyPage(ctx context.Context, token, chatID string, since int64, page st
 		return nil, "", false, fmt.Errorf("feishu history %s: %w", chatID, err)
 	}
 	defer resp.Body.Close()
+	// 先读状态码：429/5xx 交上层退避重试一次；其它非 2xx 按永久失败处理。
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, "", false, &historyHTTPError{status: resp.StatusCode, retryable: true}
+	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	var out struct {
 		Code int    `json:"code"`
@@ -1068,7 +1104,7 @@ func historyPage(ctx context.Context, token, chatID string, since int64, page st
 		return nil, "", false, fmt.Errorf("feishu history %s: %s", chatID, strings.TrimSpace(string(raw)))
 	}
 	if out.Code != 0 {
-		return nil, "", false, fmt.Errorf("feishu history %s: %s", chatID, out.Msg)
+		return nil, "", false, &historyHTTPError{status: resp.StatusCode, code: out.Code, msg: out.Msg}
 	}
 	lines := make([]Line, 0, len(out.Data.Items))
 	for _, it := range out.Data.Items {
@@ -1292,7 +1328,7 @@ func ReplyActions(ctx context.Context, appID, secret, messageID, text string, bu
 }
 
 func cardMessageButtons(text string, buttons []CardButton) ([]byte, error) {
-	card, err := cardWith(text, buttons)
+	card, err := cardWith(text, buttons, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1303,14 +1339,52 @@ func cardMessageButtons(text string, buttons []CardButton) ([]byte, error) {
 }
 
 func cardBody(text, stopID string) ([]byte, error) {
+	act, id, style := decodeStopID(stopID)
 	var buttons []CardButton
-	if stopID != "" {
-		buttons = append(buttons, CardButton{Text: "停止", Act: "stop", ID: stopID, Style: "danger"})
+	if id != "" {
+		buttons = append(buttons, CardButton{Text: buttonLabel(act), Act: act, ID: id, Style: buttonStyle(act)})
 	}
-	return cardWith(text, buttons)
+	return cardWith(text, buttons, style)
 }
 
-func cardWith(text string, buttons []CardButton) ([]byte, error) {
+// decodeStopID 解析 service 侧编进 stopID 的「action:卡片id」。
+// 裸 id（旧格式）按停止按钮处理，保持向后兼容。
+func decodeStopID(stopID string) (act, id, style string) {
+	head, rest, found := strings.Cut(stopID, ":")
+	if !found {
+		return "stop", stopID, ""
+	}
+	switch head {
+	case retryAct:
+		return head, rest, "red"
+	case expandAct:
+		return head, rest, ""
+	default:
+		return "stop", stopID, ""
+	}
+}
+
+func buttonLabel(act string) string {
+	switch act {
+	case retryAct:
+		return "重试"
+	case expandAct:
+		return "展开全文"
+	default:
+		return "停止"
+	}
+}
+
+func buttonStyle(act string) string {
+	switch act {
+	case retryAct:
+		return "primary"
+	default:
+		return "danger"
+	}
+}
+
+func cardWith(text string, buttons []CardButton, style string) ([]byte, error) {
 	rs := []rune(strings.TrimSpace(text))
 	if len(rs) > 4000 {
 		text = string(rs[:4000]) + "…"
@@ -1339,14 +1413,22 @@ func cardWith(text string, buttons []CardButton) ([]byte, error) {
 			"actions": actions,
 		})
 	}
-	card, err := json.Marshal(map[string]any{
+	card := map[string]any{
 		"config":   map[string]any{"wide_screen_mode": true, "update_multi": true},
 		"elements": elements,
-	})
+	}
+	// 失败态：在现有模板上加红色头部，不新建第二套卡片。
+	if style != "" {
+		card["header"] = map[string]any{
+			"title":    map[string]any{"tag": "plain_text", "content": "出错了"},
+			"template": style,
+		}
+	}
+	body, err := json.Marshal(card)
 	if err != nil {
 		return nil, fmt.Errorf("feishu card: %w", err)
 	}
-	return card, nil
+	return body, nil
 }
 
 // FetchMessage 读取被回复的那条消息正文。机器人自己发过的、以及会话里它能看见的，都走这里。

@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import MentionInput, { type MentionInputHandle } from './MentionInput'
-import MentionText, { type MentionTarget } from './MentionText'
+import type { MentionTarget } from './MentionText'
 import Modal from './Modal'
 import PermissionPicker from './PermissionPicker'
 import ProfileCard from './ProfileCard'
@@ -10,7 +8,8 @@ import type { AgentView as Agent, Channel, ChannelMessage } from '../mygo'
 import { API } from '../mygo'
 import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
-import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
+import { ImageStrip, readImageFiles, type DraftImage } from './ImageDraft'
+import { MessageRow } from './MessageRow'
 
 type Props = {
   channel: Channel | null
@@ -322,28 +321,40 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
             </div>
           </div>
         )}
-        {(channel.messages ?? []).map((m, i) => (
-          <ChannelBubble
-            key={m.id}
-            msg={m}
-            agent={memberById(m.fromId)}
-            mentionTargets={mentionTargets}
-            agents={agents}
-            total={members.length}
-            clamp={burst && i > lastUserAt && m.fromId !== 'user' && bodyOf(m.text).length > 200}
-            forwardTargets={members.filter((x) => x.id !== m.fromId).map((x) => x.name)}
-            onForward={(target, text) => onSend(`@${target} 请跟进这条：\n${text}`, [target])}
-            onProfile={m.fromId !== 'user' ? setProfileId : undefined}
-            onRefill={
-              m.fromId === 'user'
-                ? (t) => {
-                    setInput(t)
-                    taRef.current?.focus()
-                  }
-                : undefined
-            }
-          />
-        ))}
+        {(channel.messages ?? []).map((m, i) => {
+          const agent = memberById(m.fromId)
+          const isUser = m.fromId === 'user'
+          const name = m.fromName || agent?.name || m.fromId || '?'
+          const color = agent?.color ?? 'var(--text-tertiary)'
+          const forwardTargets = members.filter((x) => x.id !== m.fromId).map((x) => ({ id: x.name, label: `@${x.name}` }))
+          return (
+            <MessageRow
+              key={m.id}
+              side={isUser ? 'user' : 'agent'}
+              name={name}
+              color={color}
+              blocks={m.blocks}
+              text={bodyOf(m.text)}
+              mentionTargets={mentionTargets}
+              timestamp={m.at}
+              clamp={burst && i > lastUserAt && !isUser && bodyOf(m.text).length > 200}
+              copyable={!isUser}
+              forwardItems={forwardTargets}
+              onForward={(target, text) => onSend(`@${target} 请跟进这条：\n${text}`, [target])}
+              onProfile={!isUser ? () => setProfileId(m.fromId) : undefined}
+              onRefill={
+                isUser
+                  ? (t) => {
+                      setInput(t)
+                      taRef.current?.focus()
+                    }
+                  : undefined
+              }
+              tableScroll
+              footer={<DeliveryRow msg={m} agents={agents} total={members.length} />}
+            />
+          )
+        })}
 
         {/* 流式输出：正在生成回复的成员；≥3 并发时限高折叠 */}
         {Object.entries(streaming ?? {})
@@ -680,171 +691,6 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           onOpenChannel?.(id)
         }}
       />
-    </div>
-  )
-}
-
-function ChannelBubble({
-  msg,
-  agent,
-  mentionTargets,
-  agents,
-  total,
-  clamp,
-  forwardTargets,
-  onForward,
-  onProfile,
-  onRefill,
-}: {
-  msg: ChannelMessage
-  agent?: Agent
-  mentionTargets: MentionTarget[]
-  agents: Agent[]
-  total?: number
-  /** ≥3 人并发时的长回复限高折叠 */
-  clamp?: boolean
-  forwardTargets?: string[]
-  onForward?: (target: string, text: string) => void
-  onProfile?: (id: string) => void
-  /** 点自己发过的消息回填输入框，改完重发 */
-  onRefill?: (text: string) => void
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const [forwardOpen, setForwardOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const color = agent?.color ?? 'var(--text-tertiary)'
-  // 老版本写进 channels.json 的消息缺 fromName / fromId，
-  // 反序列化后是 undefined。渲染层必须兜底：
-  // 类型声明写成 string 不代表运行时一定有值。
-  const name = msg.fromName || agent?.name || msg.fromId || '?'
-  const isUser = msg.fromId === 'user'
-
-  return (
-    <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
-      <span
-        onClick={onProfile ? () => onProfile(msg.fromId) : undefined}
-        title={onProfile ? '看他的个人主页' : undefined}
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 'var(--radius-sm)',
-          background: isUser ? 'var(--bg-surface-active)' : color,
-          color: isUser ? 'var(--text-secondary)' : 'var(--bg-base)',
-          display: 'grid',
-          placeItems: 'center',
-          fontSize: 'var(--text-xs)',
-          fontWeight: 700,
-          flexShrink: 0,
-          marginTop: 1,
-          cursor: onProfile ? 'pointer' : undefined,
-        }}
-      >
-        {name.slice(0, 1).toUpperCase()}
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            marginBottom: 3,
-            fontSize: 'var(--text-xs)',
-            fontWeight: 600,
-            color: isUser ? 'var(--text-disabled)' : color,
-          }}
-        >
-          {onProfile ? (
-            <span onClick={() => onProfile(msg.fromId)} style={{ cursor: 'pointer' }} title="看他的个人主页">
-              {name}
-            </span>
-          ) : (
-            name
-          )}
-          <span style={{ marginLeft: 'auto', fontWeight: 400, color: 'var(--text-disabled)' }}>
-            {new Date(msg.at * 1000).toLocaleTimeString('zh-CN', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })}
-          </span>
-        </div>
-        <div
-          onClick={onRefill ? () => onRefill(bodyOf(msg.text)) : undefined}
-          title={onRefill ? '点击回填到输入框，修改后重发' : undefined}
-          className={!isUser && (msg.blocks?.length ?? 0) === 0 ? 'markdown-body c-channel-card' : undefined}
-          style={{
-            fontSize: 'var(--text-md)',
-            lineHeight: 1.7,
-            wordBreak: 'break-word',
-            color: 'var(--text-secondary)',
-            whiteSpace: isUser ? 'pre-wrap' : undefined,
-            cursor: onRefill ? 'pointer' : undefined,
-            maxHeight: clamp && !expanded ? '10.2em' : undefined,
-            overflow: clamp && !expanded ? 'hidden' : undefined,
-          }}
-        >
-          {(msg.blocks?.length ?? 0) > 0 ? (
-            <MessageShots blocks={msg.blocks} content={bodyOf(msg.text)} />
-          ) : isUser ? (
-            <MentionText text={bodyOf(msg.text)} agents={mentionTargets} selfColor={color} />
-          ) : (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                table: ({ children }) => (
-                  <div style={{ overflowX: 'auto' }}>
-                    <table>{children}</table>
-                  </div>
-                ),
-              }}
-            >
-              {bodyOf(msg.text)}
-            </ReactMarkdown>
-          )}
-        </div>
-        {clamp && (
-          <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '收起' : '展开全文'}
-          </button>
-        )}
-        {!isUser && (
-          <div className="c-channel-actions">
-            <button
-              className="c-btn c-btn--ghost c-btn--sm"
-              onClick={() => {
-                navigator.clipboard.writeText(bodyOf(msg.text)).then(() => {
-                  setCopied(true)
-                  window.setTimeout(() => setCopied(false), 1500)
-                })
-              }}
-            >
-              {copied ? '已复制' : '复制'}
-            </button>
-            {onForward && (forwardTargets?.length ?? 0) > 0 && (
-              <span style={{ position: 'relative' }}>
-                <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setForwardOpen((v) => !v)}>
-                  转派
-                </button>
-                {forwardOpen && (
-                  <div className="c-channel-forward">
-                    {forwardTargets!.map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => {
-                          onForward(t, bodyOf(msg.text))
-                          setForwardOpen(false)
-                        }}
-                      >
-                        @{t}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </span>
-            )}
-          </div>
-        )}
-        <DeliveryRow msg={msg} agents={agents} total={total} />
-      </div>
     </div>
   )
 }

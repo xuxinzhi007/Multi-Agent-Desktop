@@ -9,6 +9,7 @@ import (
 
 func TestAssistUsesParentThenHelper(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock", Model: "m"}, func(string, any) {})
+	t.Cleanup(m.drainTest)
 	parent := m.Create("", "审阅", "看代码")
 	_ = m.SetAgentLLM(parent.ID, llm.Config{Provider: "mock", Model: "m"})
 	_ = m.SetAgentWorkDir(parent.ID, `C:\repo`)
@@ -63,7 +64,7 @@ func TestAssistUsesParentThenHelper(t *testing.T) {
 func TestAssistInheritsGlobalModelWhenParentHasNone(t *testing.T) {
 	global := llm.Config{Provider: "openai", BaseURL: "http://x", APIKey: "k", Model: "global-m"}
 	m := NewManager(global, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "测试工程师", "")
 	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
 	if parent.Snapshot().LLMCfg != nil {

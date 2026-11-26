@@ -12,6 +12,7 @@ import (
 
 	"github.com/egoist/mygo"
 
+	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/feishu"
 )
@@ -27,6 +28,37 @@ func (s *API) feishuRoster() []feishu.Named {
 		out = append(out, feishu.Named{ID: sn.ID, Name: sn.Name, Status: string(sn.Status)})
 	}
 	return out
+}
+
+// feishuChannelBridge 把飞书历史桥接到 channel.Manager。两边类型解耦，
+// feishu 包不反向 import channel；适配器在这里做类型转换。
+type feishuChannelBridge struct{ mgr *channel.Manager }
+
+func (b feishuChannelBridge) HistorySince(chatID string) (int64, string) {
+	if b.mgr == nil {
+		return 0, ""
+	}
+	cur := b.mgr.HistoryCursorAt(channel.FeishuChannelID(chatID))
+	return cur.At, cur.ID
+}
+
+func (b feishuChannelBridge) IngestHistory(chatID, name string, msgs []feishu.HistoryMsg) int {
+	if b.mgr == nil {
+		return 0
+	}
+	hm := make([]channel.HistoryMessage, len(msgs))
+	for i, m := range msgs {
+		hm[i] = channel.HistoryMessage{
+			ExtID:    m.ExtID,
+			FromID:   m.FromID,
+			FromName: m.FromName,
+			Text:     m.Text,
+			At:       m.At,
+			Kind:     m.Kind,
+		}
+	}
+	n, _ := b.mgr.IngestHistory(chatID, name, hm)
+	return n
 }
 
 func (s *API) decideFeishu(id string, allow, remember bool) error {
@@ -124,6 +156,21 @@ func (s *API) SetFeishuRoomAgent(chatID, agentID string) error {
 		return fmt.Errorf("会话不存在")
 	}
 	s.bot.BindRoom(chatID, agentID)
+	return nil
+}
+
+// SetFeishuRoomMode 切换一个群的应答模式：off 不理 / mention 只被 @ 才答 / active 不 @ 也答。
+// 单聊不受三态影响，始终应答。
+func (s *API) SetFeishuRoomMode(chatID, mode string) error {
+	if s.bot == nil {
+		return fmt.Errorf("飞书还没接上")
+	}
+	switch mode {
+	case "off", "mention", "active":
+	default:
+		return fmt.Errorf("模式只能是 off / mention / active")
+	}
+	s.bot.SetGroupMode(chatID, mode)
 	return nil
 }
 
@@ -293,6 +340,8 @@ func (s *API) syncFeishu() {
 	if s.bot == nil {
 		return
 	}
+	// 把飞书历史桥接到频道表；s.channels 为 nil 时适配器静默跳过。
+	s.bot.SetHistorySink(feishuChannelBridge{mgr: s.channels})
 	// 用户令牌会自动过期，刷新结果要落回配置，否则重启后又变回过期令牌。
 	botRefresher = func(botID, access, refresh string, expire int64) {
 		if s.settings == nil {

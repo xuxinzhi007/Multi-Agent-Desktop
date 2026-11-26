@@ -16,6 +16,7 @@ type Bot struct {
 type Hub struct {
 	hooks Hooks
 	log   *Log
+	sink  HistorySink
 	mu    sync.Mutex
 	bots  map[string]*Service
 }
@@ -31,6 +32,23 @@ func (h *Hub) SetLog(path string) {
 		return
 	}
 	h.log.SetPath(path)
+}
+
+// SetHistorySink 挂上频道表桥接，并同步给已经建好的机器人连接。
+func (h *Hub) SetHistorySink(s HistorySink) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.sink = s
+	bots := make([]*Service, 0, len(h.bots))
+	for _, svc := range h.bots {
+		bots = append(bots, svc)
+	}
+	h.mu.Unlock()
+	for _, svc := range bots {
+		svc.SetHistorySink(s)
+	}
 }
 
 // Sync 让正在跑的连接和这份名单一致。配置没变的机器人不重新连接。
@@ -51,10 +69,12 @@ func (h *Hub) Sync(list []Bot) {
 			svc = New(h.hooks)
 			svc.ShareLog(h.log)
 			svc.SetOwner(b.ID)
+			svc.SetHistorySink(h.sink)
 			h.bots[b.ID] = svc
 			svc.Apply(b.Config)
 			continue
 		}
+		svc.SetHistorySink(h.sink)
 		if !sameConfig(svc.Current(), b.Config) {
 			svc.Apply(b.Config)
 		}
@@ -163,6 +183,14 @@ func (h *Hub) BotName(botID, fallback string) string {
 		return name
 	}
 	return fallback
+}
+
+// SetGroupMode 切换一个群的三态（off / mention / active），落到共享群配置。
+func (h *Hub) SetGroupMode(chatID, mode string) {
+	if h == nil {
+		return
+	}
+	h.log.SetMode(chatID, mode)
 }
 
 // BindRoom 从下一条消息起，这个飞书群或私聊改由另一个本机会话回答。

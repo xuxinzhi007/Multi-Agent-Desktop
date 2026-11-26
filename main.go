@@ -24,6 +24,7 @@ import (
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/feishu"
+	"multi-agent-desktop/internal/gateway"
 	gwhost "multi-agent-desktop/internal/gateway/host"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
@@ -64,6 +65,9 @@ type API struct {
 		mu     sync.Mutex
 		byChat map[string]string
 	}
+	// keepAwakeMu 保护 keepAwakeOff：设置页「保持唤醒」开关持有的释放句柄。
+	keepAwakeMu  sync.Mutex
+	keepAwakeOff func()
 }
 
 // mediaBlob 是一条消息里的图片转成的 data URL。
@@ -1698,6 +1702,9 @@ func main() {
 		Manager:   mgr,
 		Approvals: mgr.Approvals(),
 		DataDir:   dataDir,
+		// 网页端走 /api/rpc 时复用同一份方法表：反射到 *API，
+		// 不另写一套端点，桌面与浏览器因此不会出现「一边有、一边没有」。
+		Invoke: gateway.RPCInvoker(api),
 	})
 	if gwErr != nil {
 		log.Printf("gateway: init failed: %v", gwErr)
@@ -1975,4 +1982,40 @@ type Capability struct {
 	Detail string `json:"detail"`
 	Ready  bool   `json:"ready"`
 	Why    string `json:"why,omitempty"`
+}
+
+// KeepAwakeState 是设置页「保持唤醒」开关的状态。
+type KeepAwakeState struct {
+	On bool `json:"on"`
+}
+
+// KeepAwake 开启「保持唤醒」：阻止系统自动休眠并保持屏幕常亮。
+// 该能力默认关闭，因为它显著影响电池续航，必须由用户在设置里显式打开。
+// 幂等：重复调用只保留一个系统级断言，不会叠加。
+func (a *API) KeepAwake() KeepAwakeState {
+	a.keepAwakeMu.Lock()
+	defer a.keepAwakeMu.Unlock()
+	if a.keepAwakeOff == nil {
+		a.keepAwakeOff = mygo.Power.KeepAwake("设置里开启了保持唤醒", true)
+	}
+	return KeepAwakeState{On: a.keepAwakeOff != nil}
+}
+
+// StopAwake 关闭「保持唤醒」并释放系统断言，进程本身继续运行不受影响。
+func (a *API) StopAwake() KeepAwakeState {
+	a.keepAwakeMu.Lock()
+	off := a.keepAwakeOff
+	a.keepAwakeOff = nil
+	a.keepAwakeMu.Unlock()
+	if off != nil {
+		off()
+	}
+	return KeepAwakeState{On: false}
+}
+
+// KeepAwakeStatus 返回开关当前状态，供设置页打开时对齐 UI（不改变任何状态）。
+func (a *API) KeepAwakeStatus() KeepAwakeState {
+	a.keepAwakeMu.Lock()
+	defer a.keepAwakeMu.Unlock()
+	return KeepAwakeState{On: a.keepAwakeOff != nil}
 }

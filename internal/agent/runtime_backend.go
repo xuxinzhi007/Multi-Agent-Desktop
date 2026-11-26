@@ -160,7 +160,7 @@ func auditToolCall(m *Manager, a *Agent, call *tool.Call, res *tool.Result) {
 	if sink == nil || call == nil || res == nil {
 		return
 	}
-	if !isSideEffectTool(call.Name) {
+	if !isSideEffectTool(call.Name) && !isBoundaryRejection(res) {
 		return
 	}
 	entry := audit.Entry{
@@ -177,6 +177,19 @@ func auditToolCall(m *Manager, a *Agent, call *tool.Call, res *tool.Result) {
 	if err := sink.Append(entry); err != nil {
 		log.Printf("写审计日志失败：%v", err)
 	}
+}
+
+// isBoundaryRejection 识别被工作区边界拦下的调用（根外读写、越界 cwd）。
+// 这类调用不在副作用白名单里，但越界尝试必须能独立追溯；复用既有 Entry 类型
+// 落一条，不新增事件类型。
+func isBoundaryRejection(res *tool.Result) bool {
+	if res == nil {
+		return false
+	}
+	if res.Status != tool.StatusError && res.Status != tool.StatusDenied {
+		return false
+	}
+	return strings.Contains(res.Content, "outside the working")
 }
 
 // handleRuntimePermission 把外部 Agent 的审批请求交给现有审批中心。

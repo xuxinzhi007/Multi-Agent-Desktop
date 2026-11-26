@@ -68,10 +68,31 @@
 | GET | `/api/approvals` | 待审批列表 | ApprovalPort |
 | POST | `/api/approvals/{id}` | 转发一次审批决定 | ApprovalPort |
 | GET | `/api/bindings` | 渠道 ↔ Agent 绑定列表（只读） | Binder |
-| GET | `/api/events` | SSE 事件流 | Broker |
+| GET | `/api/events` | SSE 事件流（与桌面同一个 Broker） | Broker |
+| POST | `/api/rpc` | **通用方法入口**：`{method:"API.Xxx", args:[...]}`，反射到 `*API` | 全量方法 |
 
 > 入站默认只接收 `web`；`feishu` 入站走桌面 `feishu.Hub`，不经本 HTTP 路由。
 > 绑定写入仍不暴露公开 HTTP 路由：绑定由装配/管理入口经 `Binder` 端口落盘。
+
+---
+
+### POST `/api/rpc`（浏览器跑桌面同一套界面用的入口）
+
+```json
+{ "method": "API.ListAgents", "args": [] }
+→ { "result": [ … ] }
+```
+
+- **为什么有它**：桌面窗口靠宿主反射把 `*API` 注册成 `globalThis.mygo.call`。浏览器没有宿主，
+  如果逐个端点手写 HTTP，必然出现「桌面有、网页没有」的第二份 API 并慢慢漂移。
+  这个端点直接把调用反射到同一份方法表（`api_*.go` 里 124 个导出方法），桌面与浏览器因此永远一致。
+- **约定**：`method` 允许带前缀（`API.ListAgents`）或裸方法名；`args` 是**位置参数**，
+  按形参顺序解成目标类型，缺参给零值，类型不符报「第 N 个参数」错误。
+- **`context.Context`**：由服务端注入（用请求的 ctx），前端不传，也不占位置。这一点有测试守住：
+  `internal/gateway/rpc_test.go` 的 `TestRPCInvokerSkipsContext`（曾经的 bug 是 ctx 占位导致
+  `PromptAgent(ctx, req)` 收不到 req）。
+- **鉴权**：与其它端点一致（有 token 走 Bearer，无 token 只放行回环）。
+- **只暴露导出方法**：`MethodByName` 天然挡掉小写方法，不存在白名单与代码漂移的问题。
 
 ---
 
@@ -276,6 +297,33 @@ data: {"eventId":"web_…","channel":"web","chatId":"web-session-1","agentId":"a
 - 每 15 秒一条 `: ping` 心跳注释。
 - 事件 `data` 为 JSON 对象；总线缓冲满时丢最旧事件，不阻塞发布方。
 - 关闭客户端连接即取消订阅。
+
+### 断线续传（`id:` + `Last-Event-ID`）
+
+每帧业务事件都带 `id: <seq>`：
+
+```
+id: 42
+event: tool.approval.done
+data: {"id":"ap-…"}
+```
+
+浏览器 `EventSource` 重连时自动带回 `Last-Event-ID`；服务端用
+`Broker.SubscribeSince(since)` 补齐缓冲里 `seq > since` 的事件，**先补发再进实时通道**。
+缓冲上限 256 条（`replayLimit`），更早的缺口由前端在 `gateway.connected` 时做快照对账兜住。
+
+连接帧 `gateway.connected` 额外带两个字段，便于排查：
+
+```json
+{"at":1795686041,"replayed":0,"since":0,"subscribers":3}
+```
+
+- `since`：这次连接声称的上次事件号（0 表示新连接）；
+- `replayed`：实际补发了几条（长期为 0 且 `since>0`，说明断线窗口已经超出缓冲）。
+
+手工验证：`curl -N 'http://127.0.0.1:8780/api/events?last=41'`（`?last=` 等价于请求头）；
+当前事件号可在连接帧的 `since` 之外用 `gateway.connected` 的 `at`/`subscribers` 辅助判断，
+服务端内部对应 `Broker.LastSeq()`（测试与诊断用）。
 
 ### 事件清单
 

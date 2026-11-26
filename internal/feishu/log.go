@@ -43,8 +43,12 @@ type Room struct {
 	// BotName 是飞书后台配置的机器人名字，界面显示发送人时用它。
 	BotName string `json:"botName,omitempty"`
 	// ReadOnly 表示机器人不在这个群里，只能手动读取，不会自动同步也不会回答。
-	ReadOnly bool   `json:"readOnly,omitempty"`
-	Messages []Line `json:"messages"`
+	ReadOnly bool `json:"readOnly,omitempty"`
+	// Mode 是群级三态：off / mention / active。空表示沿用全局旧配置。
+	Mode string `json:"mode,omitempty"`
+	// MuteUntil 是静音截止时间（Unix 秒），0 表示未静音。
+	MuteUntil int64  `json:"muteUntil,omitempty"`
+	Messages  []Line `json:"messages"`
 }
 
 // Log 按飞书会话记下消息。同一条 message_id 只留一次。
@@ -56,13 +60,15 @@ type Log struct {
 }
 
 type room struct {
-	Name     string
-	Kind     string
-	AgentID  string
-	BotID    string
-	ReadOnly bool
-	Lines    []Line
-	Seen     map[string]struct{}
+	Name      string
+	Kind      string
+	AgentID   string
+	BotID     string
+	ReadOnly  bool
+	Mode      string
+	MuteUntil int64
+	Lines     []Line
+	Seen      map[string]struct{}
 }
 
 func NewLog() *Log {
@@ -218,6 +224,12 @@ func (l *Log) load() {
 		if r.ReadOnly {
 			dst.ReadOnly = true
 		}
+		if r.Mode != "" {
+			dst.Mode = r.Mode
+		}
+		if r.MuteUntil != 0 {
+			dst.MuteUntil = r.MuteUntil
+		}
 		for _, line := range r.Messages {
 			// 旧版本留下的「有发送人、无内容」空行丢掉，也不记进 Seen，
 			// 下次拉取会按新的类型解析重新落库。
@@ -353,6 +365,71 @@ func (l *Log) SetReadOnly(id string, v bool) {
 		return
 	}
 	r.ReadOnly = v
+	l.mu.Unlock()
+	l.save()
+}
+
+// Mode 返回群级三态；空表示还没单独设过，沿用全局旧配置。
+func (l *Log) Mode(id string) string {
+	if l == nil || id == "" {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.rooms[id]
+	if r == nil {
+		return ""
+	}
+	return r.Mode
+}
+
+// SetMode 记下群级三态；只接受 off / mention / active。
+func (l *Log) SetMode(id, mode string) {
+	if l == nil || id == "" {
+		return
+	}
+	switch mode {
+	case modeOff, modeMention, modeActive:
+	default:
+		return
+	}
+	l.mu.Lock()
+	r := l.room(id)
+	if r.Mode == mode {
+		l.mu.Unlock()
+		return
+	}
+	r.Mode = mode
+	l.mu.Unlock()
+	l.save()
+}
+
+// MuteUntil 返回静音截止时间（Unix 秒）；0 表示未静音。
+func (l *Log) MuteUntil(id string) int64 {
+	if l == nil || id == "" {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.rooms[id]
+	if r == nil {
+		return 0
+	}
+	return r.MuteUntil
+}
+
+// SetMuteUntil 记下静音截止时间；传 0 解除静音。
+func (l *Log) SetMuteUntil(id string, until int64) {
+	if l == nil || id == "" {
+		return
+	}
+	l.mu.Lock()
+	r := l.room(id)
+	if r.MuteUntil == until {
+		l.mu.Unlock()
+		return
+	}
+	r.MuteUntil = until
 	l.mu.Unlock()
 	l.save()
 }
@@ -530,7 +607,7 @@ func (l *Log) save() {
 		if emptyRoom(r.Name, len(r.Lines)) {
 			continue
 		}
-		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, ReadOnly: r.ReadOnly, Messages: append([]Line(nil), r.Lines...)})
+		rooms = append(rooms, Room{ID: id, Name: r.Name, Kind: r.Kind, AgentID: r.AgentID, BotID: r.BotID, ReadOnly: r.ReadOnly, Mode: r.Mode, MuteUntil: r.MuteUntil, Messages: append([]Line(nil), r.Lines...)})
 	}
 	l.mu.Unlock()
 	if path == "" {

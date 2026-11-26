@@ -15,6 +15,7 @@ func TestPromptStoresImage(t *testing.T) {
 	img := filepath.Join(dir, "images")
 	store := filepath.Join(dir, "agents.json")
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	t.Cleanup(m.drainTest)
 	m.SetImageDir(img)
 	if err := m.SetStore(store); err != nil {
 		t.Fatal(err)
@@ -77,6 +78,7 @@ func TestPromptStoresImage(t *testing.T) {
 
 func TestPromptSendsImageWithoutNameGate(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
+	t.Cleanup(m.drainTest)
 	m.SetImageDir(t.TempDir())
 	a := m.Create("", "甲", "后端")
 	a.Backend = "mock"

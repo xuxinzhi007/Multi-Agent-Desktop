@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"multi-agent-desktop/internal/llm"
@@ -172,6 +173,13 @@ type Event struct {
 	CtxLimit  int `json:"ctxLimit,omitempty"`
 }
 
+// StatusCancelled 是 loop 内部的结局标记：调用被用户插话打断、没有完成结果。
+//
+// internal/tool 的 Status 枚举不由 loop 修改；tool.Status 本质是字符串，这里用
+// 自定义字符串值表达。tool.end 事件的 Status 字段、回填消息里的 status 标签
+// 都取同一个常量，UI 与模型上下文看到的都是 "cancelled"，不是 error/timeout。
+const StatusCancelled tool.Status = "cancelled"
+
 // Runner 执行循环。只有一个公开方法 —— 所有治理逻辑在内部。
 type Runner struct {
 	Model   Model
@@ -185,6 +193,11 @@ type Runner struct {
 	Sync func([]llm.Message)
 	// Steer 在每次问模型之前取出后到的用户消息，插进这一轮，而不是等整轮结束。
 	Steer func() []llm.Message
+	// SteerCh 是插话到达的通知通道：只发信号，消息内容仍由 Steer() 取出。
+	// 非 nil 时，工具执行期间收到信号会立即取消本轮在跑的调用（标 cancelled）、
+	// 跳过尚未派发的剩余调用，再带着新消息进入下一轮 —— 是「接管并继续」，
+	// 不终止整次运行。nil 时保持旧的两个固定点轮询行为，既有调用方不受影响。
+	SteerCh <-chan struct{}
 	// Summarize 在压缩要丢历史时，用模型把那段收成结构化摘要。
 	// 为 nil 时退回本地截断（会丢信息）。参照 pi：压缩是一次真实模型调用。
 	Summarize func(dropped []llm.Message, previous string, budget int) string
@@ -386,13 +399,11 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			return st
 		}
 
-		// 用户在这轮生成期间插了话：这批工具先不做，下一轮带着新说明再决定。
-		if r.Steer != nil {
+		// 用户在模型生成期间插了话（仅轮询路径保留这个固定点）：这批调用先不派发，
+		// 下一轮带着新说明再决定。未派发的调用不回填任何消息 —— 不伪造成功，也不
+		// 伪造失败。推送路径下插话由 SteerCh 在工具执行期间直接接管，不走这里。
+		if r.SteerCh == nil && r.Steer != nil {
 			if extra := r.Steer(); len(extra) > 0 {
-				for _, c := range turn.Calls {
-					res := tool.Fail("这步先不做：用户插了一句，先看新的说明。")
-					st.Messages = append(st.Messages, toolMessage(c, res, nil))
-				}
 				st.Messages = append(st.Messages, extra...)
 				r.checkpoint(runCtx, st)
 				continue
@@ -401,7 +412,42 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		// ── 7. 执行工具
 		st.Phase = PhaseActing
-		outcomes := r.runCalls(runCtx, st, turn.Calls)
+
+		// 插话接管用的本轮工具上下文：信号到达只取消本轮在跑的调用，不取消 runCtx ——
+		// 下一轮还要继续。整跑停止仍由 Stop 走 runCtx，两条路径互不干扰。
+		toolCtx, toolCancel := context.WithCancel(runCtx)
+		defer toolCancel()
+		var steered atomic.Bool
+		if r.SteerCh != nil {
+			// 排空上一轮遗留的信号：消息已在轮首由 Steer() 取走，残留信号不该误杀这一批。
+			select {
+			case <-r.SteerCh:
+			default:
+			}
+			go func() {
+				select {
+				case <-r.SteerCh:
+					steered.Store(true)
+					toolCancel()
+				case <-toolCtx.Done():
+				}
+			}()
+		}
+
+		outcomes := r.runCalls(toolCtx, st, turn.Calls, &steered)
+		toolCancel()
+
+		// 插话到达：取新消息进历史，跳过本轮打转判定，直接进入下一轮。
+		// 已完成的工具结果已在上面的回填阶段原样保留；未派发的调用不写历史。
+		if steered.Load() {
+			if r.Steer != nil {
+				if extra := r.Steer(); len(extra) > 0 {
+					st.Messages = append(st.Messages, extra...)
+				}
+			}
+			r.checkpoint(runCtx, st)
+			continue
+		}
 
 		anySuccess := false
 		allBadArgs := len(turn.Calls) > 0
@@ -557,7 +603,7 @@ type callOutcome struct {
 //   - tool.end 按 Calls 原序在整批完成后发出，不按完成时间乱序；
 //   - st.Messages 的 tool 消息按 Calls 原序回填；SaveImage / keepLatestImage
 //     这类有副作用的处理只在串行回填阶段按序执行，不放进并发段。
-func (r *Runner) runCalls(ctx context.Context, st *State, calls []tool.Call) []callOutcome {
+func (r *Runner) runCalls(ctx context.Context, st *State, calls []tool.Call, steered *atomic.Bool) []callOutcome {
 	out := make([]callOutcome, len(calls))
 
 	type group struct {
@@ -588,20 +634,20 @@ func (r *Runner) runCalls(ctx context.Context, st *State, calls []tool.Call) []c
 			break
 		}
 		if g.unsafe >= 0 {
-			out[g.unsafe] = r.runSerialCall(ctx, st, calls[g.unsafe])
+			out[g.unsafe] = r.runSerialCall(ctx, st, calls[g.unsafe], steered)
 			continue
 		}
-		r.runSafeBatch(ctx, st, calls, g.safe, out)
+		r.runSafeBatch(ctx, st, calls, g.safe, out, steered)
 	}
 	return out
 }
 
 // runSerialCall 执行一条必须独占串行的调用（写操作、verify、web、未标记的新工具）。
-func (r *Runner) runSerialCall(ctx context.Context, st *State, c tool.Call) callOutcome {
+func (r *Runner) runSerialCall(ctx context.Context, st *State, c tool.Call, steered *atomic.Bool) callOutcome {
 	st.Budget.UsedToolCalls++
 	r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c), Call: &c})
 
-	res := r.invokeOne(ctx, c)
+	res := r.classifySteered(steered, r.invokeOne(ctx, c))
 
 	r.backfillTool(st, c, res)
 	call := c
@@ -613,7 +659,7 @@ func (r *Runner) runSerialCall(ctx context.Context, st *State, c tool.Call) call
 }
 
 // runSafeBatch 并发执行一段连续的安全调用，结果按 Calls 原序写回 out。
-func (r *Runner) runSafeBatch(ctx context.Context, st *State, calls []tool.Call, idx []int, out []callOutcome) {
+func (r *Runner) runSafeBatch(ctx context.Context, st *State, calls []tool.Call, idx []int, out []callOutcome, steered *atomic.Bool) {
 	// 先按原序发 tool.start、记预算；取消时未派发的调用不计数、不发事件。
 	active := make([]int, 0, len(idx))
 	for _, i := range idx {
@@ -651,6 +697,7 @@ func (r *Runner) runSafeBatch(ctx context.Context, st *State, calls []tool.Call,
 
 	// 串行回填：消息顺序、图片落盘与 tool.end 事件都按 Calls 原序。
 	for k, i := range active {
+		results[k] = r.classifySteered(steered, results[k])
 		r.backfillTool(st, calls[i], results[k])
 		call := calls[i]
 		r.emit(Event{
@@ -668,6 +715,22 @@ func (r *Runner) invokeOne(ctx context.Context, c tool.Call) tool.Result {
 		return r.Tools.Invoke(ctx, c)
 	}
 	return tool.Fail("no tools registered")
+}
+
+// classifySteered 把插话打断的在跑调用改写为 loop 内部 cancelled：
+// 不借用 error/timeout 语义，也不编造失败原因。已成功的结果原样保留。
+// steered 为 nil（未设推送入口）时不动任何结果。
+func (r *Runner) classifySteered(steered *atomic.Bool, res tool.Result) tool.Result {
+	if steered == nil || !steered.Load() {
+		return res
+	}
+	switch res.Status {
+	case tool.StatusOK, tool.StatusTruncated:
+		return res
+	}
+	res.Status = StatusCancelled
+	res.Content = "调用被用户插话打断，没有完成结果。"
+	return res
 }
 
 // backfillTool 把结果写进消息历史。SaveImage 与 keepLatestImage 都有副作用/

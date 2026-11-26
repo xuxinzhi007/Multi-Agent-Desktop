@@ -28,6 +28,8 @@ type Turn struct {
 	// Action 非空时这是卡片按钮，不是一条新消息。
 	Action   string
 	ActionID string
+	// Requeued 为真时这是限速延后重新入队的消息，gate 不再按 message_id 去重。
+	Requeued bool
 }
 
 // Who 是这条消息里被 @ 的人。
@@ -62,7 +64,8 @@ type Gate struct {
 // Decide 放行私聊和群聊文本。其它会话类型丢掉。非文本回一句说明。
 func (g *Gate) Decide(t Turn) Decision {
 	// 飞书超时会换一个 event_id 重推同一条消息。去重要用 message_id。
-	if g.seen(t.EventID) || g.seen(messageKey(t.MessageID)) {
+	// 限速延后重入队的消息已经记过一次，这里跳过，避免被自己的去重丢掉。
+	if !t.Requeued && (g.seen(t.EventID) || g.seen(messageKey(t.MessageID))) {
 		return Decision{}
 	}
 	if t.ChatType != "p2p" && t.ChatType != "group" {
@@ -83,6 +86,16 @@ func messageKey(id string) string {
 		return ""
 	}
 	return "m:" + id
+}
+
+// Forget 去掉一条消息的去重记录。重试按钮把原始输入重新入队时用，
+// 否则 gate 会把它当成已处理过的重复事件丢掉。
+func (g *Gate) Forget(eventID, messageID string) {
+	if g.set == nil {
+		return
+	}
+	delete(g.set, eventID)
+	delete(g.set, messageKey(messageID))
 }
 
 func (g *Gate) seen(key string) bool {

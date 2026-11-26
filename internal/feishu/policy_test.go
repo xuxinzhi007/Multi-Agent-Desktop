@@ -36,6 +36,7 @@ func TestCatchUpOnlySyncsBotChatsAndAllowed(t *testing.T) {
 		Reply: func(context.Context, string, string, string, string) (string, error) { return "om_r", nil },
 	})
 	s.cfg = Config{AppID: "cli", AppSecret: "sec", AgentID: "a1", AllowChats: []string{"oc_manual"}}
+	s.netDisabled = false
 	s.log = NewLog()
 	s.log.Kind("oc_bot", "group")
 	s.log.Name("oc_bot", "机器人群")

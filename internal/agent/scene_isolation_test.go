@@ -69,7 +69,7 @@ func containsMsg(turns [][]llm.Message, needle string) bool {
 func TestChannelTurnPromptExcludesPrivateHistory(t *testing.T) {
 	baseURL, seen := captureModel(t)
 	m := NewManager(llm.Config{}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	mustSetStore(t, m, filepath.Join(t.TempDir(), "agents.json"))
 
 	a := m.Create("a1", "甲", "后端")
@@ -128,9 +128,8 @@ func TestChannelTurnPromptExcludesPrivateHistory(t *testing.T) {
 	if !strings.Contains(joined.String(), "之前群里说过的一句") {
 		t.Fatal("群回合 prompt 里没有频道 transcript")
 	}
-	// 等异步落盘结束，否则 t.TempDir 清理会撞上仍在写的文件。
-	m.waitSaves()
-	time.Sleep(100 * time.Millisecond)
+	// 排干 worker 与落盘协程，避免用例返回后后台协程还在读请求内存。
+	m.drainTest()
 }
 
 // 检查点键必须区分场景：群回合不能把带群上文的检查点写到私聊的键上。
@@ -138,7 +137,7 @@ func TestCheckpointKeySeparatesScenes(t *testing.T) {
 	baseURL, _ := captureModel(t)
 	dir := t.TempDir()
 	m := NewManager(llm.Config{}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	mustSetStore(t, m, filepath.Join(dir, "agents.json"))
 
 	a := m.Create("a1", "甲", "后端")
@@ -176,8 +175,8 @@ func TestCheckpointKeySeparatesScenes(t *testing.T) {
 			t.Fatalf("群回合把群上文写进了私聊检查点：\n%s", raw)
 		}
 	}
-	m.waitSaves()
-	time.Sleep(100 * time.Millisecond)
+	// 排干 worker 与落盘协程，避免用例返回后后台协程还在读请求内存。
+	m.drainTest()
 }
 func fileExists(p string) bool {
 	_, err := os.Stat(p)

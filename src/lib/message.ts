@@ -1,3 +1,5 @@
+import type { ChannelMessage, Message } from '../mygo'
+
 /**
  * 消息文本的内部标记清理。
  *
@@ -61,6 +63,45 @@ export function parseMessage(content: string): ParsedMessage {
 
   const isRouted = !!(from || to)
   return { body, from, to, isRouted }
+}
+
+/**
+ * 消息时间戳归并排序（u1）。
+ *
+ * 口径：
+ *  - 会话消息用 `timestamp`（Unix 秒），频道消息用 `at`（Unix 秒）；
+ *  - 服务端消息自带时间戳以它为准，本地新发的用发送时刻；
+ *  - 按时间升序，**同时间戳保持到达顺序**（稳定排序，tiebreak 用原始下标）；
+ *  - 时间戳缺失 / 为 0 的消息一律排最前：视为更早的历史或 system 占位，
+ *    不参与时间比较；同批内仍保持到达顺序。
+ *
+ * 这是消息层唯一的排序入口：useBackend 在每个消息更新点（事件回推、历史拉取、
+ * 补拉、乐观插入）统一走这里渲染；组件层不要再各排各的。
+ */
+function stableSortBy<T>(list: T[], key: (m: T) => number | undefined): T[] {
+  const norm = (t: number | undefined): number => {
+    const n = Number(t)
+    return Number.isFinite(n) && n > 0 ? n : -Infinity
+  }
+  return list
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => {
+      const ta = norm(key(a.m))
+      const tb = norm(key(b.m))
+      if (ta !== tb) return ta - tb
+      return a.i - b.i
+    })
+    .map((x) => x.m)
+}
+
+/** 会话消息按 timestamp 稳定排序。 */
+export function sortAgentMessages(list: Message[]): Message[] {
+  return stableSortBy(list, (m) => m.timestamp)
+}
+
+/** 频道消息按 at 稳定排序。 */
+export function sortChannelMessages(list: ChannelMessage[]): ChannelMessage[] {
+  return stableSortBy(list, (m) => m.at)
 }
 
 /** bodyOf 只取正文，用于列表预览。 */

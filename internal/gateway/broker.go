@@ -29,7 +29,13 @@ type Broker struct {
 	subs   map[uint64]*subscription
 	nextID atomic.Uint64
 	seq    atomic.Uint64
+	// ring 是最近 replayLimit 条事件，供 SSE 断线重连按 Last-Event-ID 补发。
+	// 不做持久化：重连窗口通常只有几秒，内存足够；超窗口由前端快照对账兜住。
+	ring []Event
 }
+
+// replayLimit 是补发缓冲的条数。256 条对「几秒断线」足够，且内存可忽略。
+const replayLimit = 256
 
 // NewBroker 造一个空总线。
 func NewBroker() *Broker {
@@ -59,6 +65,11 @@ func (b *Broker) Publish(event string, data any) {
 	for _, sub := range b.subs {
 		subs = append(subs, sub)
 	}
+	// 和订阅快照同一把锁写缓冲，避免「先发后记」的窗口里序列号乱序。
+	b.ring = append(b.ring, ev)
+	if len(b.ring) > replayLimit {
+		b.ring = b.ring[len(b.ring)-replayLimit:]
+	}
 	b.mu.Unlock()
 
 	for _, sub := range subs {
@@ -72,6 +83,15 @@ func (b *Broker) Publish(event string, data any) {
 	}
 }
 
+// LastSeq 返回已发布的最后一个事件号（0 表示还没有事件）。
+// 测试与诊断用：`/api/events?last=N` 里的 N 就是这个值。
+func (b *Broker) LastSeq() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.seq.Load()
+}
+
 // Subscribe 订阅事件。返回的通道带缓冲；取消订阅必须调 Unsubscribe。
 // 业务通道在生命周期内永不关闭，消费方按 context 或 done 信号退出。
 func (b *Broker) Subscribe() (uint64, <-chan Event) {
@@ -81,6 +101,26 @@ func (b *Broker) Subscribe() (uint64, <-chan Event) {
 	b.subs[id] = sub
 	b.mu.Unlock()
 	return id, sub.ch
+}
+
+// SubscribeSince 订阅事件，并把 since 之后的缓冲事件一并返回（供 SSE 断线补发）。
+//
+// since 为 0 表示新连接，不补发。补发只覆盖缓冲窗口内的部分；
+// 更早的缺口由前端在 gateway.connected 时做一次快照对账（见 useBackend 的 resync）。
+func (b *Broker) SubscribeSince(since uint64) (uint64, <-chan Event, []Event) {
+	id, ch := b.Subscribe()
+	if since == 0 {
+		return id, ch, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var backlog []Event
+	for _, ev := range b.ring {
+		if ev.Seq > since {
+			backlog = append(backlog, ev)
+		}
+	}
+	return id, ch, backlog
 }
 
 // Unsubscribe 移除一个订阅并关闭其 done 信号。幂等；业务通道不关闭。

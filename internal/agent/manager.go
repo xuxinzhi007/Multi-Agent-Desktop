@@ -14,7 +14,9 @@ import (
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/memory"
+	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/workdir"
 	"multi-agent-desktop/internal/worktree"
 )
@@ -53,8 +55,9 @@ type Agent struct {
 	// 取值："" | starting | running | idle | error；失败原因见 runtimeError。
 	runtimeState string `json:"-"`
 	runtimeError string `json:"-"`
-	// ExtraDirs 是附加目录：文件工具能读写它们，bash 的 cwd 仍是 WorkDir。
-	// 用来「改这个仓库，同时读隔壁那个仓库」，不必换会话或搬目录。
+	// ExtraDirs 是主目录之外声明的工作区根。JSON 键保留 extraDirs 兼容旧存档：
+	// 旧数据只带这个字段也能直接读，语义统一为「主目录 + 已声明的附加根」。
+	// 文件工具、跨根检索覆盖整组根；bash 默认在主目录跑，可用 cwd 切到某个已声明根内。
 	ExtraDirs []string    `json:"extraDirs,omitempty"`
 	LLMCfg    *llm.Config `json:"llmCfg,omitempty"`    // 会话级模型配置，nil 则回落 Manager.llmCfg
 	Knowledge []string    `json:"knowledge,omitempty"` // 附加的知识笔记 ID 列表
@@ -110,9 +113,13 @@ type Agent struct {
 	mu     sync.Mutex         `json:"-"`
 	cancel context.CancelFunc `json:"-"`
 	queue  chan PromptRequest `json:"-"` // 待处理消息队列
-	folded []PromptRequest    `json:"-"` // 已插进当前这一轮、等它结束再回复的消息
-	later  []PromptRequest    `json:"-"` // 群消息，等当前这一轮结束再单独跑
-	done   chan struct{}      `json:"-"` // worker 退出信号
+	// steerCh 是本轮进程内 loop 的插话通知通道：入队新消息时非阻塞发一个信号，
+	// 让正在跑的工具立刻被接管。仅私有 loop 回合持有，run 结束置 nil；
+	// 群回合、ACP/CLI 运行时与临时子会话都不挂。不落盘、重启后不保留。
+	steerCh chan struct{}   `json:"-"`
+	folded  []PromptRequest `json:"-"` // 已插进当前这一轮、等它结束再回复的消息
+	later   []PromptRequest `json:"-"` // 群消息，等当前这一轮结束再单独跑
+	done    chan struct{}   `json:"-"` // worker 退出信号
 	// testHookPanic 仅测试用：在 execute 入口注入 panic，
 	// 验证 worker 的 recover 真的让 goroutine 活下来。
 	testHookPanic func()
@@ -147,11 +154,11 @@ type Manager struct {
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
 	// memory 是跨会话长期记忆库；nil 表示未启用（测试/无数据目录）。
-	memory    *memory.Store
-	skills    SkillStore
-	feed      Feed
-	channels  ChannelRoster
-	feishuOn  bool
+	memory   *memory.Store
+	skills   SkillStore
+	feed     Feed
+	channels ChannelRoster
+	feishuOn bool
 	// approvals 是写操作审批中心；nil 表示不审批（测试/无界面）。
 	approvals *approval.Center
 	// audit 记录有副作用的工具调用；nil 表示不记录。
@@ -164,12 +171,19 @@ type Manager struct {
 	// 每个还各开一棵工作树，不限量会把用户机器拖死。nil 表示不限（测试）。
 	running chan struct{}
 
+	// testModel / testTools 仅测试用：替换进程内 loop 的模型调用器并追加测试工具。
+	// 生产路径恒为 nil，外部不得设置。
+	testModel loop.Model
+	testTools []tool.Tool
+
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
 	saveMu   sync.Mutex
 	assistMu sync.Mutex
 	// saveWG 跟踪异步 Save，测试可用 waitSaves 等待落盘结束。
 	saveWG sync.WaitGroup
+	// workerWG 跟踪每个 agent 的 workerLoop 协程；WaitWorkers 供退出/测试排干。
+	workerWG sync.WaitGroup
 }
 
 func NewManager(cfg llm.Config, emit Emitter) *Manager {
@@ -277,6 +291,9 @@ func (m *Manager) ImageDir() string {
 
 // SetStore 设置持久化文件路径，并尝试加载。
 func (m *Manager) SetStore(path string) error {
+	// 换路径前排干在飞的旧路径写：pending 协程必须在换路径前落定，
+	// 否则旧快照会按新路径再写一遍（或把旧目录的 .tmp 留到清理之后）。
+	m.saveWG.Wait()
 	m.mu.Lock()
 	m.store = path
 	m.mu.Unlock()
@@ -284,8 +301,21 @@ func (m *Manager) SetStore(path string) error {
 }
 
 // Save 把所有 agent 序列化到磁盘。
+//
+// 同步语义：返回时，本次调用之前触发的所有异步落盘（goSave）都已落定，
+// 磁盘上的文件是最终快照；Save 自身不计入 saveWG，不会自等待死锁。
+// Save 返回之后新触发的 goSave 属于后续变更，不在本契约内。
 // 串行写 + 写临时文件再 rename，保证读者永远看到完整 JSON。
 func (m *Manager) Save() error {
+	// 先排干在飞的异步快照：它们各自是一份当时的状态，必须在本次同步写之前落定，
+	// 否则同步写完后又会被旧快照覆盖上来。
+	m.saveWG.Wait()
+	return m.saveNow()
+}
+
+// saveNow 持锁写盘，供同步 Save 与异步 goSave 复用。
+// 异步协程走这里、不走 Save，避免在 saveWG 里等待自己造成死锁。
+func (m *Manager) saveNow() error {
 	m.mu.RLock()
 	store := m.store
 	m.mu.RUnlock()
@@ -349,12 +379,31 @@ func (m *Manager) goSave() {
 	m.saveWG.Add(1)
 	go func() {
 		defer m.saveWG.Done()
-		_ = m.Save()
+		_ = m.saveNow()
 	}()
 }
 
 // waitSaves 阻塞直到所有异步落盘结束（测试用）。
 func (m *Manager) waitSaves() { m.saveWG.Wait() }
+
+// WaitWorkers 阻塞直到所有 workerLoop 协程退出。
+// 前提：先 Delete（关闭各 agent 的 done）或 Shutdown 收尾；Stop/StopAll 只取消当前执行、
+// 不终止 worker，单独调用本方法不会返回。
+func (m *Manager) WaitWorkers() { m.workerWG.Wait() }
+
+// drainTest 停掉并删掉全部 agent，再排干 worker 协程与落盘协程。测试 cleanup 用：
+// 返回后没有后台 goroutine 再读写本 Manager 的请求/会话内存。
+func (m *Manager) drainTest() {
+	for _, a := range m.List() {
+		m.remove(a.ID, true)
+	}
+	m.WaitWorkers()
+	m.waitSaves()
+}
+
+// WaitSaves 阻塞直到所有在飞的异步落盘结束。进程退出、测试清理时调用：
+// 返回后不会再有后台协程往 store 路径写文件。
+func (m *Manager) WaitSaves() { m.saveWG.Wait() }
 
 // Shutdown 停掉进行中的请求并等落盘结束。进程收到退出信号后调用。
 func (m *Manager) Shutdown() {
@@ -488,6 +537,7 @@ func (m *Manager) Load() error {
 		}
 		m.agents[a.ID] = a
 		m.order = append(m.order, a.ID)
+		m.workerWG.Add(1)
 		go a.workerLoop(m)
 	}
 	return nil
@@ -587,10 +637,10 @@ func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	return nil
 }
 
-// SetAgentExtraDirs 换这个会话的附加目录。
+// SetAgentExtraDirs 换这个会话主目录之外声明的工作区根。
 //
-// 附加目录只给文件读写，不改 shell 的 cwd——命令在哪跑必须是确定的。
 // 校验和主目录一样严：不能是主目录/桌面/文稿/下载，必须真实存在。
+// 这些根同时开放给文件读写、跨根检索和 bash 的可选 cwd。
 func (m *Manager) SetAgentExtraDirs(id string, dirs []string) error {
 	a, ok := m.Get(id)
 	if !ok {
@@ -598,7 +648,7 @@ func (m *Manager) SetAgentExtraDirs(id string, dirs []string) error {
 	}
 	main := a.EffectiveWorkDir(m)
 	if main == "" {
-		return fmt.Errorf("先给这个会话选一个主工作目录，再加附加目录")
+		return fmt.Errorf("先给这个会话选一个主工作目录，再加工作区根")
 	}
 	roots, err := workdir.NewRoots(main, dirs...)
 	if err != nil {
@@ -613,11 +663,25 @@ func (m *Manager) SetAgentExtraDirs(id string, dirs []string) error {
 	return nil
 }
 
-// EffectiveExtraDirs 是这个会话当前的附加目录。
+// EffectiveExtraDirs 是这个会话主目录之外声明的工作区根。
 func (a *Agent) EffectiveExtraDirs() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]string(nil), a.ExtraDirs...)
+}
+
+// WorkspaceRoots 返回这个会话当前的工作区根集合（主目录 + 附加根）。
+// 主目录为空、或目录非法时退化为只含主目录的集合，调用方拿到的不会是碎的半组。
+func (a *Agent) WorkspaceRoots(m *Manager) workdir.Roots {
+	main := a.EffectiveWorkDir(m)
+	if main == "" {
+		return nil
+	}
+	roots, err := workdir.NewRoots(main, a.EffectiveExtraDirs()...)
+	if err != nil {
+		return workdir.Roots{main}
+	}
+	return roots
 }
 
 // SetAgentLLM 设置会话级模型配置（不影响其他会话）。
@@ -798,10 +862,47 @@ func (m *Manager) createWith(id, name, role, parentID string, inheritLLM bool) *
 	m.order = append(m.order, id)
 
 	// 启动 worker goroutine 消费队列
+	m.workerWG.Add(1)
 	go a.workerLoop(m)
 
 	go m.emit("agent.created", a.viewMap())
 	m.goSave() // 异步保存
+	return a
+}
+
+// newTransientAgent 造一个不进会话名单的临时 Agent（read 类子任务专用）。
+//
+// 与 createWith 的区别，逐条对应「不落常驻会话」的要求：
+//   - 不写 m.agents / m.order，Save 序列化时自然不会带上它；
+//   - 不起 workerLoop，没有常驻消费 goroutine；
+//   - 不发 agent.created，前端侧栏看不到；
+//   - 不触发 goSave，不往 agents.json 写任何记录。
+//
+// 对象只活在本次派活的 goroutine 里，runTransientRead 结束后即可被 GC 回收。
+func (m *Manager) newTransientAgent(parent *Agent, name, role, workDir string, extra []string) *Agent {
+	cfg := parent.EffectiveLLM(m)
+	if cfg.Provider == "" {
+		cfg = m.LLMConfig()
+	}
+	a := &Agent{
+		ID:        uniqueAgentID(time.Now().UnixNano(), m.agents),
+		Name:      name,
+		Role:      role,
+		Color:     palette[0],
+		Status:    StatusRunning,
+		CreatedAt: time.Now().Unix(),
+		Backend:   supervisorChildBackend,
+		Depth:     parent.Depth + 1,
+		ParentID:  parent.ID,
+		WorkDir:   workDir,
+		ExtraDirs: append([]string(nil), extra...),
+		queue:     make(chan PromptRequest, 32),
+		done:      make(chan struct{}),
+	}
+	if cfg.Provider != "" {
+		copy := cfg
+		a.LLMCfg = &copy
+	}
 	return a
 }
 
@@ -1356,6 +1457,7 @@ func (m *Manager) endAsk(from string) {
 //
 // 宁可让这一条消息失败并报错，也不能让 worker 消失。
 func (a *Agent) workerLoop(m *Manager) {
+	defer m.workerWG.Done()
 	defer a.abandon()
 	for {
 		select {
@@ -1786,6 +1888,13 @@ func (a *Agent) enqueue(req PromptRequest) error {
 	select {
 	case a.queue <- req:
 		a.QueueLen = len(a.queue)
+		// 非阻塞通知 loop：正在跑的话立刻接管；通道没挂（空闲/群回合/非 loop）时静默跳过。
+		if a.steerCh != nil {
+			select {
+			case a.steerCh <- struct{}{}:
+			default:
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("queue full")
@@ -2089,13 +2198,17 @@ func (m *Manager) RememberTool(id, toolName, rootKey, sig string) {
 }
 
 // syncApprovalRoots 把会话的工作区根同步给审批中心；没装审批中心时是空操作。
-// auto 档判断「文件是否在工作区内」靠的就是这份根目录。
+// auto 档判断「文件是否在工作区内」靠的就是这份根目录。根集合与工具层同源。
 func (m *Manager) syncApprovalRoots(a *Agent) {
 	c := m.Approvals()
 	if c == nil {
 		return
 	}
-	c.SetRoots(a.ID, a.EffectiveWorkDir(m), a.EffectiveExtraDirs())
+	roots := a.WorkspaceRoots(m)
+	if len(roots) == 0 {
+		return
+	}
+	c.SetRoots(a.ID, roots.Main(), roots[1:])
 }
 
 // RestorePermissions 把落盘的权限档和放行清单装回审批中心。

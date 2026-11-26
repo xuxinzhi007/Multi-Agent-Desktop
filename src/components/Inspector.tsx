@@ -2,7 +2,7 @@ export type ToolCall = {
   id: string
   tool: string
   target: string
-  status: 'running' | 'ok' | 'error' | 'waiting'
+  status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'
   detail?: string
   at: number
 }
@@ -12,6 +12,8 @@ const TOOL_META = {
   ok: { icon: '✓', color: 'var(--success)', label: '完成' },
   error: { icon: '✕', color: 'var(--danger)', label: '失败' },
   waiting: { icon: '!', color: 'var(--accent-primary)', label: '待批准' },
+  // 被用户插话打断：不是失败，中性灰展示，不进错误统计。
+  cancelled: { icon: '⊘', color: 'var(--text-tertiary)', label: '已打断' },
 } as const
 
 type Tab = 'tools' | 'knowledge' | 'caps'
@@ -166,12 +168,14 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
     <div style={{ padding: 'var(--space-2)' }}>
       {tools.map((t) => {
         const meta = TOOL_META[t.status]
+        const cancelled = t.status === 'cancelled'
         return (
           <div
             key={t.id}
+            data-tool-status={t.status}
             style={{
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border-subtle)',
+              background: cancelled ? 'var(--bg-glass)' : 'var(--bg-surface)',
+              border: cancelled ? '1px dashed var(--border-subtle)' : '1px solid var(--border-subtle)',
               borderRadius: 'var(--radius-md)',
               padding: '8px 10px',
               marginBottom: 'var(--space-2)',

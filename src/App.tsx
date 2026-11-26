@@ -175,6 +175,8 @@ export default function App() {
           setView('chat')
           // 和「对话」tab 一致：进对话就展开检查器，别让用户再点一次
           setInspectorOpen(true)
+          // 进飞书会话时静默补一页历史；失败不打扰，「从飞书拉取」按钮可手动重试。
+          if (kind === 'feishu') API.syncFeishuChat(id).catch(() => {})
         }}
         view={view}
         onViewChange={(v) => {
@@ -283,7 +285,6 @@ export default function App() {
           steps={activeAgent ? s.tools.filter((t) => t.id === activeAgent.id).slice(-8) : []}
           reasoning={activeAgent ? s.reasoning[activeAgent.id] : ''}
           pace={activeAgent ? s.pace?.[activeAgent.id] : undefined}
-          queued={activeAgent ? s.outbox[activeAgent.id] : undefined}
           onRoute={(targetName, text) => {
             if (!activeAgent) return
             const target = s.agents.find((a) => a.name === targetName || a.id === targetName)

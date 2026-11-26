@@ -23,26 +23,46 @@ type capturedEvent struct {
 	payload map[string]any
 }
 
-func newCollectingManager() (*Manager, *[]capturedEvent) {
-	var mu sync.Mutex
-	var events []capturedEvent
-	m := NewManager(llm.Config{Provider: "mock"}, func(event string, data any) {
-		payload, _ := data.(map[string]any)
-		mu.Lock()
-		events = append(events, capturedEvent{name: event, payload: payload})
-		mu.Unlock()
-	})
-	return m, &events
+// eventCollector 收后台事件：append 与读取都在 mu 内完成，named/snapshot 返回拷贝，
+// 不把内部切片引用交出去——manager 后台 goroutine 仍在 emit 时，测试侧读切片不加锁会撞车。
+type eventCollector struct {
+	mu     sync.Mutex
+	events []capturedEvent
 }
 
-func eventsNamed(events *[]capturedEvent, name string) []capturedEvent {
+func (c *eventCollector) hook() func(string, any) {
+	return func(event string, data any) {
+		payload, _ := data.(map[string]any)
+		c.mu.Lock()
+		c.events = append(c.events, capturedEvent{name: event, payload: payload})
+		c.mu.Unlock()
+	}
+}
+
+// named 按名字取事件，返回独立拷贝。
+func (c *eventCollector) named(name string) []capturedEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var out []capturedEvent
-	for _, e := range *events {
+	for _, e := range c.events {
 		if e.name == name {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// snapshot 返回全部事件的独立拷贝。
+func (c *eventCollector) snapshot() []capturedEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]capturedEvent(nil), c.events...)
+}
+
+func newCollectingManager() (*Manager, *eventCollector) {
+	c := &eventCollector{}
+	m := NewManager(llm.Config{Provider: "mock"}, c.hook())
+	return m, c
 }
 
 // fakeSession 是测试用的内存运行时会话，实现 rt.Session。
@@ -119,8 +139,8 @@ func jsonReply(s string) string {
 // ① native 会话经 rt.Native 跑完一轮：收到文本 delta 和最终消息，状态回 idle。
 func TestNativeRuntimeRoundThroughProtocol(t *testing.T) {
 	baseURL := fakeModelServer(t, "收到")
-	m, events := newCollectingManager()
-	t.Cleanup(m.waitSaves)
+	m, collector := newCollectingManager()
+	t.Cleanup(m.drainTest)
 
 	a := m.Create("a1", "甲", "后端")
 	if err := m.SetAgentWorkDir(a.ID, workDirForTest(t)); err != nil {
@@ -134,7 +154,7 @@ func TestNativeRuntimeRoundThroughProtocol(t *testing.T) {
 
 	a.executeNativeRuntime(m, context.Background(), "你好", "", "", nil)
 
-	deltas := eventsNamed(events, "agent.delta")
+	deltas := collector.named("agent.delta")
 	if len(deltas) == 0 {
 		t.Fatal("没有收到 agent.delta 事件")
 	}
@@ -146,7 +166,7 @@ func TestNativeRuntimeRoundThroughProtocol(t *testing.T) {
 		t.Errorf("delta 拼接 = %q, 应包含 %q", joined.String(), "收到")
 	}
 
-	msgs := eventsNamed(events, "agent.message")
+	msgs := collector.named("agent.message")
 	var final string
 	for _, mm := range msgs {
 		if msg, ok := mm.payload["message"].(llm.Message); ok && msg.Role == "assistant" {
@@ -167,7 +187,7 @@ func TestNativeRuntimeRoundThroughProtocol(t *testing.T) {
 
 // ② 协议事件翻成旧前端事件：delta / reasoning / 工具开始结束，状态串归并正确。
 func TestRuntimeEventMappingToOldEvents(t *testing.T) {
-	m, events := newCollectingManager()
+	m, collector := newCollectingManager()
 	a := m.Create("a1", "甲", "后端")
 
 	sess := newFakeSession(
@@ -180,14 +200,14 @@ func TestRuntimeEventMappingToOldEvents(t *testing.T) {
 
 	consumeRuntimeEvents(m, a, sess, "", context.Background())
 
-	if d := eventsNamed(events, "agent.delta"); len(d) != 1 || d[0].payload["delta"] != "你好" {
-		t.Errorf("agent.delta = %+v", *events)
+	if d := collector.named("agent.delta"); len(d) != 1 || d[0].payload["delta"] != "你好" {
+		t.Errorf("agent.delta = %+v", collector.snapshot())
 	}
-	if r := eventsNamed(events, "agent.reasoning"); len(r) != 1 || r[0].payload["reasoning"] != "在想" {
-		t.Errorf("agent.reasoning = %+v", *events)
+	if r := collector.named("agent.reasoning"); len(r) != 1 || r[0].payload["reasoning"] != "在想" {
+		t.Errorf("agent.reasoning = %+v", collector.snapshot())
 	}
 
-	starts := eventsNamed(events, "agent.tool")
+	starts := collector.named("agent.tool")
 	var start, end capturedEvent
 	for _, e := range starts {
 		switch e.payload["phase"] {
@@ -214,7 +234,7 @@ func TestRuntimeEventMappingToOldEvents(t *testing.T) {
 
 // ③ 选了 ACP 但没填命令：中文可读错误，运行态记 error，不崩溃。
 func TestACPUnconfiguredCommand(t *testing.T) {
-	m, events := newCollectingManager()
+	m, collector := newCollectingManager()
 	a := m.Create("a1", "甲", "后端")
 	a.Runtime = RuntimeACP
 	a.ACP = nil
@@ -236,7 +256,7 @@ func TestACPUnconfiguredCommand(t *testing.T) {
 	if errText == "" {
 		t.Error("runtimeError 为空，失败原因没落上")
 	}
-	if errs := eventsNamed(events, "agent.error"); len(errs) == 0 {
+	if errs := collector.named("agent.error"); len(errs) == 0 {
 		t.Error("没有发出 agent.error 事件")
 	}
 }
@@ -326,7 +346,7 @@ func TestLegacyAgentsJSONDefaultsNative(t *testing.T) {
 // ⑥ ACP 一轮正常收尾：消息落库、运行态回 idle 并清错误；出错则记 error。
 func TestACPSessionStateTransitions(t *testing.T) {
 	t.Run("正常结束回 idle", func(t *testing.T) {
-		m, events := newCollectingManager()
+		m, collector := newCollectingManager()
 		a := m.Create("a1", "甲", "后端")
 
 		sess := newFakeSession(
@@ -335,7 +355,7 @@ func TestACPSessionStateTransitions(t *testing.T) {
 		)
 		a.runACPSession(m, context.Background(), sess, "")
 
-		msgs := eventsNamed(events, "agent.message")
+		msgs := collector.named("agent.message")
 		var final string
 		for _, mm := range msgs {
 			if msg, ok := mm.payload["message"].(llm.Message); ok && msg.Role == "assistant" {
@@ -356,7 +376,6 @@ func TestACPSessionStateTransitions(t *testing.T) {
 	t.Run("运行失败记 error", func(t *testing.T) {
 		m, _ := newCollectingManager()
 		a := m.Create("a1", "甲", "后端")
-
 		sess := newFakeSession(
 			rt.Event{Kind: rt.KindError, Error: &rt.Failure{Message: "进程炸了"}},
 			rt.Event{Kind: rt.KindTurnFinished, Stop: &rt.Stop{Reason: rt.StopError}},

@@ -33,6 +33,8 @@ type Deps struct {
 	AckText  string
 	// Channels 是网关接管的渠道；空/nil 归一为 [ChannelWeb]。
 	Channels []string
+	// Invoke 是网页端方法入口（/api/rpc）。nil 时该端点返回 NOT_WIRED。
+	Invoke Invoker
 }
 
 // InboundResult 是一次入站处理的同步结论。异步执行的结果通过事件流可见。

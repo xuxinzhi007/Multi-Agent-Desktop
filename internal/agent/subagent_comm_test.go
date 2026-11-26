@@ -14,7 +14,7 @@ import (
 // 创建子 agent 后能正常通信：任务落到对方历史，回复回到调用方。
 func TestSubAgentCreateAndCommunicate(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "主", "统筹")
 	parent.Backend = "mock"
 
@@ -82,7 +82,7 @@ func TestSubAgentCreateAndCommunicate(t *testing.T) {
 // 多个子 agent 并发被问：互不串话，不死锁。
 func TestSubAgentParallelFanOutNoCrossTalk(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "主", "统筹")
 	parent.Backend = "mock"
 
@@ -140,7 +140,7 @@ func TestSubAgentParallelFanOutNoCrossTalk(t *testing.T) {
 // 子会话有上限，但用户自建的会话不占这个名额。
 func TestCreateAgentCapsChildrenNotUserSessions(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "主", "统筹")
 	ctx := context.Background()
 
@@ -161,7 +161,7 @@ func TestCreateAgentCapsChildrenNotUserSessions(t *testing.T) {
 // 名额满且都空闲时，复用而不是失败——「空着的一直空着」就是这么来的。
 func TestCreateAgentReusesIdleChildWhenFull(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "主", "统筹")
 	ctx := context.Background()
 	for i := 0; i < maxChildAgents; i++ {
@@ -183,7 +183,7 @@ func TestCreateAgentReusesIdleChildWhenFull(t *testing.T) {
 // 都在忙时才拒绝，并告诉模型改用 ask_agent。
 func TestCreateAgentFailsWhenAllChildrenBusy(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	parent := m.Create("p", "主", "统筹")
 	ctx := context.Background()
 	for i := 0; i < maxChildAgents; i++ {

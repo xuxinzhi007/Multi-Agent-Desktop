@@ -67,6 +67,43 @@ func TestRootsDedupesAndKeepsMainFirst(t *testing.T) {
 	}
 }
 
+// ResolveDir：第二根内放行、根外拒绝、根内软链指根外拒绝、空值回落主根。
+func TestRootsResolveDirSecondRootAndEscape(t *testing.T) {
+	main := t.TempDir()
+	other := t.TempDir()
+	r, err := NewRoots(main, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dir, err := r.ResolveDir(other); err != nil || dir != other {
+		t.Fatalf("第二根目录应当放行: %q, %v", dir, err)
+	}
+	sub := filepath.Join(main, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if dir, err := r.ResolveDir("sub"); err != nil || dir != sub {
+		t.Fatalf("相对 cwd 应相对主根解析: %q, %v", dir, err)
+	}
+	if dir, err := r.ResolveDir(""); err != nil || dir != main {
+		t.Fatalf("空 cwd 应当回落主根: %q, %v", dir, err)
+	}
+
+	outside := t.TempDir()
+	if _, err := r.ResolveDir(outside); err == nil {
+		t.Fatal("根外目录应当拒绝")
+	}
+
+	link := filepath.Join(main, "link-out")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveDir(link); err == nil {
+		t.Fatal("指向根外的软链目录应当拒绝")
+	}
+}
+
 // 单根时的行为必须和改造前一致，否则是回归。
 func TestSingleRootUnchanged(t *testing.T) {
 	main := t.TempDir()

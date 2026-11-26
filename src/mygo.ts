@@ -171,6 +171,7 @@ export interface Channel {
   speaker?: string;
   owner?: string;
   admins?: string[];
+  historyCursor?: HistoryCursor;
 }
 
 export interface ChannelMessage {
@@ -182,6 +183,7 @@ export interface ChannelMessage {
   at: number;
   kind?: string;
   blocks?: Block[];
+  extId?: string;
   deliveries?: Delivery[];
 }
 
@@ -378,6 +380,11 @@ export interface GatewayStatusView {
   sseSubscribers: number;
 }
 
+export interface HistoryCursor {
+  at?: number;
+  id?: string;
+}
+
 export interface ImageFile {
   mime: string;
   data: string;
@@ -386,6 +393,11 @@ export interface ImageFile {
 export interface ImageIn {
   mime: string;
   data: string;
+}
+
+/** KeepAwakeState 是设置页「保持唤醒」开关的状态。 */
+export interface KeepAwakeState {
+  on: boolean;
 }
 
 export interface Line {
@@ -608,6 +620,8 @@ export interface Room {
   botId?: string;
   botName?: string;
   readOnly?: boolean;
+  mode?: string;
+  muteUntil?: number;
   messages: Line[];
 }
 
@@ -875,6 +889,18 @@ export const API = {
   isAlwaysOnTop(): Promise<boolean> {
     return call("API.IsAlwaysOnTop");
   },
+  /**
+   * KeepAwake 开启「保持唤醒」：阻止系统自动休眠并保持屏幕常亮。
+   * 该能力默认关闭，因为它显著影响电池续航，必须由用户在设置里显式打开。
+   * 幂等：重复调用只保留一个系统级断言，不会叠加。
+   */
+  keepAwake(): Promise<KeepAwakeState> {
+    return call("API.KeepAwake");
+  },
+  /** KeepAwakeStatus 返回开关当前状态，供设置页打开时对齐 UI（不改变任何状态）。 */
+  keepAwakeStatus(): Promise<KeepAwakeState> {
+    return call("API.KeepAwakeStatus");
+  },
   /** KickFromChannel 把一个成员移出群。只有群主和管理能做，判定在 internal/channel。 */
   kickFromChannel(channelId: string, agentId: string, byId: string): Promise<Channel> {
     return call("API.KickFromChannel", channelId, agentId, byId);
@@ -1083,11 +1109,12 @@ export const API = {
     return call("API.SendToChannel", channelId, fromId, fromName, text);
   },
   /**
-   * SetAgentExtraDirs 换这个会话的附加目录。
+   * SetAgentExtraDirs 换这个会话主目录之外声明的工作区根。
    *
-   * 用来「改这个仓库，同时读隔壁那个仓库」：文件工具能读写附加目录，
-   * bash 的 cwd 仍是主工作目录。校验和主目录一样严（不能是主目录/桌面/文稿/下载）。
-   * 附加目录只给文件访问，不从那边加载技能或知识——边界放宽的是文件，不是配置。
+   * 用来「改这个仓库，同时读隔壁那个仓库」：文件工具、跨根检索覆盖这些根，
+   * bash 也可用 cwd 切到其中某个已声明根内。校验和主目录一样严
+   * （不能是主目录/桌面/文稿/下载）。附加根只给文件访问，不从那边加载技能或知识——
+   * 边界放宽的是文件，不是配置。
    */
   setAgentExtraDirs(agentID: string, dirs: string[]): Promise<AgentView> {
     return call("API.SetAgentExtraDirs", agentID, dirs);
@@ -1153,6 +1180,13 @@ export const API = {
     return call("API.SetFeishuRoomAgent", chatID, agentID);
   },
   /**
+   * SetFeishuRoomMode 切换一个群的应答模式：off 不理 / mention 只被 @ 才答 / active 不 @ 也答。
+   * 单聊不受三态影响，始终应答。
+   */
+  setFeishuRoomMode(chatID: string, mode: string): Promise<void> {
+    return call("API.SetFeishuRoomMode", chatID, mode);
+  },
+  /**
    * SetLLMConfig 切换全局模型配置，并落盘到 config.json。
    * 落盘失败不阻断本次生效，但要记日志 —— 用户下次启动会回到旧配置。
    */
@@ -1178,6 +1212,10 @@ export const API = {
   /** StopAllAgents 停止所有未完成的 agent。 */
   stopAllAgents(): Promise<number> {
     return call("API.StopAllAgents");
+  },
+  /** StopAwake 关闭「保持唤醒」并释放系统断言，进程本身继续运行不受影响。 */
+  stopAwake(): Promise<KeepAwakeState> {
+    return call("API.StopAwake");
   },
   /**
    * SyncFeishuChat 按 chat_id 拉一次群历史，返回新增条数。

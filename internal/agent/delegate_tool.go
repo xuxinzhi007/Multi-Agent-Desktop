@@ -24,12 +24,13 @@ type delegateTool struct {
 func (*delegateTool) Name() string { return "delegate" }
 
 func (*delegateTool) Description() string {
-	return "把当前任务拆成 1-3 块互相独立的活，派给新建的子会话并行做，各自在独立的 git 工作树里，" +
-		"等它们全部结束后把结果汇总给你。\n\n" +
+	return "把当前任务拆成 1-3 块互相独立的活，派出去并行做，全部结束后把结果汇总给你。\n\n" +
+		"形态分两种：mode=read 是只读临时运行（分析 / 调研 / 查找 / 总结），不开工作树、不落会话，只回摘要；" +
+		"mode=write 才建隔离子会话、各自在独立 git 工作树里改代码 / 跑测试。\n\n" +
 		"只在任务确实能切开时用：目标包含大量互不依赖的独立调查、信息量超过一个上下文、或要分别对接几种不同工具。\n" +
 		"不要用的情形：要改同一批文件（并行会互相覆盖）、一处局部修改、一次提问、需要连续上下文的调试、" +
 		"子任务之间有先后依赖。这些情况自己直接做更快也更准。\n\n" +
-		"子会话看不到你之前的对话，只会收到你写在 task 里的内容。"
+		"子任务看不到你之前的对话，只会收到你写在 task 里的内容。"
 }
 
 func (*delegateTool) Writes() bool { return false }
@@ -41,6 +42,7 @@ func (*delegateTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
+			"mode": {"type": "string", "enum": ["read", "write"], "description": "这批子任务的统一形态。read=只读临时运行，不开工作树、不落会话；write=隔离子会话+独立工作树。省略则按每个任务的文本推断，拿不准按 write。"},
 			"tasks": {
 				"type": "array",
 				"minItems": 1,
@@ -48,9 +50,10 @@ func (*delegateTool) Schema() json.RawMessage {
 				"items": {
 					"type": "object",
 					"properties": {
-						"name":          {"type": "string", "description": "短名字，会作为子会话名"},
+						"mode":          {"type": "string", "enum": ["read", "write"], "description": "这一块任务的形态，覆盖顶层 mode；省略跟随顶层或按文本推断。"},
+						"name":          {"type": "string", "description": "短名字，会作为子任务名"},
 						"role":          {"type": "string", "description": "这块活需要的能力，例如 前端 / 后端 / 测试 / 文档"},
-						"task":          {"type": "string", "description": "具体要做什么、交付什么。子会话看不到你的上下文，必须写全"},
+						"task":          {"type": "string", "description": "具体要做什么、交付什么。子任务看不到你的上下文，必须写全"},
 						"output_format": {"type": "string", "description": "期望它回传什么形状的结果，例如「只列失败用例名和错误行」"},
 						"boundaries":    {"type": "string", "description": "不该动的东西，例如「不要改 internal/llm」"}
 					},
@@ -67,7 +70,9 @@ func (*delegateTool) Schema() json.RawMessage {
 
 func (t *delegateTool) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
+		Mode  string `json:"mode"`
 		Tasks []struct {
+			Mode         string `json:"mode"`
 			Name         string `json:"name"`
 			Role         string `json:"role"`
 			Task         string `json:"task"`
@@ -78,6 +83,9 @@ func (t *delegateTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("cannot parse arguments: %v", err)
+	}
+	if _, ok := normalizeSpawnMode(in.Mode); !ok {
+		return tool.Fail("mode 只能是 read 或 write，实际是 %q", in.Mode)
 	}
 	if t.channelID != "" {
 		return tool.Fail("群聊里不能派子任务，直接在群里回答，或者用 ask_agent 找一个人帮忙")
@@ -102,8 +110,11 @@ func (t *delegateTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 
 	tasks := make([]spawnTask, 0, len(in.Tasks))
 	for _, x := range in.Tasks {
+		if _, ok := normalizeSpawnMode(x.Mode); !ok {
+			return tool.Fail("任务 %q 的 mode 只能是 read 或 write", x.Name)
+		}
 		tasks = append(tasks, spawnTask{
-			Name: x.Name, Role: x.Role, Task: x.Task,
+			Name: x.Name, Role: x.Role, Task: x.Task, Mode: x.Mode,
 			OutputFormat: x.OutputFormat, Boundaries: x.Boundaries,
 		})
 	}
@@ -117,6 +128,8 @@ func (t *delegateTool) Execute(ctx context.Context, raw json.RawMessage) tool.Re
 		tasks:       tasks,
 		baseDir:     baseDir,
 		useWorktree: true,
+		mode:        in.Mode,
+		inferMode:   true,
 		budgetMS:    int64(in.MaxMinutes) * 60 * 1000,
 	})
 	if err != nil {

@@ -181,6 +181,10 @@ export function previewMode(): boolean {
  * 现在先轮询等一会儿：真窗口里注入会到，到了就什么都不装。
  * 只有等超时（纯浏览器直开）才认定是预览。
  */
+export async function waitForHostRuntime(timeoutMS = 1500): Promise<boolean> {
+  return waitForRuntime(timeoutMS)
+}
+
 async function waitForRuntime(timeoutMS = 1500): Promise<boolean> {
   const g = globalThis as { mygo?: unknown }
   if (g.mygo) return true

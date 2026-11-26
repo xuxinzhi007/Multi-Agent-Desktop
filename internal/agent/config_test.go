@@ -20,7 +20,7 @@ func newQuietManager(t *testing.T, cfg llm.Config) *Manager {
 	t.Helper()
 	m := NewManager(cfg, func(string, any) {})
 	// 等异步落盘结束再让 t.TempDir 清理目录，否则残留 agents.json.tmp。
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	return m
 }
 
@@ -646,7 +646,7 @@ func TestExtraDirsSurviveRoundTrip(t *testing.T) {
 	m.waitSaves()
 
 	m2 := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m2.waitSaves)
+	t.Cleanup(m2.drainTest)
 	if err := m2.SetStore(store); err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +683,8 @@ func TestExtraDirsRejectBroadAndMissing(t *testing.T) {
 }
 
 func TestSystemPromptDeclaresNetworkCapability(t *testing.T) {
-	p := loopSystemPrompt(identity{Name: "后端", ID: "a1"}, "/tmp/work", false)
+	// 联网许可与边界声明属静态规则段；拆分后从 Static 构造函数取。
+	p := loopSystemPromptStatic(identity{Name: "后端", ID: "a1"})
 	// agent 曾因为只看到「只能操作工作目录内的文件」就断定环境完全离线，
 	// 于是拒绝查网页。约束必须和许可一起写，否则模型会按最保守的方式理解。
 	for _, want := range []string{"可以联网", "不等于离线", "不要说环境离线"} {

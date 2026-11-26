@@ -325,11 +325,12 @@ func (s *API) GetAgentConfig(agentId string) LLMConfig {
 	return llm.Redacted(s.mgr.LLMConfigFor(agentId))
 }
 
-// SetAgentExtraDirs 换这个会话的附加目录。
+// SetAgentExtraDirs 换这个会话主目录之外声明的工作区根。
 //
-// 用来「改这个仓库，同时读隔壁那个仓库」：文件工具能读写附加目录，
-// bash 的 cwd 仍是主工作目录。校验和主目录一样严（不能是主目录/桌面/文稿/下载）。
-// 附加目录只给文件访问，不从那边加载技能或知识——边界放宽的是文件，不是配置。
+// 用来「改这个仓库，同时读隔壁那个仓库」：文件工具、跨根检索覆盖这些根，
+// bash 也可用 cwd 切到其中某个已声明根内。校验和主目录一样严
+// （不能是主目录/桌面/文稿/下载）。附加根只给文件访问，不从那边加载技能或知识——
+// 边界放宽的是文件，不是配置。
 func (s *API) SetAgentExtraDirs(agentID string, dirs []string) (AgentView, error) {
 	if err := s.mgr.SetAgentExtraDirs(agentID, dirs); err != nil {
 		return AgentView{}, err

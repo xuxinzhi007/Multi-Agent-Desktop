@@ -17,7 +17,7 @@ import (
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	m := NewManager(llm.Config{Provider: "mock", Model: "global-model"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	return m
 }
 

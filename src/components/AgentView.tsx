@@ -1,13 +1,12 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
 import TextareaAutosize from 'react-textarea-autosize'
-import { ImageStrip, MessageShots, readImageFiles, type DraftImage } from './ImageDraft'
+import { ImageStrip, readImageFiles, type DraftImage } from './ImageDraft'
 import ModelPicker from './ModelPicker'
 import PermissionPicker from './PermissionPicker'
 import { Popover } from 'radix-ui'
 import MentionPicker from './MentionPicker'
-import MentionText, { type MentionTarget } from './MentionText'
-import remarkGfm from 'remark-gfm'
+import type { MentionTarget } from './MentionText'
+import { CopyButton, ForwardMenu, MessageBody, StreamingMarkdown } from './MessageRow'
 import { API, type AgentRuntimeRequest, type AgentView as Agent, type Channel, type Config, type Message } from '../mygo'
 import { runtimeBadge, runtimeStateOf, splitLines, type RuntimeKind } from '../lib/runtime'
 import { indexIncoming, peerCallsOf, toolTextById, type Caller, type PeerCall } from '../lib/agent-calls'
@@ -41,7 +40,7 @@ type Props = {
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
   /** 这一轮已经发生的工具步骤。思考中靠它显示在读什么、跑了什么。 */
-  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting'; detail?: string }[]
+  steps?: { tool: string; target: string; status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'; detail?: string }[]
   /** 模型这一轮的思考文本，还没写进消息时先显示在这里。 */
   reasoning?: string
   /** 这一轮请求的等待计时。first 是到首个推理或正文的毫秒。 */
@@ -63,8 +62,6 @@ type Props = {
   onOpenKnowledge?: () => void
   /** 改给人看的名字和简介 */
   onProfile?: (name: string, role: string) => void
-  /** 上一句还在回答时发出的话，排在当前回答后面。 */
-  queued?: string[]
   /** 设置里已确认的连接。选模型时凭据从这里带上，不在会话里再填一遍 Key。 */
   connection?: { provider: string; baseUrl: string; apiKey: string; model: string }
   /** 全部频道：群工作不进单聊历史，靠它在单聊里标出「他在哪些群干活」并跳转 */
@@ -775,19 +772,6 @@ export default function AgentView(p: Props) {
           <Thinking steps={p.steps ?? []} pace={p.pace} />
         )}
 
-        {(p.queued ?? []).map((text, i) => (
-          <div key={`q-${i}`} className="c-msg c-msg--user" style={{ marginBottom: 'var(--space-4)', opacity: 0.72 }}>
-            <div className="c-user-bubble">
-              <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {text}
-              </div>
-              <time style={{ display: 'block', marginTop: 4, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
-                排队中
-              </time>
-            </div>
-          </div>
-        ))}
-
         {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}
         </div>
       </div>
@@ -1485,11 +1469,12 @@ const LABEL_INLINE: CSSProperties = {
 }
 
 /**
- * ExtraDirs —— 附加目录：文件工具能读写它们，命令仍在主目录跑。
+ * ExtraDirs —— 工作区根：主目录之外声明的附加根。
  *
  * 单根时「改这个仓库、同时读隔壁那个仓库」只能报越界，
  * 用户得换会话或搬目录。参照 Grok Bot 的 workspacePaths 与
- * Claude Code 的 --add-dir，工作区应当是一组根，主目录仍是 cwd。
+ * Claude Code 的 --add-dir，工作区是一组根：文件读写、跨根检索覆盖整组，
+ * 命令默认在主根跑，也可切到某个已声明根内。
  */
 function ExtraDirs({
   agent,
@@ -1501,6 +1486,7 @@ function ExtraDirs({
   const list = agent.extraDirs ?? []
   const [draft, setDraft] = useState('')
   const [err, setErr] = useState('')
+  const empty = list.length === 0
 
   const add = () => {
     const dir = draft.trim()
@@ -1516,10 +1502,11 @@ function ExtraDirs({
 
   return (
     <div className="c-extra">
-      <div className="c-extra__label">附加目录</div>
+      <div className="c-extra__label">工作区根</div>
       <div style={hintStyle}>
-        文件工具可以读写这些目录，命令仍在主目录跑。适合「改这个仓库、同时读隔壁那个」。
+        除主目录外可读写、可检索、可作为命令目录的文件夹。适合「改这个仓库、同时读隔壁那个」。
       </div>
+      {empty && <div className="c-extra__empty">还没有其他工作区根，可以再加一个。</div>}
       {list.map((d) => (
         <div key={d} className="c-extra__row">
           <span className="mono c-extra__path" title={d}>
@@ -1528,7 +1515,7 @@ function ExtraDirs({
           <button
             type="button"
             className="c-icon-btn c-icon-btn--danger"
-            aria-label={`移除附加目录 ${d}`}
+            aria-label={`移除工作区根 ${d}`}
             onClick={() => onConfig({ extraDirs: list.filter((x) => x !== d) })}
           >
             ×
@@ -1536,17 +1523,9 @@ function ExtraDirs({
         </div>
       ))}
       <div className="c-extra__add">
-        <input
-          aria-label="附加目录路径"
-          placeholder="/path/to/other-project"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') add()
-          }}
-        />
+        <DirectoryPicker value={draft} onChange={setDraft} compact placeholder="选择要加入的文件夹" />
         <button type="button" className="c-btn c-btn--ghost c-btn--sm" disabled={!draft.trim()} onClick={add}>
-          添加
+          再加一个工作区根
         </button>
       </div>
       {err && <div className="c-extra__err">{err}</div>}
@@ -1920,33 +1899,6 @@ const Bubble = memo(
       (b.calls ?? []).map((c) => `${c.name}:${c.ok}:${c.reply}`).join('\n'),
 )
 
-/**
- * StreamingMarkdown 把「每来一个 token 就整段重新解析」降到约 8 次/秒。
- *
- * 长回答里 ReactMarkdown 是最大的单帧成本：文本越长，解析越慢，
- * 但人眼分辨不出 16ms 和 120ms 的排版更新。正文仍然立刻累积进状态，
- * 只有解析按间隔跑；流结束后的那一帧做一次全量解析，保证最终内容准确。
- */
-function StreamingMarkdown({ text, live }: { text: string; live: boolean }) {
-  const latest = useRef(text)
-  latest.current = text
-  const [shown, setShown] = useState(text)
-
-  useEffect(() => {
-    if (!live) return
-    const id = window.setInterval(() => setShown(latest.current), 120)
-    return () => window.clearInterval(id)
-  }, [live])
-
-  useEffect(() => {
-    if (!live) setShown(text)
-  }, [text, live])
-
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{live ? shown : text}</ReactMarkdown>
-  )
-}
-
 type BubbleProps = {
   m: Message
   tone: number
@@ -1988,7 +1940,6 @@ function BubbleImpl({
   onRoute,
   onOpenKnowledge,
 }: BubbleProps) {
-  const [routeOpen, setRouteOpen] = useState(false)
   if (m.role === 'system' && (m.content || '').startsWith('运行错误：')) {
     return (
       <div
@@ -2028,12 +1979,13 @@ function BubbleImpl({
   if (isUser && fromAgent) {
     return (
       <div
+        data-msg-row="agent"
         className="c-msg c-msg--agent fade-up"
         style={{ marginBottom: 'var(--space-4)' }}
         onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
       >
         <AgentFace name={fromAgent.name} color={fromAgent.color} note="发来的任务" />
-        <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+        <div data-msg-body style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
           {displayContent}
         </div>
       </div>
@@ -2043,16 +1995,17 @@ function BubbleImpl({
   if (isUser) {
     return (
       <div
+        data-msg-row="user"
         className="c-msg c-msg--user fade-up"
         style={{ marginBottom: 'var(--space-4)' }}
         onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
       >
-        <div className="c-user-bubble">
+        <div className="c-user-bubble" data-msg-body>
           {(m.blocks?.length ?? 0) > 0 ? (
-            <MessageShots blocks={m.blocks} content={displayContent} />
+            <MessageBody blocks={m.blocks} text={displayContent} mentionTargets={agents} selfColor={`var(--agent-${tone})`} variant="user" />
           ) : (
             <div style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-              <MentionText text={displayContent} agents={agents} selfColor={`var(--agent-${tone})`} />
+              <MessageBody blocks={m.blocks} text={displayContent} mentionTargets={agents} selfColor={`var(--agent-${tone})`} variant="user" />
             </div>
           )}
           {clock && (
@@ -2067,6 +2020,7 @@ function BubbleImpl({
 
   return (
     <div
+      data-msg-row="agent"
       className="c-msg c-msg--agent fade-up"
       style={{ marginBottom: 'var(--space-4)', opacity: isRouted ? 0.85 : 1 }}
       onContextMenu={onContextMenu ? (e) => onContextMenu(e, m) : undefined}
@@ -2092,41 +2046,27 @@ function BubbleImpl({
           {live && <span className="c-think__pulse c-think__pulse--live" />}
         </span>
         <div className="c-msg-actions">
-          <button type="button" className="c-icon-btn" title="复制 Markdown" onClick={() => onCopy?.(displayContent)}>
-            复制
-          </button>
+          <CopyButton text={displayContent} variant="icon" onCopy={() => onCopy?.(displayContent)} />
           {onRegenerate && (
             <button type="button" className="c-icon-btn" title="重新生成" onClick={() => onRegenerate(m)}>
               重新生成
             </button>
           )}
           {onRoute && peers && peers.length > 0 && (
-            <span className="c-route">
-              <button type="button" className="c-icon-btn" title="Route 派发给其他 Agent" onClick={() => setRouteOpen((v) => !v)}>
-                Route
-              </button>
-              {routeOpen && (
-                <span className="c-route__menu">
-                  {peers.map((peer) => (
-                    <button
-                      key={peer.id}
-                      type="button"
-                      className="c-ctx-item"
-                      onClick={() => {
-                        onRoute(peer.id, displayContent.slice(0, 200))
-                        setRouteOpen(false)
-                      }}
-                    >
-                      {peer.name}
-                    </button>
-                  ))}
-                </span>
-              )}
-            </span>
+            <ForwardMenu
+              label="Route"
+              title="Route 派发给其他 Agent"
+              items={peers.map((peer) => ({ id: peer.id, label: peer.name }))}
+              triggerClassName="c-icon-btn"
+              wrapperClassName="c-route"
+              menuClassName="c-route__menu"
+              itemClassName="c-ctx-item"
+              onPick={(id) => onRoute(id, displayContent.slice(0, 200))}
+            />
           )}
         </div>
       </div>
-      <div className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
+      <div data-msg-body className="markdown-body" style={{ fontSize: 'var(--text-md)', lineHeight: 1.7, wordBreak: 'break-word', color: 'var(--text-secondary)' }}>
         {m.reasoning && <ReasoningCard text={m.reasoning} live={live} />}
         <StreamingMarkdown text={displayContent} live={!!live} />
         <PeerCallList calls={calls} agents={agents} />

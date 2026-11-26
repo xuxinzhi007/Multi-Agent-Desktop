@@ -32,8 +32,9 @@ func (*Glob) Writes() bool { return false }
 func (*Glob) ConcurrencySafe() bool { return true }
 
 func (*Glob) Description() string {
-	return "List files matching a glob pattern. Supports ** for any number of directories, " +
-		"* and ? within one path segment. Results are sorted by path and capped."
+	return "List files matching a glob pattern across all declared workspace roots. Supports ** for any number of directories, " +
+		"* and ? within one path segment. When multiple roots are configured, results are prefixed by their root path. " +
+		"Results are sorted by path and capped."
 }
 
 func (*Glob) Schema() json.RawMessage {
@@ -65,27 +66,37 @@ func (g *Glob) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 		return res
 	}
 
-	root := strings.TrimSpace(in.Path)
-	if root == "" {
-		root = "."
-	}
-	abs, err := rootsPath(g.WorkDir, g.ExtraDirs, root)
+	roots, err := buildRoots(g.WorkDir, g.ExtraDirs)
 	if err != nil {
 		return tool.Fail("%v", err)
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return tool.Fail("path not found: %s", in.Path)
-		}
-		return tool.Fail("cannot access %s: %v", in.Path, err)
+	multi := len(roots) > 1
+
+	type globTarget struct {
+		root       string
+		abs        string
+		singleFile bool
 	}
-	if !info.IsDir() {
-		// 给了单个文件就直接判断它是否命中，避免 WalkDir 把文件当目录报错。
-		if matchGlob(pattern, filepath.ToSlash(filepath.Base(abs))) {
-			return tool.OK(displayPath(in.Path))
+	var targets []globTarget
+
+	if rootArg := strings.TrimSpace(in.Path); rootArg != "" {
+		abs, err := roots.Resolve(rootArg)
+		if err != nil {
+			return tool.Fail("%v", err)
 		}
-		return tool.OK("(no matches)")
+		info, err := os.Stat(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return tool.Fail("path not found: %s", in.Path)
+			}
+			return tool.Fail("cannot access %s: %v", in.Path, err)
+		}
+		targets = append(targets, globTarget{root: abs, abs: abs, singleFile: !info.IsDir()})
+	} else {
+		// 没给路径：遍历全部已声明根。
+		for _, root := range roots {
+			targets = append(targets, globTarget{root: root, abs: root})
+		}
 	}
 
 	limit := in.MaxResults
@@ -95,28 +106,42 @@ func (g *Glob) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 
 	var matches []string
 	truncated := false
-	walkErr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+
+	for _, t := range targets {
+		if t.singleFile {
+			// 给了单个文件就直接判断它是否命中，避免 WalkDir 把文件当目录报错。
+			if matchGlob(pattern, filepath.ToSlash(filepath.Base(t.abs))) {
+				if len(matches) >= limit {
+					truncated = true
+					continue
+				}
+				matches = append(matches, searchLabel(t.root, t.abs, multi))
+			}
+			continue
 		}
-		if d.IsDir() {
-			if isSkippedDir(d.Name()) && p != abs {
-				return fs.SkipDir
+		walkErr := filepath.WalkDir(t.abs, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if isSkippedDir(d.Name()) && p != t.abs {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			rel := relSlash(t.root, p)
+			if matchGlob(pattern, rel) {
+				if len(matches) >= limit {
+					truncated = true
+					return fs.SkipAll
+				}
+				matches = append(matches, searchLabel(t.root, p, multi))
 			}
 			return nil
+		})
+		if walkErr != nil {
+			return tool.Fail("search failed: %v", walkErr)
 		}
-		rel := relSlash(abs, p)
-		if matchGlob(pattern, rel) {
-			if len(matches) >= limit {
-				truncated = true
-				return fs.SkipAll
-			}
-			matches = append(matches, rel)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return tool.Fail("search failed: %v", walkErr)
 	}
 
 	// 字典序稳定排序：同一次调用的结果顺序必须可复现，便于模型对照行号。

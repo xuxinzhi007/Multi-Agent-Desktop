@@ -50,6 +50,8 @@ type Deps struct {
 	// Channels 是网关接管的渠道；空 = []{gateway.ChannelWeb}。
 	Channels []string
 	AckText  string
+	// Invoke 是网页端 /api/rpc 的方法入口，由 main 注入（那边持有 *API）。
+	Invoke gateway.Invoker
 }
 
 // Host 是嵌入桌面进程的网关实例：持有 Service、HTTP Server 与监听器。
@@ -99,6 +101,7 @@ func New(deps Deps) (*Host, error) {
 		Broker:   broker,
 		AckText:  deps.AckText,
 		Channels: deps.Channels,
+		Invoke:   deps.Invoke,
 	})
 
 	return &Host{

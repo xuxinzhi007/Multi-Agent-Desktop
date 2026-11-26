@@ -32,6 +32,9 @@ func newTestAPI(t *testing.T) *API {
 			mgr.Stop(a.ID)
 			mgr.Delete(a.ID)
 		}
+		// 排干在飞的异步落盘：后台写盘协程必须在 TempDir 清理前退出，
+		// 否则 .tmp/rename 会落在目录被 RemoveAll 之后，报 directory not empty。
+		mgr.WaitSaves()
 	})
 	return &API{
 		mgr:      mgr,
@@ -55,6 +58,7 @@ func newWiredTestAPI(t *testing.T) *API {
 			mgr.Stop(a.ID)
 			mgr.Delete(a.ID)
 		}
+		mgr.WaitSaves()
 	})
 	dir := t.TempDir()
 	mgr.SetImageDir(dir)

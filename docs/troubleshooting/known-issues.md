@@ -20,6 +20,9 @@
 | 12 | Hooks 顺序不一致导致白屏（两次） | 无（见待办） |
 | 13 | `sync.Mutex` 值拷贝（`go vet` 报 copies lock） | `go vet` |
 | 19 | 聊天发出去没有任何回应：`Stream` 的 `defer cancel()` 在返回瞬间取消读流 | Go test |
+| 21 | ACP 会话一启动就失败：配的命令根本不是 ACP agent（`pi`） | 启动前探针 |
+| 22 | 浏览器打开只有假数据，还多出一套 `/remote` 页面 | Go test + 单页判定 |
+| 23 | 桌面已处理完的审批，网页还挂着；点下去报「审批已失效或已完成」 | 对账（连上/聚焦/失效即收卡） |
 
 ---
 
@@ -405,3 +408,108 @@
 - **预防措施与护栏**：`internal/llm/openai_test.go` → `TestStreamRetriesStaleConnection`：httptest 第一次请求 hijack 后直接 `Close()`，第二次正常返回，断言「不报错、内容完整、服务端恰好被请求 2 次」（既验证重试生效，也验证只重试一次）。
 
 护栏：`internal/llm/openai_test.go`（`TestStreamRetriesStaleConnection`）
+
+---
+
+## 21. ACP 会话一启动就失败：配的命令根本不是 ACP agent
+
+- **现象**：把某个会话的运行时切成 ACP、命令填 `pi`，点发送后立刻失败（或卡 30 秒后报 initialize 超时），
+  界面上是「无法启动 ACP Agent（命令：pi）：…」；同一个会话切回 native 就正常。
+- **根因**（`internal/runtime/acp/client.go:302-320` + 用户的 `agents.json`）：
+  - 数据侧：`~/Library/Application Support/multi-agent-desktop/agents.json` 里「前端工程师」是
+    `runtime=acp`、`acp={"name":"pi","command":"pi"}`。
+  - 事实侧：`pi 1.4.0` **不是 ACP agent**。它的输出模式只有 `--mode text|json|rpc`（`pi --help`），
+    `pi acp` 会退回打印帮助。实测把 `initialize` 的 JSON-RPC 帧喂给它的 stdin，它把这一行当成**用户提问**，
+    回了一段中文散文（"在继续之前，我需要先澄清几件事…"），根本不存在 `result.protocolVersion`。
+  - 因此客户端 `request(initCtx, "initialize", …)` 等的是 JSON-RPC 响应，拿到的是散文 → 解码失败或 30 秒超时。
+    协议层没错，**配错程序**。
+- **为什么没被及早发现**：ACP 的失败只表现为"界面上一句红字"，没有任何地方校验
+  「这个命令是不是 ACP server」。`SetRuntime` 只要求 command 非空（`internal/agent/runtime_config.go:45-60`），
+  空命令有中文报错、非 ACP 命令没有。测试用的是内存 transport（`client_test.go`）与自建假 agent，
+  真进程只在 e2e 里出现过，所以"命令不是 ACP"这种最常见的错配完全落在测试缝里。
+  （次要风险：从 Finder 启动的打包 app 继承的是 `/usr/bin:/bin:/usr/sbin:/sbin`，
+  `npx`/`node` 在 `/opt/homebrew/bin` 下会直接 `executable file not found`；
+  `StartProcess` 没有做 PATH 补全，见 `internal/runtime/acp/transport.go:112-122`。）
+- **解决方案**：
+  - 把命令换成真正的 ACP adapter（截至 2026-11-26 实测可用的版本）：
+    - Claude Code：`npx -y @agentclientprotocol/claude-agent-acp`（0.112.0）
+    - Codex：`npx -y @zed-industries/codex-acp`（0.16.0）
+    - Gemini CLI：`gemini --acp`
+    - Cursor：`cursor-agent acp`
+  - 配置界面加「测试连接」：spawn 后发 `initialize`，**必须收到带 `protocolVersion` 的 JSON**才算通过，
+    否则当场提示「这个命令不是 ACP agent，看起来像普通 CLI」，不落盘。
+  - `StartProcess` 里把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、nvm 的 bin 追加进子进程 PATH，
+    并在 stderr 里把 `executable file not found` 翻成中文可读提示。
+- **预防措施与护栏**：`internal/runtime/acp/client_test.go` 新增
+  `TestInitializeRejectsNonACPCommand` —— 用一个只把 stdin 原样 echo 成纯文本的假进程，断言
+  `Start` 必须返回可读错误（"不是 ACP agent"），而不是挂到超时。
+
+护栏：`internal/runtime/acp/client_test.go`（`TestInitializeRejectsNonACPCommand`）
+
+---
+
+## 22. 浏览器打开只有假数据，还多出一套 `/remote` 页面
+
+- **现象**：用浏览器打开 `localhost:5173`，看到的是几个 demo agent（前端/后端、`~/code/app`），
+  agent 名字、模型、消息全都和桌面不同；空状态还写着「这是预览」「浏览器里的会话是假的」。
+  同时仓库里另有 `src/remote/RemoteWorkbench.tsx` + `/remote?api=…` 的只读页，等于**两套页面**。
+- **根因**：
+  - `src/main.tsx` 只有两级判定（宿主注入 / 否则预览），**没有第三条路**——
+    浏览器里没有 `globalThis.mygo`，就直接装 `preview-runtime` 的假数据。桌面进程明明在跑、
+    网关明明在 `127.0.0.1:8780` 上返回真实数据，前端却不去连。
+  - 网关当时只有 7 个 read-ish 端点（`/api/agents`、`/api/events`、`/api/approvals`…），
+    **没有通用方法入口**，所以"浏览器跑同一套界面"在协议层就不成立，只能另写一套只读页面来凑。
+  - 结果：同一份 React 代码，在桌面和浏览器出现两套观感；用户判断成「网页是 mock 版」。
+- **为什么没被及早发现**：预览替身在浏览器里"能跑、不报错"，验收只看「页面不白屏」，
+  没有断言"浏览器拿到的 agent 名字必须和桌面一致"。`previewMode()` 的大量文案分支
+  （`Sidebar.tsx:591-593`、`AgentView.tsx:1815`、`ChannelView.tsx:319`、`FleetView.tsx:99`）
+  反而把这套降级当成正常状态写在了界面上。
+- **解决方案**：
+  - 网关新增 `POST /api/rpc {method, args}`，反射到 `*API`（`internal/gateway/rpc.go`）；
+  - 前端新增 `src/lib/mygo-http.ts`：装一个与宿主同签名的 `globalThis.mygo`
+    （`call` → `/api/rpc`，`on/once` → SSE），**组件代码零改动**；
+  - `main.tsx` 改三级判定：宿主 → 网关 → 预览，并把 `/remote` 那一套（`RemoteWorkbench`、
+    `remote-api.ts`、`docs/remote-workbench.md`）删掉，只留一套页面。
+- **预防措施与护栏**：
+  - `internal/gateway/rpc_test.go`：位置参数、`context.Context` 注入与**不占位**、`(值, error)`、
+    只有 error 的返回值、未知/非导出方法拒绝、缺参给零值。其中 `TestRPCInvokerSkipsContext`
+    抓到了真实缺陷——ctx 占位导致 `PromptAgent(ctx, req)` 收不到 req，网页端发消息会全挂；
+  - 浏览器实拍核对：标题 `Multi-Agent Desktop · Web`、`dataset.web=1`（无 `preview`）、
+    「共 14 / 13 个已配模型」与桌面一致、控制台 0 错误（截图见 `docs/reviews/web-parity-2026-11-26.png`）。
+
+护栏：`internal/gateway/rpc_test.go`（6 条）
+
+---
+
+## 23. 桌面已处理完的审批，网页还挂着
+
+- **现象**：在桌面点了「本会话允许」之后，浏览器里那张审批卡还在，还显示「还有 3 个在排队」；
+  在网页上再点一次，卡片里飘红 `API.DecideApproval 失败：审批已失效或已完成`。
+- **根因**：**第二个客户端出现后才有的状态一致性问题**，不是单端逻辑写错。
+  - 收卡依赖事件：`useBackend` 收到 `tool.approval.done` 才把卡移除（`:595`）。
+  - 该事件走 SSE；但当时服务端**不做事件缓冲、不发 `id:`、不支持 `Last-Event-ID` 续传**
+    （`internal/gateway/server.go` 的 `handleEvents` 只写 `event:` + `data:`）。
+    SSE 一断一重连，断线期间的决定事件就永久丢了。
+    → **已补**：`Broker` 保留最近 256 条（`replayLimit`），`Publish` 带 `Seq`；
+    `SubscribeSince(since)` 返回补发段；SSE 每帧带 `id:`，重连时浏览器自动带 `Last-Event-ID`，
+    服务端先补发再进实时通道（`sseWriteSeq`）。
+  - 审批队列只在启动时拉一次（`API.listApprovals()`，`useBackend.ts:263`），
+    **没有任何对账**；于是丢了事件就等于永远显示死卡。
+  - 后端对已处理/已失效的 ID 返回 `审批已失效或已完成`（`internal/approval/approval.go:434`），
+    这是幂等语义，前端却把卡留着并显示错误——用户看到的是"两次都失败"。
+- **为什么没被及早发现**：桌面只有一个客户端，"决定"和"收卡"发生在同一个页面里，
+  `decideApproval` 本地先 filter 掉，事件丢不丢都看不出来。加了网页端之后才暴露。
+  同类问题在所有「CLI + IDE + 手机」双端产品里都存在（Claude Code 的 CLI/IDE 同步也靠事件补发与快照重拉）。
+- **解决方案**（事件续传 + 三条低成本对账，都不做定时轮询）：
+  1. 网关每次连上（含重连）会发 `gateway.connected` → 前端全量覆盖 approvals + agents；
+  2. 窗口重新获得焦点 / 从后台切回可见 → 全量覆盖（跨端操作后的主路径）；
+  3. 决定失败且原因是「已失效/已完成」→ 按已收卡处理（幂等），再把原因抛给界面。
+- **预防措施与护栏**：
+  - **事件续传**（`id:` + `Last-Event-ID` + 256 条缓冲），覆盖断线几秒的窗口；
+  - **快照对账**（连上 / 聚焦 / 失效即收卡），覆盖超出缓冲的缺口。
+  合起来的纪律是：**状态类列表（审批、队列、agents）一律"事件 + 快照"双通道**。
+  只把事件当唯一真相，是这次问题的本质。
+
+护栏：`src/lib/useBackend.ts`（`resync` 三条路径 + `decideApproval` 幂等收卡）、
+`internal/gateway/broker_test.go`（补发顺序 / 缓冲上限 / `Last-Event-ID` 解析 4 条）、
+`internal/gateway/server_test.go` 的 `TestSSEReplayHTTP`（端到端：先补发、再进实时通道）

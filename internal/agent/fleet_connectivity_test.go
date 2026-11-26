@@ -29,7 +29,7 @@ func buildFleet(t *testing.T, m *Manager, names []string) []*Agent {
 // 连通性矩阵：任意两个不同会话之间都能发过去并拿回回复，且不串话。
 func TestFleetConnectivityMatrix(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 
 	names := []string{"后端1", "后端2", "后端3", "前端4"}
 	fleet := buildFleet(t, m, names)
@@ -70,7 +70,7 @@ func TestFleetConnectivityMatrix(t *testing.T) {
 // 三跳接力：A 问 B 的同时 B 问 C，两条等待边并存且不互相阻塞。
 func TestFleetThreeHopRelay(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	fleet := buildFleet(t, m, []string{"A", "B", "C"})
 	a, b, c := fleet[0], fleet[1], fleet[2]
 
@@ -112,7 +112,7 @@ func TestFleetThreeHopRelay(t *testing.T) {
 // 非法寻址必须给出明确错误，而不是静默挂住。
 func TestFleetAddressingErrors(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	self := m.Create("s", "自己", "r")
 	self.Backend = "mock"
 	other := m.Create("o", "别人", "r")
@@ -138,7 +138,7 @@ func TestFleetAddressingErrors(t *testing.T) {
 // 舰队名册：list_agents 必须能看到全部成员，供模型寻址。
 func TestFleetRoster(t *testing.T) {
 	m := NewManager(llm.Config{Provider: "mock"}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	names := []string{"后端1", "后端2", "前端3"}
 	buildFleet(t, m, names)
 

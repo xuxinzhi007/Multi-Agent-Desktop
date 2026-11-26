@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,9 @@ type Message struct {
 	Kind      string      `json:"kind,omitempty"` // user / agent / system
 	Blocks    []llm.Block `json:"blocks,omitempty"`
 
+	// ExtID 是外部源（飞书 message_id 等）的原始 ID，只入库历史时用来去重。
+	ExtID string `json:"extId,omitempty"`
+
 	// Deliveries 记录投递结果：谁收到了、谁跳过了
 	Deliveries []Delivery `json:"deliveries,omitempty"`
 }
@@ -42,6 +46,27 @@ type Delivery struct {
 	AgentID string `json:"agentId"`
 	Status  string `json:"status"`           // delivered / skipped / failed
 	Reason  string `json:"reason,omitempty"` // 跳过原因
+}
+
+// HistoryCursor 记外部历史拉到哪了。零值 = 从没拉过（首次拉一页）。
+type HistoryCursor struct {
+	At int64  `json:"at,omitempty"`
+	ID string `json:"id,omitempty"`
+}
+
+// HistoryMessage 是从外部源（飞书）只入库的一条历史消息。
+type HistoryMessage struct {
+	ExtID    string // 外部消息 id，去重用
+	FromID   string
+	FromName string
+	Text     string
+	At       int64
+	Kind     string
+}
+
+// FeishuChannelID 把飞书 chatID 映射成频道 ID。全仓唯一映射，别在别处另拼。
+func FeishuChannelID(chatID string) string {
+	return "feishu-" + chatID
 }
 
 // TurnPolicy 回合策略。
@@ -70,6 +95,8 @@ type Channel struct {
 	Owner string `json:"owner,omitempty"`
 	// Admins 是管理员（agent ID 或 "user"）。与 Owner 同权，但不可被踢。
 	Admins []string `json:"admins,omitempty"`
+	// HistoryCursor 是外部历史（飞书）拉到的位置；零值 = 从没拉过。
+	HistoryCursor HistoryCursor `json:"historyCursor,omitempty"`
 }
 
 // UserActor 是用户本人在权限判定里的身份。不是 agent ID。
@@ -180,14 +207,15 @@ func (m *Manager) Save() error {
 	for _, id := range m.order {
 		if ch, ok := m.channels[id]; ok {
 			data = append(data, Channel{
-				ID:       ch.ID,
-				Name:     ch.Name,
-				Members:  append([]string{}, ch.Members...),
-				Messages: append([]Message{}, ch.Messages...),
-				Policy:   ch.Policy,
-				Speaker:  ch.Speaker,
-				Owner:    ch.Owner,
-				Admins:   append([]string{}, ch.Admins...),
+				ID:            ch.ID,
+				Name:          ch.Name,
+				Members:       append([]string{}, ch.Members...),
+				Messages:      append([]Message{}, ch.Messages...),
+				Policy:        ch.Policy,
+				Speaker:       ch.Speaker,
+				Owner:         ch.Owner,
+				Admins:        append([]string{}, ch.Admins...),
+				HistoryCursor: ch.HistoryCursor,
 			})
 		}
 	}
@@ -269,13 +297,14 @@ func (m *Manager) Load() error {
 // 而写路径的 append 会让底层数组 realloc，返回指针即构成数据竞争。
 func (c *Channel) clone() Channel {
 	out := Channel{
-		ID:      c.ID,
-		Name:    c.Name,
-		Members: append([]string{}, c.Members...),
-		Policy:  c.Policy,
-		Speaker: c.Speaker,
-		Owner:   c.Owner,
-		Admins:  append([]string{}, c.Admins...),
+		ID:            c.ID,
+		Name:          c.Name,
+		Members:       append([]string{}, c.Members...),
+		Policy:        c.Policy,
+		Speaker:       c.Speaker,
+		Owner:         c.Owner,
+		Admins:        append([]string{}, c.Admins...),
+		HistoryCursor: c.HistoryCursor,
 	}
 	if c.Messages == nil {
 		out.Messages = []Message{}
@@ -508,6 +537,91 @@ func (m *Manager) addMessage(channelId, fromId, fromName, text string, blocks []
 	m.mu.Unlock()
 	m.goSave()
 	return msg, nil
+}
+
+// HistoryCursorAt 返回频道已入库到的历史游标；频道不存在时返回零值（从没拉过）。
+func (m *Manager) HistoryCursorAt(channelID string) HistoryCursor {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if ch, ok := m.channels[channelID]; ok {
+		return ch.HistoryCursor
+	}
+	return HistoryCursor{}
+}
+
+// IngestHistory 把外部历史（飞书）只入库到 FeishuChannelID(chatID) 频道。
+//
+// 与 Broadcast/AddMessage 的区别：
+//   - 按 ExtID 去重，重复拉取同一条不会进两条；
+//   - 按时间正序插入，不覆盖已有消息；
+//   - 不广播给成员、不触发 agent、不改成员/发言人/未读语义；
+//   - 频道不存在时建一间空成员的讨论房。
+//
+// 返回本次新增条数。成功入库后游标推进到最后一条；调用方失败时不要调它，
+// 游标保持原位，下一轮还能从断点继续。
+func (m *Manager) IngestHistory(chatID, name string, msgs []HistoryMessage) (int, error) {
+	if strings.TrimSpace(chatID) == "" {
+		return 0, fmt.Errorf("缺少 chat_id")
+	}
+	channelID := FeishuChannelID(chatID)
+
+	m.mu.Lock()
+	ch, ok := m.channels[channelID]
+	if !ok {
+		ch = &Channel{
+			ID:       channelID,
+			Name:     name,
+			Members:  []string{},
+			Messages: []Message{},
+			Policy:   PolicyDiscuss,
+			Owner:    UserActor,
+		}
+		m.channels[channelID] = ch
+		m.order = append(m.order, channelID)
+	}
+	if strings.TrimSpace(name) != "" && ch.Name == "" {
+		ch.Name = name
+	}
+
+	seen := make(map[string]bool, len(ch.Messages))
+	for i := range ch.Messages {
+		if ch.Messages[i].ExtID != "" {
+			seen[ch.Messages[i].ExtID] = true
+		}
+	}
+
+	added := 0
+	for _, mm := range msgs {
+		if mm.ExtID != "" && seen[mm.ExtID] {
+			continue
+		}
+		if mm.ExtID != "" {
+			seen[mm.ExtID] = true
+		}
+		ch.Messages = append(ch.Messages, Message{
+			ID:        newMessageID(),
+			ChannelID: channelID,
+			FromID:    mm.FromID,
+			FromName:  mm.FromName,
+			Text:      mm.Text,
+			At:        mm.At,
+			Kind:      mm.Kind,
+			ExtID:     mm.ExtID,
+		})
+		added++
+	}
+
+	// 正序合并：历史可能跨多次拉取混在一起，按 At 稳定排序，同刻保持原顺序。
+	sort.SliceStable(ch.Messages, func(a, b int) bool { return ch.Messages[a].At < ch.Messages[b].At })
+
+	if n := len(ch.Messages); n > 0 {
+		last := ch.Messages[n-1]
+		ch.HistoryCursor = HistoryCursor{At: last.At, ID: last.ExtID}
+	}
+	m.mu.Unlock()
+
+	m.goSave()
+	return added, nil
 }
 
 // SetDeliveries 按 ID 回填投递记录，并落盘。

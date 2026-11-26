@@ -66,7 +66,7 @@ func TestDeleteSelf(t *testing.T) {
 func TestParentIDSurvivesSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agents.json")
 	m := NewManager(llm.Config{}, func(string, any) {})
-	t.Cleanup(m.waitSaves)
+	t.Cleanup(m.drainTest)
 	mustSetStore(t, m, path)
 	a := m.Create("a", "甲", "r")
 	m.create("", "乙", "r", a.ID)
@@ -74,7 +74,7 @@ func TestParentIDSurvivesSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	m2 := NewManager(llm.Config{}, func(string, any) {})
-	t.Cleanup(m2.waitSaves)
+	t.Cleanup(m2.drainTest)
 	mustSetStore(t, m2, path)
 	got, err := m2.FindByName("乙")
 	if err != nil {

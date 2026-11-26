@@ -50,6 +50,16 @@ func relSlash(root, abs string) string {
 	return filepath.ToSlash(rel)
 }
 
+// searchLabel 返回检索结果里给模型看的路径。单根时沿用根内相对路径；
+// 多根时带上根前缀（绝对路径），模型才能分清命中来自哪个根并再读。
+func searchLabel(root, abs string, multi bool) string {
+	rel := relSlash(root, abs)
+	if !multi {
+		return rel
+	}
+	return filepath.ToSlash(filepath.Join(root, rel))
+}
+
 // readText 读取文件内容并做二进制判断。
 // 返回 (文本, 是否二进制, 错误)。
 func readText(abs string) (string, bool, error) {

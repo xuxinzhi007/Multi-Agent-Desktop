@@ -35,7 +35,8 @@ func (*Grep) Writes() bool { return false }
 func (*Grep) ConcurrencySafe() bool { return true }
 
 func (*Grep) Description() string {
-	return "Search file contents recursively. Output lines as path:line: text. " +
+	return "Search file contents recursively across all declared workspace roots. Output lines as path:line: text. " +
+		"When multiple roots are configured, results are prefixed by their root path so you can tell which root they came from. " +
 		"Supports include/exclude globs, case-insensitive match, regexp or literal substring. " +
 		"Skips .git/node_modules/.venv/dist/build and binary files."
 }
@@ -108,14 +109,11 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 		return res
 	}
 
-	root := strings.TrimSpace(in.Path)
-	if root == "" {
-		root = "."
-	}
-	abs, err := rootsPath(g.WorkDir, g.ExtraDirs, root)
+	roots, err := buildRoots(g.WorkDir, g.ExtraDirs)
 	if err != nil {
 		return tool.Fail("%v", err)
 	}
+	multi := len(roots) > 1
 
 	limit := in.MaxResults
 	if limit <= 0 {
@@ -124,27 +122,53 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	includes := cleanGlobs(splitStringOrArray(in.Include))
 	excludes := cleanGlobs(splitStringOrArray(in.Exclude))
 
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return tool.Fail("path not found: %s", in.Path)
+	type grepTarget struct {
+		root       string
+		abs        string
+		singleFile bool
+	}
+	var targets []grepTarget
+
+	if rootArg := strings.TrimSpace(in.Path); rootArg != "" {
+		abs, err := roots.Resolve(rootArg)
+		if err != nil {
+			return tool.Fail("%v", err)
 		}
-		return tool.Fail("cannot access %s: %v", in.Path, err)
+		info, err := os.Stat(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return tool.Fail("path not found: %s", in.Path)
+			}
+			return tool.Fail("cannot access %s: %v", in.Path, err)
+		}
+		targets = append(targets, grepTarget{root: abs, abs: abs, singleFile: !info.IsDir()})
+	} else {
+		// 没给路径：遍历全部已声明根。
+		for _, root := range roots {
+			targets = append(targets, grepTarget{root: root, abs: root})
+		}
 	}
 
 	var hits []string
 	truncated := false
 
-	// 单文件调用：直接搜这一个文件，rel 用调用方给的路径写法。
-	if !info.IsDir() {
-		hits, truncated = grepFile(abs, displayPath(in.Path), match, includes, excludes, limit)
-	} else {
-		walkErr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+	for _, t := range targets {
+		if t.singleFile {
+			// 单文件调用：直接搜这一个文件，label 用根前缀写法。
+			label := searchLabel(t.root, t.abs, multi)
+			fileHits, more := grepFile(t.abs, label, match, includes, excludes, limit-len(hits))
+			hits = append(hits, fileHits...)
+			if more || len(hits) >= limit {
+				truncated = true
+			}
+			continue
+		}
+		walkErr := filepath.WalkDir(t.abs, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil // 跳过读不到的文件，不因单个坏文件中断整轮搜索
 			}
 			if d.IsDir() {
-				if isSkippedDir(d.Name()) && p != abs {
+				if isSkippedDir(d.Name()) && p != t.abs {
 					return fs.SkipDir
 				}
 				return nil
@@ -153,11 +177,12 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 				truncated = true
 				return fs.SkipAll
 			}
-			rel := relSlash(abs, p)
+			rel := relSlash(t.root, p)
 			if !matchInclude(includes, rel) || matchExclude(excludes, rel) {
 				return nil
 			}
-			fileHits, more := grepFile(p, rel, match, nil, nil, limit-len(hits))
+			label := searchLabel(t.root, p, multi)
+			fileHits, more := grepFile(p, label, match, nil, nil, limit-len(hits))
 			hits = append(hits, fileHits...)
 			if more || len(hits) >= limit {
 				truncated = true

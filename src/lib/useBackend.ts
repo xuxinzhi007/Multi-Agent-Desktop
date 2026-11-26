@@ -13,7 +13,7 @@ import {
   type ShellResultEvent,
 } from '../mygo'
 import { linkParents } from './agent-tree'
-import { bodyOf } from './message'
+import { bodyOf, sortAgentMessages, sortChannelMessages } from './message'
 import type { ToolCall } from '../components/Inspector'
 
 export type LLMConfig = Config
@@ -58,8 +58,6 @@ type State = {
   hasOlder: Record<string, boolean>
   /** 已经乐观插入消息、但后端还没回执的 agent */
   pending: Record<string, boolean>
-  /** 上一句还没答完时先排在回答后面，不插进正文。 */
-  outbox: Record<string, string[]>
   /** 最近一次停止的原因与进度。「为什么停」必须能说清，不能只显示「已停止」。 */
   stops: Record<string, { reason: string; iter: number; used: number; at: number }>
   /** 等待用户决定的写操作。队列按到达顺序，模态框只展示最前面一张。 */
@@ -87,7 +85,6 @@ const EMPTY: State = {
   opened: '',
   hasOlder: {},
   pending: {},
-  outbox: {},
   stops: {},
   approvals: [],
 }
@@ -251,14 +248,58 @@ export function useBackend() {
         }
       }),
     )
-    load(API.listChannels(), (channels) => setState((s) => ({ ...s, channels: channels ?? [] })))
+    load(API.listChannels(), (channels) =>
+      setState((s) => ({
+        ...s,
+        channels: (channels ?? []).map((ch) => ({ ...ch, messages: sortChannelMessages(ch.messages ?? []) })),
+      })),
+    )
     load(API.queryNotes({ Scope: '', Tags: [], Text: '', Limit: 0 }), (notes) =>
       setState((s) => ({ ...s, notes: notes ?? [] })),
     )
     load(API.getLLMConfig(), (llm) => setState((s) => ({ ...s, llm })))
     load(API.getWorkDir(), (workDir) => setState((s) => ({ ...s, workDir })))
     // 审批队列要补一次状态：界面刷新或后端已经卡在等审批时，不能靠事件补历史。
-    load(API.listApprovals(), (list) => setState((s) => ({ ...s, approvals: list ?? [] })))
+    const pullApprovals = () =>
+      load(API.listApprovals(), (list) => setState((s) => ({ ...s, approvals: list ?? [] })))
+    pullApprovals()
+
+    const pullAgents = () =>
+      load(API.listAgents(), (agents) =>
+        setState((s) => ({
+          ...s,
+          agents: linkParents(agents ?? []).map((a) => {
+            const cur = s.agents.find((x) => x.id === a.id)
+            return { ...shellAgent(a), messages: cur?.messages ?? [], last: a.last || cur?.last || '' }
+          }),
+        })),
+      )
+
+    // 多端对账：桌面端处理掉一张卡时，网页端靠 `tool.approval.done` 收卡；
+    // 但 SSE 断线/重连期间的事件没有补发（服务端不做缓冲，也没有 Last-Event-ID），
+    // 于是网页会一直显示一张已失效的卡，点下去报「审批已失效或已完成」。
+    //
+    // 三条对账路径，成本都很低、都不做定时轮询：
+    //   1) 网关每次连上（含重连）发 `gateway.connected` → 全量覆盖；
+    //   2) 窗口重新获得焦点 / 从后台切回可见 → 全量覆盖（跨端操作后的主路径）；
+    //   3) 决定失败且原因是「已失效」→ 单张收卡（见 decideApproval）。
+    const resync = () => {
+      pullApprovals()
+      pullAgents()
+    }
+    const rawOn = (globalThis as { mygo?: { on?: (n: string, f: () => void) => () => void } }).mygo?.on
+    if (rawOn) unsubs.push(rawOn('gateway.connected', resync))
+
+    const onFocus = () => resync()
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') resync()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisible)
+    unsubs.push(() => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisible)
+    })
 
     sub(events.agentCreated, (a) =>
       setState((s) => (s.agents.some((x) => x.id === a.id) ? s : { ...s, agents: [...s.agents, shellAgent(a)] })),
@@ -288,7 +329,6 @@ export function useBackend() {
         agents: s.agents.filter((a) => a.id !== id),
         streaming: omit(s.streaming, id),
         channelStreaming: omit(s.channelStreaming, id),
-        outbox: omit(s.outbox, id),
         // 删会话要把它的全部临时状态一起带走。只清一半的话，
         // errors / tokenUsage 这些按 id 取值的 map 会留着上一个会话的值，
         // 界面按 id 读时就串味（架构评审 #5/#6 指出过）。
@@ -347,12 +387,8 @@ export function useBackend() {
             lastIn: tokensIn ? tokensIn : existing.lastIn,
           }
         }
-        const box = s.outbox[id] ?? []
-        const at = message.role === 'user' ? box.indexOf(message.content) : -1
-        const outbox = at < 0 ? s.outbox : { ...s.outbox, [id]: box.filter((_, i) => i !== at) }
         return {
           ...s,
-          outbox,
           agents: s.agents.map((a) => {
             if (a.id !== id) return a
             const list = a.messages ?? []
@@ -360,17 +396,23 @@ export function useBackend() {
             // 工具回合已经把流式文本收成消息时，结束事件再带同一段也不再追加。
             const last = list[list.length - 1]
             if (message.role === 'user' && last?.role === 'user' && last.content === message.content) {
-              return { ...a, messages: [...list.slice(0, -1), { ...last, ...message }] }
+              // 服务端没带时间戳时保留本地发送时刻；自带 timestamp 以服务端为准。
+              const merged = { ...last, ...message, timestamp: message.timestamp ?? last.timestamp }
+              return { ...a, messages: sortAgentMessages([...list.slice(0, -1), merged]) }
             }
             const spoken = clipSentence(message.content) || a.last
             if (s.opened !== id) return { ...a, last: spoken }
             if (message.role === 'assistant' && last?.role === 'assistant' && last.content === message.content) {
               if (message.reasoning && message.reasoning !== last.reasoning) {
-                return { ...a, last: spoken, messages: [...list.slice(0, -1), { ...last, reasoning: message.reasoning }] }
+                return {
+                  ...a,
+                  last: spoken,
+                  messages: sortAgentMessages([...list.slice(0, -1), { ...last, reasoning: message.reasoning }]),
+                }
               }
               return { ...a, last: spoken }
             }
-            return { ...a, last: spoken, messages: [...list, message] }
+            return { ...a, last: spoken, messages: sortAgentMessages([...list, message]) }
           }),
           streaming: message.role === 'assistant' ? omit(s.streaming, id) : s.streaming,
           channelStreaming: message.role === 'assistant' ? omit(s.channelStreaming, id) : s.channelStreaming,
@@ -384,33 +426,16 @@ export function useBackend() {
     sub(events.agentError, ({ id, error }) => {
       dropDeltas(id)
       dropReason(id)
-      setState((s) => {
-        const queued = s.outbox[id] ?? []
-        const stamp = Math.floor(Date.now() / 1000)
-        return {
-          ...s,
-          errors: rememberError(s, id, error),
-          streaming: omit(s.streaming, id),
-          channelStreaming: omit(s.channelStreaming, id),
-          reasoning: omit(s.reasoning, id),
-          pending: omit(s.pending, id),
-          outbox: omit(s.outbox, id),
-          agents:
-            queued.length === 0
-              ? s.agents
-              : s.agents.map((a) =>
-                  a.id === id
-                    ? {
-                        ...a,
-                        messages: [
-                          ...(a.messages ?? []),
-                          ...queued.map((content) => ({ role: 'user' as const, content, timestamp: stamp })),
-                        ],
-                      }
-                    : a,
-                ),
-        }
-      })
+      // 出错不再把排队文本补插进列表：插话在发送时刻就已乐观可见（见 agent.prompt），
+      // 这里只记录错误、清掉流式过程；真正发送失败的回滚在 sendImpl 的 catch 里做。
+      setState((s) => ({
+        ...s,
+        errors: rememberError(s, id, error),
+        streaming: omit(s.streaming, id),
+        channelStreaming: omit(s.channelStreaming, id),
+        reasoning: omit(s.reasoning, id),
+        pending: omit(s.pending, id),
+      }))
     })
     sub(events.toolStart, (e) => {
       // 工具已开始执行 —— 这是信息事件。真正的「等你审批」走 tool.approval，
@@ -430,19 +455,25 @@ export function useBackend() {
     sub(events.agentTool, (e) => {
       // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
       // 未知状态一律当 ok —— 不要因为一个新状态值就让类型崩掉。
+      // cancelled 是「被用户插话打断」，不是错误，单独走中性态，不进失败统计。
       const status: ToolCall['status'] =
         e.status === 'waiting'
           ? 'waiting'
           : e.phase === 'start'
             ? 'running'
-            : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
-              ? 'error'
-              : 'ok'
+            : e.status === 'cancelled'
+              ? 'cancelled'
+              : e.status === 'error' || e.status === 'timeout' || e.status === 'denied'
+                ? 'error'
+                : 'ok'
       if (e.phase === 'start') {
         dropDeltas(e.id)
         reasonGap.add(e.id)
       }
-      const detail = e.phase === 'end' ? oneLine(e.content) : ''
+      const detail =
+        e.phase !== 'end'
+          ? ''
+          : oneLine(e.content) || (status === 'cancelled' ? '调用被用户插话打断，未完成' : '')
       setState((s) => {
         if (e.phase === 'start') {
           return {
@@ -566,9 +597,11 @@ export function useBackend() {
             ch.id === msg.channelId
               ? {
                   ...ch,
-                  messages: (ch.messages ?? []).some((m) => m.id === msg.id)
-                    ? (ch.messages ?? []).map((m) => (m.id === msg.id ? msg : m))
-                    : [...(ch.messages ?? []), msg],
+                  messages: sortChannelMessages(
+                    (ch.messages ?? []).some((m) => m.id === msg.id)
+                      ? (ch.messages ?? []).map((m) => (m.id === msg.id ? msg : m))
+                      : [...(ch.messages ?? []), msg],
+                  ),
                 }
               : ch,
           ),
@@ -652,30 +685,24 @@ export function useBackend() {
           text: string
           images?: { mime: string; data: string }[]
         }
+        // 发送时刻立刻盖章：无论后面是排队、补拉还是重试，这条消息的位置都按发送时刻归并，
+        // 不再等后端回执 / flush 时另盖一次时间戳（案例 4/5 的根因）。
+        const stamp = Math.floor(Date.now() / 1000)
         setState((s) => {
-          const agent = s.agents.find((a) => a.id === agentId)
-          const busy =
-            agent?.status === 'running' ||
-            agent?.status === 'queued' ||
-            !!s.streaming[agentId] ||
-            !!s.pending[agentId]
-          if (busy) {
-            return {
-              ...s,
-              outbox: { ...s.outbox, [agentId]: [...(s.outbox[agentId] ?? []), text] },
-              pending: { ...s.pending, [agentId]: true },
-            }
-          }
           const msg = {
             role: 'user' as const,
             content: text,
-            timestamp: Math.floor(Date.now() / 1000),
+            timestamp: stamp,
             blocks: images?.map((img) => ({ mime: img.mime, data: img.data })),
           }
           return {
             ...s,
+            // busy 也直接乐观插进正文：插话发送即可见，位置按发送时刻排；
+            // 后端在工具回合之间读到新消息由 loop 侧 Steer/SteerCh 负责，前端不再另排队列。
             agents: s.agents.map((a) =>
-              a.id === agentId ? { ...a, messages: [...(a.messages ?? []), msg] } : a,
+              a.id === agentId
+                ? { ...a, messages: sortAgentMessages([...(a.messages ?? []), msg]) }
+                : a,
             ),
             pending: { ...s.pending, [agentId]: true },
             errors: omit(s.errors, agentId),
@@ -689,14 +716,18 @@ export function useBackend() {
             pending: omit(s.pending, agentId),
             streaming: omit(s.streaming, agentId),
             errors: rememberError(s, agentId, msg || '发送失败'),
-            outbox: {
-              ...s.outbox,
-              [agentId]: (s.outbox[agentId] ?? []).filter((line) => line !== text),
-            },
             agents: s.agents.map((a) => {
               if (a.id !== agentId) return a
+              // 发送被后端拒绝：回滚刚才那条还没拿到回执的乐观消息，不留在列表里假装成功。
+              const list = [...(a.messages ?? [])]
+              for (let i = list.length - 1; i >= 0; i--) {
+                if (list[i].role === 'user' && list[i].content === text) {
+                  list.splice(i, 1)
+                  break
+                }
+              }
               const status = a.status === 'running' || a.status === 'queued' ? 'idle' : a.status
-              return { ...a, status }
+              return { ...a, status, messages: sortAgentMessages(list) }
             }),
           }))
           throw e
@@ -832,7 +863,7 @@ export function useBackend() {
           const extra = curMsgs.filter(
             (m) => m.role === 'user' && !list.some((x) => x.role === 'user' && x.content === m.content),
           )
-          const next = prefix ? curMsgs : [...list, ...extra]
+          const next = sortAgentMessages(prefix ? curMsgs : [...list, ...extra])
           return {
             ...s,
             hasOlder: { ...s.hasOlder, [id]: more },
@@ -867,7 +898,11 @@ export function useBackend() {
             hasOlder: { ...p.hasOlder, [id]: older.length >= PAGE },
             agents: p.agents.map((a) =>
               a.id === id
-                ? { ...a, messages: [...older, ...(a.messages ?? [])], last: a.last || lastFrom(older) }
+                ? {
+                    ...a,
+                    messages: sortAgentMessages([...older, ...(a.messages ?? [])]),
+                    last: a.last || lastFrom(older),
+                  }
                 : a,
             ),
           }))
@@ -960,7 +995,17 @@ export function useBackend() {
   // 决定送达后端后先收卡，界面立刻有反馈；后端随后发的 done 是幂等的。
   // 送达失败时不收卡，错误留在卡片上，用户能重试。
   const decideApproval = useCallback(async (id: string, allow: boolean, remember: boolean) => {
-    await API.decideApproval(id, allow, remember)
+    try {
+      await API.decideApproval(id, allow, remember)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // 「已失效或已完成」是幂等信号：这张卡已经被别的端（桌面/飞书）处理掉了。
+      // 继续把它留在界面上只会让人反复点一张死卡，所以也按已收卡处理，再把原因抛出去。
+      if (/失效|已完成|not found/i.test(msg)) {
+        setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) }))
+      }
+      throw e
+    }
     setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) }))
   }, [])
 

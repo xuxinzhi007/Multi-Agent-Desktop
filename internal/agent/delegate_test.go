@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,10 +22,16 @@ func callDelegate(t *testing.T, m *Manager, fromID, channelID string, in any) to
 	return d.Execute(context.Background(), raw)
 }
 
-func delegateInput(tasks ...map[string]string) map[string]any {
+// delegateInput 组装工具入参。mode 为空时不带顶层 mode，走工具面的兜底推断；
+// 断言 write 重路径（建常驻子会话）的用例显式传 "write"，避免被新推断改成 read。
+func delegateInput(mode string, tasks ...map[string]string) map[string]any {
 	list := make([]map[string]string, 0, len(tasks))
 	list = append(list, tasks...)
-	return map[string]any{"tasks": list}
+	in := map[string]any{"tasks": list}
+	if mode != "" {
+		in["mode"] = mode
+	}
+	return in
 }
 
 func TestDelegateRunsTasksInParallel(t *testing.T) {
@@ -34,7 +42,7 @@ func TestDelegateRunsTasksInParallel(t *testing.T) {
 	}
 	withChildBackend(t, "mock")
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput(
+	res := callDelegate(t, m, parent.ID, "", delegateInput("write",
 		map[string]string{"name": "查前端", "role": "前端", "task": "找出所有按钮组件"},
 		map[string]string{"name": "查后端", "role": "后端", "task": "找出所有 handler"},
 	))
@@ -67,7 +75,7 @@ func TestDelegateRejectsTooManyTasks(t *testing.T) {
 	parent := m.Create("", "主会话", "")
 	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput(
+	res := callDelegate(t, m, parent.ID, "", delegateInput("",
 		map[string]string{"task": "a"},
 		map[string]string{"task": "b"},
 		map[string]string{"task": "c"},
@@ -99,7 +107,7 @@ func TestDelegateRejectsWhenNoCapacity(t *testing.T) {
 	}
 	withChildBackend(t, "mock")
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput(
+	res := callDelegate(t, m, parent.ID, "", delegateInput("",
 		map[string]string{"task": "a"},
 		map[string]string{"task": "b"},
 	))
@@ -126,7 +134,7 @@ func TestUserSessionsDoNotBlockDelegation(t *testing.T) {
 	}
 	withChildBackend(t, "mock")
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput(map[string]string{"task": "a"}))
+	res := callDelegate(t, m, parent.ID, "", delegateInput("", map[string]string{"task": "a"}))
 	if res.Status != tool.StatusOK {
 		t.Fatalf("用户自建会话不该占用派活名额：%s", res.Content)
 	}
@@ -137,7 +145,7 @@ func TestDelegateRefusesInChannel(t *testing.T) {
 	parent := m.Create("", "主会话", "")
 	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
 
-	res := callDelegate(t, m, parent.ID, "ch-1", delegateInput(
+	res := callDelegate(t, m, parent.ID, "ch-1", delegateInput("",
 		map[string]string{"task": "a"},
 	))
 	if res.Status == tool.StatusOK {
@@ -158,7 +166,7 @@ func TestDelegateRefusesAtDepthLimit(t *testing.T) {
 	deep.mu.Unlock()
 	_ = m.SetAgentWorkDir(deep.ID, t.TempDir())
 
-	res := callDelegate(t, m, deep.ID, "", delegateInput(map[string]string{"task": "a"}))
+	res := callDelegate(t, m, deep.ID, "", delegateInput("", map[string]string{"task": "a"}))
 	if res.Status == tool.StatusOK {
 		t.Fatalf("到层数上限应当拒绝：%s", res.Content)
 	}
@@ -267,6 +275,7 @@ func TestSpawnParentTimeoutKeepsChildRunning(t *testing.T) {
 		parent:   parent.Snapshot(),
 		tasks:    []spawnTask{{Name: "慢活", Task: "慢慢做"}},
 		baseDir:  parent.EffectiveWorkDir(m),
+		mode:     spawnModeWrite,
 		budgetMS: 1,
 	})
 	_ = summary
@@ -275,5 +284,198 @@ func TestSpawnParentTimeoutKeepsChildRunning(t *testing.T) {
 
 	if got := len(m.List()); got != 2 {
 		t.Fatalf("子会话应当已经建出来，实际 %d", got)
+	}
+}
+
+// read 子任务：不开工作树、不落常驻会话、父会话只拿到摘要。
+func TestDelegateReadModeCreatesNoSessionOrWorktree(t *testing.T) {
+	repo := gitRepo(t)
+	m := newTestManager(t)
+	storePath := filepath.Join(t.TempDir(), "agents.json")
+	if err := m.SetStore(storePath); err != nil {
+		t.Fatal(err)
+	}
+	parent := m.Create("", "主会话", "工程师")
+	if err := m.SetAgentWorkDir(parent.ID, repo); err != nil {
+		t.Fatal(err)
+	}
+	withChildBackend(t, "mock")
+
+	res := callDelegate(t, m, parent.ID, "", delegateInput("read",
+		map[string]string{"name": "调研handler", "role": "后端", "task": "分析目录里的 handler 都在哪，总结成清单"},
+	))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("read 子任务失败：%s", res.Content)
+	}
+	// 摘要回给父级：带任务名，并标注是只读临时运行。
+	if !strings.Contains(res.Content, "调研handler") {
+		t.Fatalf("汇总里缺子任务名：%s", res.Content)
+	}
+	if !strings.Contains(res.Content, "只读") {
+		t.Fatalf("汇总应当标注只读临时运行：%s", res.Content)
+	}
+	// 不落常驻会话：内存名单只有父会话。
+	if got := len(m.List()); got != 1 {
+		t.Fatalf("read 子任务不该进会话名单，实际 %d 个", got)
+	}
+	// 不落 agents.json：落盘文件里也只有父会话。
+	m.waitSaves()
+	if err := m.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []Agent
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].ID != parent.ID {
+		t.Fatalf("agents.json 里不该出现临时会话：%+v", persisted)
+	}
+	// 不开工作树：仓库旁边没有 .mad-worktrees 目录。
+	if _, err := os.Stat(filepath.Join(filepath.Dir(repo), ".mad-worktrees")); !os.IsNotExist(err) {
+		t.Fatalf("read 模式不该建工作树目录：%v", err)
+	}
+}
+
+// write 子任务：现状不变——仍建隔离子会话和独立工作树。
+func TestDelegateWriteModeStillSpawnsSessionAndWorktree(t *testing.T) {
+	repo := gitRepo(t)
+	m := newTestManager(t)
+	parent := m.Create("", "主会话", "工程师")
+	if err := m.SetAgentWorkDir(parent.ID, repo); err != nil {
+		t.Fatal(err)
+	}
+	withChildBackend(t, "mock")
+	t.Cleanup(func() {
+		for _, a := range m.List() {
+			if sn := a.Snapshot(); sn.Worktree != "" {
+				_ = m.DisableWorktree(context.Background(), a.ID)
+			}
+		}
+	})
+
+	res := callDelegate(t, m, parent.ID, "", delegateInput("write",
+		map[string]string{"name": "改handler", "role": "后端", "task": "修改这个 handler，补一个参数"},
+	))
+	if res.Status != tool.StatusOK {
+		t.Fatalf("write 子任务失败：%s", res.Content)
+	}
+	if got := len(m.List()); got != 2 {
+		t.Fatalf("write 子会话应当建出来，实际 %d", got)
+	}
+	for _, a := range m.List() {
+		if a.ID == parent.ID {
+			continue
+		}
+		sn := a.Snapshot()
+		if sn.Worktree == "" || sn.WorktreeBranch == "" {
+			t.Fatalf("write 子会话 %s 没有独立工作树：%+v", sn.Name, sn)
+		}
+		if sn.WorkDir != sn.Worktree {
+			t.Fatalf("子会话 WorkDir 应当指向工作树：%q vs %q", sn.WorkDir, sn.Worktree)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(repo), ".mad-worktrees")); err != nil {
+		t.Fatalf("write 模式应当建工作树目录：%v", err)
+	}
+}
+
+// 缺省 mode 的文本推断：只读词 → read；改代码/跑测试 → write；拿不准 → write。
+func TestInferSpawnModeClassifiesTypicalTasks(t *testing.T) {
+	cases := []struct {
+		name string
+		task string
+		want string
+	}{
+		{"只读分析", "分析这段代码的调用链，总结结论", spawnModeRead},
+		{"调研查找", "调研一下相关实现，找出所有调用点", spawnModeRead},
+		{"改代码", "修改这个 handler，补一个参数并跑测试", spawnModeWrite},
+		{"拿不准", "把那件事办了", spawnModeWrite},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inferSpawnMode(spawnTask{Task: c.task}); got != c.want {
+				t.Fatalf("inferSpawnMode(%q) = %q, want %q", c.task, got, c.want)
+			}
+		})
+	}
+}
+
+// 形态优先级：任务显式 mode > 顶层 mode > 推断；旧调用方兜底 write。
+func TestResolveSpawnModePrecedence(t *testing.T) {
+	opts := spawnOpts{mode: spawnModeWrite, inferMode: true}
+	if got := resolveSpawnMode(spawnTask{Task: "分析一下", Mode: spawnModeRead}, opts); got != spawnModeRead {
+		t.Fatalf("任务显式 read 应覆盖顶层 write：%q", got)
+	}
+	if got := resolveSpawnMode(spawnTask{Task: "分析一下"}, opts); got != spawnModeWrite {
+		t.Fatalf("顶层 write 应覆盖推断：%q", got)
+	}
+	if got := resolveSpawnMode(spawnTask{Task: "分析一下"}, spawnOpts{}); got != spawnModeWrite {
+		t.Fatalf("旧调用方（inferMode=false）应兜底 write：%q", got)
+	}
+}
+
+// read 模式的工具白名单：只读工具在；写工具/命令工具根本没注册，调用即拒。
+func TestReadOnlyRegistryWithholdsWriteTools(t *testing.T) {
+	dir := t.TempDir()
+	reg := readOnlyRegistry(dir, nil)
+	names := map[string]bool{}
+	for _, s := range reg.Specs() {
+		names[s.Name] = true
+	}
+
+	for _, want := range []string{"read_file", "grep", "glob", "web"} {
+		if !names[want] {
+			t.Fatalf("只读白名单应当包含 %s：%v", want, names)
+		}
+	}
+	for _, blocked := range []string{"write_file", "edit_file", "apply_patch", "bash", "verify"} {
+		if names[blocked] {
+			t.Fatalf("只读模式不该注册写工具 %s", blocked)
+		}
+	}
+
+	// 子任务试图写文件：工具没注册，注册表走 unknown tool 拒绝路径。
+	res := reg.Invoke(context.Background(), tool.Call{
+		Name:  "write_file",
+		Input: json.RawMessage(`{"path":"x.txt","content":"x"}`),
+	})
+	if res.Status == tool.StatusOK {
+		t.Fatalf("未注册的写工具应当失败，实际成功：%+v", res)
+	}
+	if !strings.Contains(res.Content, "unknown tool") {
+		t.Fatalf("拒绝路径应当是 unknown tool：%s", res.Content)
+	}
+}
+
+// 父停止时 read 临时运行跟着取消，不留野 goroutine，也不留会话。
+func TestReadModeCancelledWithParent(t *testing.T) {
+	m := newTestManager(t)
+	parent := m.Create("", "主会话", "")
+	_ = m.SetAgentWorkDir(parent.ID, t.TempDir())
+	withChildBackend(t, "mock")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 父已经停止
+
+	_, err := runSpawn(ctx, m, spawnOpts{
+		parent:    parent.Snapshot(),
+		tasks:     []spawnTask{{Name: "调研", Task: "分析一下调用链"}},
+		baseDir:   parent.EffectiveWorkDir(m),
+		inferMode: true,
+	})
+	if err == nil {
+		t.Fatal("父停止后 runSpawn 应当返回取消错误")
+	}
+	if got := len(m.List()); got != 1 {
+		t.Fatalf("取消的 read 临时运行不该留下会话，实际 %d", got)
+	}
+
+	// 直接跑临时运行：取消的 ctx 必须让它退出。
+	if _, err := m.runTransientRead(ctx, parent.Snapshot(), spawnTask{Task: "分析"}, "临时"); err == nil {
+		t.Fatal("取消 ctx 下临时运行应当报错")
 	}
 }

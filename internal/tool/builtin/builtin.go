@@ -26,8 +26,10 @@ import (
 //   - 输出上限，否则一条 find / 就能撑爆上下文
 //   - 非零退出码不是错误，是结果；模型需要看到 stderr 才能自我修正
 type Bash struct {
-	// WorkDir 是命令的默认工作目录。
+	// WorkDir 是命令的默认工作目录（主根）。不传 cwd 时命令在这里跑。
 	WorkDir string
+	// ExtraDirs 是主根之外声明的工作区根；cwd 只能落在这些根或主根内。
+	ExtraDirs []string
 	// Timeout 是单条命令的硬上限。
 	Timeout time.Duration
 	// MaxOutput 限制 stdout+stderr 合计采集的字节数。
@@ -42,6 +44,8 @@ func (*Bash) Description() string {
 		shell = "PowerShell (-NoProfile -NonInteractive). Do not use bash syntax such as && or heredocs unless you know they work in PowerShell"
 	}
 	return "Run " + shell + ". Returns stdout and stderr. " +
+		"Optional cwd sets the working directory for this command; it must stay inside a declared workspace root, " +
+		"otherwise the command is rejected. " +
 		"Prefer read_file/write_file/edit_file for file operations — " +
 		"they are validated and reversible."
 }
@@ -53,7 +57,8 @@ func (*Bash) Schema() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"command": {"type": "string"},
-			"description": {"type": "string"}
+			"description": {"type": "string"},
+			"cwd": {"type": "string", "description": "Working directory for this command; must be inside a declared workspace root. Defaults to the main root."}
 		},
 		"required": ["command"],
 		"additionalProperties": false
@@ -65,6 +70,7 @@ func (*Bash) Schema() json.RawMessage {
 func (b *Bash) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, error) {
 	var in struct {
 		Command string `json:"command"`
+		Cwd     string `json:"cwd"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Preview{}, fmt.Errorf("cannot parse arguments: %v", err)
@@ -76,7 +82,10 @@ func (b *Bash) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, 
 	if blocked, reason := shellguard.Check(cmd); blocked {
 		return tool.Preview{Blocked: true, Reason: reason}, nil
 	}
-	dir := b.WorkDir
+	dir, err := b.resolveCwd(in.Cwd)
+	if err != nil {
+		return tool.Preview{}, err
+	}
 	if dir == "" {
 		dir = "(未设置)"
 	}
@@ -86,10 +95,24 @@ func (b *Bash) Preview(ctx context.Context, raw json.RawMessage) (tool.Preview, 
 	}, nil
 }
 
+// resolveCwd 解析本次命令的工作目录：空回落主根；非空必须落在某个已声明根内。
+// 校验顺序与 workdir.Roots.ResolveDir 一致（Abs → EvalSymlinks → 双重 Contains）。
+func (b *Bash) resolveCwd(cwd string) (string, error) {
+	if workdir.TooBroad(b.WorkDir) {
+		return "", fmt.Errorf("%s", workdir.RejectReason)
+	}
+	roots, err := buildRoots(b.WorkDir, b.ExtraDirs)
+	if err != nil {
+		return "", err
+	}
+	return roots.ResolveDir(cwd)
+}
+
 func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
 		Command     string `json:"command"`
 		Description string `json:"description"`
+		Cwd         string `json:"cwd"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("cannot parse arguments: %v", err)
@@ -100,8 +123,9 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	if blocked, reason := shellguard.Check(in.Command); blocked {
 		return tool.Result{Status: tool.StatusDenied, Content: "operation blocked by policy: " + reason}
 	}
-	if workdir.TooBroad(b.WorkDir) {
-		return tool.Fail("%s", workdir.RejectReason)
+	dir, err := b.resolveCwd(in.Cwd)
+	if err != nil {
+		return tool.Fail("%v", err)
 	}
 
 	timeout := b.Timeout
@@ -112,8 +136,8 @@ func (b *Bash) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	defer cancel()
 
 	cmd := proc.CommandContext(execCtx, in.Command)
-	if b.WorkDir != "" {
-		cmd.Dir = b.WorkDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	// 关键：独立进程组 + 取消时杀整组。
 	// shell 派生的子进程不会随父进程退出而退出，
@@ -206,6 +230,12 @@ func safePath(workDir, p string) (string, error) {
 	return rootsPath(workDir, nil, p)
 }
 
+// buildRoots 由主目录 + 附加目录构造一组工作区根。构造失败（过宽、不存在）
+// 时调用方按边界错误返回。
+func buildRoots(workDir string, extra []string) (workdir.Roots, error) {
+	return workdir.NewRoots(workDir, extra...)
+}
+
 // rootsPath 在主目录 + 附加目录这组边界内解析路径。
 func rootsPath(workDir string, extra []string, p string) (string, error) {
 	if workDir == "" {
@@ -214,7 +244,7 @@ func rootsPath(workDir string, extra []string, p string) (string, error) {
 		}
 		return filepath.Clean(p), nil
 	}
-	roots, err := workdir.NewRoots(workDir, extra...)
+	roots, err := buildRoots(workDir, extra)
 	if err != nil {
 		return "", err
 	}
@@ -227,7 +257,7 @@ func rootsPath(workDir string, extra []string, p string) (string, error) {
 // 不带行号的 read_file 会让后续编辑变成"猜位置"。
 type ReadFile struct {
 	WorkDir string
-	// ExtraDirs 是附加目录：只给文件读写，不改 shell 的 cwd。
+	// ExtraDirs 是主根之外声明的工作区根。
 	ExtraDirs []string
 }
 
@@ -497,13 +527,13 @@ func Register(r *tool.Registry, workDir string) {
 	RegisterRoots(r, workDir, nil)
 }
 
-// RegisterRoots 装文件、搜索与 shell 工具。extra 是附加目录：
-// 文件工具能读写它们，bash 的 cwd 仍是主目录——命令在哪跑必须是确定的。
+// RegisterRoots 装文件、搜索与 shell 工具。extra 是主根之外声明的工作区根：
+// 文件工具与跨根检索覆盖整组根；bash 默认在主根跑，可用 cwd 切到某个已声明根内。
 func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
 	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra})
-	r.Register(&Bash{WorkDir: workDir})
+	r.Register(&Bash{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Grep{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra})
