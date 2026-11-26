@@ -28,6 +28,7 @@ import (
 	gwhost "multi-agent-desktop/internal/gateway/host"
 	"multi-agent-desktop/internal/knowledge"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/mcp"
 	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/pty"
 	"multi-agent-desktop/internal/scheduler"
@@ -1681,12 +1682,25 @@ func main() {
 		img = filepath.Join(dataDir, "images")
 		_ = os.MkdirAll(img, 0o755)
 		mgr.SetImageDir(img)
+		// 工具输出原文：折叠后靠它还原，所以必须和会话数据在一起。
+		mgr.SetObservDir(filepath.Join(dataDir, "observ"))
 		if err := mgr.SetStore(filepath.Join(dataDir, "agents.json")); err != nil {
 			log.Printf("load agents: %v", err)
 		}
 		// 会话读回来之后，把落盘的权限档装回审批中心。
 		// 不做这一步，用户上次选的「自动」就白选了。
 		mgr.RestorePermissions()
+
+		// 外部 MCP Server：后台拉起。首次 uv 可能要装依赖（几十秒），
+		// 所以不能阻塞启动；失败只记进状态，不影响应用起不来。
+		mcpMgr := mcp.NewManager()
+		mgr.SetMCP(mcpMgr)
+		if len(effective.MCP.Servers) > 0 {
+			go func() {
+				mcpMgr.StartAll(context.Background(), toMCPServers(effective.MCP.Servers))
+				log.Printf("mcp 就绪：%s", mcpMgr.Describe())
+			}()
+		}
 		if err := channels.SetStore(filepath.Join(dataDir, "channels.json")); err != nil {
 			log.Printf("load channels: %v", err)
 		}
@@ -1795,6 +1809,10 @@ func main() {
 			cancel()
 		}
 		if mgr != nil {
+			// MCP 子进程必须先杀：它们不是应用自己的 goroutine，留着会变孤儿进程。
+			if mcps := mgr.MCP(); mcps != nil {
+				mcps.Close()
+			}
 			mgr.Shutdown()
 		}
 	})
@@ -2063,4 +2081,23 @@ func (a *API) KeepAwakeStatus() KeepAwakeState {
 	a.keepAwakeMu.Lock()
 	defer a.keepAwakeMu.Unlock()
 	return KeepAwakeState{On: a.keepAwakeOff != nil}
+}
+
+// toMCPServers 把设置里的 server 列表转成 mcp 包的配置。
+//
+// 两处结构刻意保持一致（JSON 字段名相同），这里只做一次显式转换，
+// 而不是让 config 包去依赖 mcp 包。
+func toMCPServers(in []config.MCPServer) []mcp.ServerConfig {
+	out := make([]mcp.ServerConfig, 0, len(in))
+	for _, s := range in {
+		out = append(out, mcp.ServerConfig{
+			Name:      s.Name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			Dir:       s.Dir,
+			TimeoutMS: s.TimeoutMS,
+		})
+	}
+	return out
 }

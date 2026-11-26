@@ -208,6 +208,9 @@ type Runner struct {
 	ContextLimit int
 	// SaveImage 把工具交回的画面存成文件，返回 id。空则画面不进历史。
 	SaveImage func([]byte) (string, error)
+	// ObservDir 是观察原文目录（会话数据目录）。非空时，较早的工具输出会被
+	// 折叠成带 call_id 的占位符，原文留在磁盘上供 restore_observation 取回。
+	ObservDir string
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -612,7 +615,7 @@ func (r *Runner) context(st *State) []llm.Message {
 	if r.System != "" {
 		out = append(out, llm.Message{Role: "system", Content: r.System})
 	}
-	out = append(out, llm.WithoutRuntimeErrors(st.Messages)...)
+	out = append(out, llm.WithoutRuntimeErrors(maskObservations(st.Messages, MaskWindowTurns, r.ObservDir))...)
 	return out
 }
 

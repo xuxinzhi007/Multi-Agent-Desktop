@@ -646,6 +646,15 @@ export interface Room {
   messages: Line[];
 }
 
+export interface ServerStatus {
+  name: string;
+  command: string;
+  state: string;
+  tools: number;
+  error?: string;
+  startedAt?: number;
+}
+
 /** ShellEvent 是命令开始。 */
 export interface ShellEvent {
   agentId: string;
@@ -1001,6 +1010,15 @@ export const API = {
   /** MatchNotesForAgent 根据 agent 角色匹配相关知识。 */
   matchNotesForAgent(agentId: string): Promise<Note[]> {
     return call("API.MatchNotesForAgent", agentId);
+  },
+  /**
+   * McpStatus 返回外部 MCP Server 的状态，供设置页/诊断页显示。
+   *
+   * 失败原因要能在这里看到：MCP 最常见的故障是"进程起来了但握手失败"，
+   * 只看日志的话用户没法自助排查。
+   */
+  mcpStatus(): Promise<ServerStatus[]> {
+    return call("API.McpStatus");
   },
   /** MemoryDeleteNote 按 id 删除一条记忆笔记。 */
   memoryDeleteNote(id: number): Promise<void> {

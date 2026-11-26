@@ -38,6 +38,25 @@ type Settings struct {
 	FeishuBots []FeishuBot `json:"feishuBots,omitempty"`
 	// Worktree 控制"新会话默认使用独立 git 工作树"。
 	Worktree Worktree `json:"worktree,omitempty"`
+	// MCP 是外部 MCP Server。它们的工具在本应用之外执行：一律走审批、
+	// 不参与写入版本校验，失败只影响自己，不影响应用启动。
+	MCP MCP `json:"mcp,omitempty"`
+}
+
+// MCP 是外部工具接入配置。
+//
+// 字段形状与 internal/mcp.ServerConfig 一致，装配层直接透传，避免再抄一层。
+type MCP struct {
+	Servers []MCPServer `json:"servers,omitempty"`
+}
+
+type MCPServer struct {
+	Name      string            `json:"name"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Dir       string            `json:"dir,omitempty"`
+	TimeoutMS int               `json:"timeoutMs,omitempty"`
 }
 
 // Worktree 是工作树隔离设置。

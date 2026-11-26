@@ -22,7 +22,7 @@
 | [`req-web-remote-2026-11-26.md`](req-web-remote-2026-11-26.md) | Web 端接真后端（需求卡） | **v1 已落地**，且改为单页方案（`/remote` 已删）；含 `/api/rpc` 与浏览器实拍验证 |
 | [`req-write-safety-2026-11-26.md`](req-write-safety-2026-11-26.md) | 需求：多写者下的写安全（版本校验 / 写意图广播 / 默认 worktree + 合回） | **P0 已实现**（版本校验 / 写意图事件+提示条 / worktree_merge / 三态隔离），P1/P2 未做；动机是四次并行踩踏事故 |
 | [`req-code-capability-2026-11-26.md`](req-code-capability-2026-11-26.md) | 需求：编码能力提升（verify 含测试/lint、失败闭环、repo_map、变更集自查） | **P0 + P1-1/P1-3 已实现**（verify 带相关测试/lint、3 次未过即停、repo_map、changeset）；P1-2 部分、P2 未做 |
-| [`req-context-budget-2026-11-26.md`](req-context-budget-2026-11-26.md) | 需求：上下文预算与工具输出防护（参考 gp / gp-context-lab） | **提案，待开发**；P0 3d＝折叠+restore（1d）、MCP stdio 客户端（2d）；PPR/ACT-R/MMR 与 Ledger 明确列 P1 不排期 |
+| [`req-context-budget-2026-11-26.md`](req-context-budget-2026-11-26.md) | 需求：上下文预算与工具输出防护（参考 gp / gp-context-lab） | **P0 已实现并真机验证**；折叠+restore（5+3+5 测试）、MCP stdio 客户端（6 测试 + feishu-mcp 11 工具真机就绪）；PPR/ACT-R/MMR 与 Ledger 仍列 P1 不排期 |
 | [`todo-2026-11-26.md`](todo-2026-11-26.md) | 今日清单（逐条核实到行号，P0→P3 排序） | **当前有效**；P0 为网关并发两处 + verify 闭环，含「不做」及理由 |
 | [`final-acceptance-2026-11-25.md`](final-acceptance-2026-11-25.md) | 全量验收命令与清单 | 带有 11-26 收尾更新，历史清单保留 |
 | [`review-recheck-2026-11-25.md`](review-recheck-2026-11-25.md) | 三份评审对当前代码的逐条复核 | 当前有效 |

@@ -10,6 +10,7 @@ import (
 
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/mcp"
 	"multi-agent-desktop/internal/workdir"
 )
 
@@ -366,4 +367,16 @@ func (s *API) AgentStates() []AgentState {
 		out = append(out, AgentState{ID: a.ID, Status: string(a.Status), Busy: a.BusyPlace})
 	}
 	return out
+}
+
+// McpStatus 返回外部 MCP Server 的状态，供设置页/诊断页显示。
+//
+// 失败原因要能在这里看到：MCP 最常见的故障是"进程起来了但握手失败"，
+// 只看日志的话用户没法自助排查。
+func (s *API) McpStatus() []mcp.ServerStatus {
+	m := s.mgr.MCP()
+	if m == nil {
+		return nil
+	}
+	return m.Status()
 }

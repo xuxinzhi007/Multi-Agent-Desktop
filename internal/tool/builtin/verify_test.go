@@ -16,7 +16,7 @@ import (
 func newVerifyRegistry(t *testing.T, dir string) *tool.Registry {
 	t.Helper()
 	r := tool.NewRegistry()
-	RegisterRoots(r, dir, nil)
+	RegisterRoots(r, dir, nil, "")
 	return r
 }
 
@@ -142,7 +142,7 @@ func TestVerifyOutputTruncatedByRegistry(t *testing.T) {
 	dir := tempFailModule(t)
 	r := tool.NewRegistry()
 	r.MaxResultBytes = 512
-	RegisterRoots(r, dir, nil)
+	RegisterRoots(r, dir, nil, "")
 
 	in, _ := json.Marshal(verifyInput{Cmd: "go test ./..."})
 	res := r.Invoke(context.Background(), tool.Call{

@@ -1,6 +1,7 @@
 # 需求：上下文预算与工具输出防护（参考 gp / gp-context-lab）
 
-状态：**提案，待开发** ｜ 日期 2026-11-26 ｜ P0 预估 3 人天 ｜ 来源：`npc1607/gp`（主干）、`npc1607/gp-context-lab`（实验场）
+状态：**P0 已实现并真机验证（2026-11-26）** ｜ 来源：`npc1607/gp`（主干）、`npc1607/gp-context-lab`（实验场）
+落地清单与差异见第 8 节；P1 三项仍未排期。
 
 ## 1. 为什么现在做
 
@@ -40,7 +41,7 @@
  需要原文时调用 restore_observation(call_id="call_8f2a")]
 ```
 
-**落盘**：`truncate` 判定超限时，先把完整原文写到会话数据目录 `observations/<runID>/<callID>.txt`，再裁。这样 `restore_observation` 能原样取回，且重启后仍有效。
+**落盘**：`truncate` 判定超限时，先把完整原文写到 `<dataDir>/observ/observations/<callID>.txt`，再裁。这样 `restore_observation` 能原样取回，且重启后仍有效（读的是磁盘文件，不依赖进程状态）。
 
 **新工具** `restore_observation(call_id, offset?, limit?)`：只读、零审批、返回原文（默认前 200 行，gp 的 `defaultRestoreMaxLines`）。找不到时明确说"该调用没有留存原文（可能是小输出或已过期）"，不要返回空。
 
@@ -59,7 +60,7 @@
 
 **照抄 gp 的结构**（`internal/mcp`：`NewStdioClient` → `Initialize` → `ListTools` → `CallTool` → `Notify` → `Close`），落到 `internal/mcp/`：
 
-- `config.yaml` 增加 `mcp.servers[]`：`{name, command, args, env, dir, timeoutMs}`。
+- 配置落在 `config.json`（`config.Settings`）的 `mcp.servers[]`：`{name, command, args, env, dir, timeoutMs}`。注意 GUI 进程的 `PATH` 很短，`command` 要写绝对路径（`uv` 在 `~/.local/bin/uv`）。
 - 启动时对每个 server 握手 + `tools/list`，注册为 `mcp__<server>__<tool>`（前缀必须有，否则和内置 `read_file`/`grep` 撞名）。
 - **硬约束**（不做就会出事故）：
   - 外部工具一律 `Writes() = true`，走审批；`ConcurrencySafe() = false`。
@@ -98,3 +99,41 @@ P0-1（1d）→ P0-2（2d）。两项都完成后，再评估 P1-1 与 P1-2。
 | 落盘原文占空间 | 单次 >1MB 的只留头尾各 500KB；按 runID 分目录，会话删除时一并清理 |
 | MCP 外部工具绕过写安全 | 默认 Writes + 审批 + 描述声明；不进 `filestate` 台账，文档里写清边界 |
 | 折叠与 checkpoint 冲突 | 折叠只在组装请求时做，永不回写 `st.Messages` |
+
+## 8. 落地记录（2026-11-26）
+
+### 8.1 新增与改动
+
+| 文件 | 内容 |
+|---|---|
+| `internal/tool/observ.go` | 原文留存：`observationName` 路径消毒（`[A-Za-z0-9_-]`，≤96 字符，否则 `x-<sha1前12>`）、`SaveObservation` 先写 `.tmp` 再 rename 且幂等、`ReadObservation` 缺失时给明确文案、`ObservationPlaceholder`、`HumanBytes` |
+| `internal/tool/tool.go` | `Registry.ObservDir`；`res.CallID` 提前赋值；`truncate` **裁剪前**落盘，失败只记日志不阻断 |
+| `internal/tool/builtin/restore_observation.go` | 新工具 `restore_observation(call_id, offset?, limit 1–400 默认 200)`，带行号、首行给总量、末尾给续读提示；只读零审批可并发 |
+| `internal/loop/mask.go` | `MaskWindowTurns=5` / `MaskMinBytes=400` / `MaskMinLines=8`；`maskObservations` 只动 `role=="tool"`、只动 cutoff 之前、只动未折叠过的，**先落盘再折**，失败跳过 |
+| `internal/loop/loop.go` | `Runner.ObservDir`；`context()` = `WithoutRuntimeErrors(maskObservations(...))`，**不回写 `st.Messages`** |
+| `internal/mcp/client.go` | stdio JSON-RPC 客户端：`Start`→`initialize`（`2024-11-05`）→`notifications/initialized`→`ListTools`/`CallTool`；`readLoop` 分发 id；进程退出把所有 pending 用 `-32000` 唤醒；`drainStderr` 留最后 20 行；`Close` 幂等 |
+| `internal/mcp/tool.go` | 适配器：`mcp__<server>__<tool>`、`Writes()=true`、`ConcurrencySafe()=false`、描述里声明不参与 `ifVersion` 版本校验 |
+| `internal/mcp/manager.go` | `StartAll` 单 server 失败不影响其它、`ListTools` 30s 超时、`Register` 只装已就绪工具、`Status/Describe/Close` |
+| `internal/config/config.go` | `Settings.MCP` / `MCP` / `MCPServer{Name,Command,Args,Env,Dir,TimeoutMS}` |
+| `internal/agent/*`、`main.go` | `SetObservDir`/`SetMCP` 注入；`RegisterRoots(..., observDir)`；启动异步 `StartAll`；退出先 `Close` MCP 再 `Shutdown`（子进程不是应用自己的 goroutine，留着会变孤儿） |
+| `api_agent.go` | `McpStatus()` 返回 server 状态，诊断页/设置页可直接看 ready/failed 与失败原因 |
+| `cmd/mcp-probe` | 独立探针：不启动应用，直接对真实 server 握手、列工具、调一次。接新 server 先在这里跑通 |
+
+### 8.2 与需求的差异（都是实现时被迫决定的）
+
+1. **落盘目录平铺**：需求写 `<runID>/<callID>.txt`，实际是 `observ/observations/<callID>.txt`（callID 全局唯一，分 runID 反而让 restore 需要额外参数）。**代价：没有清理逻辑**，会话删除不回收。列为待办，不做隐式删除。
+2. **`restore_observation` 上限 400 行**：单次返回过大同样会触发 `truncate`，反而把原文再折一次。分页由 `offset` 承担。
+3. **MCP 硬超时杀进程**：`ServerConfig.TimeoutMS`（默认 60s）在 `Registry.Timeout=120s` 之内，所以先杀子进程、错误文案提示"下次调用会重新拉起"。这是我选的取舍：宁可重拉也不让 loop 挂 120s。
+4. **外部只读工具也走审批**：`Writes()=true` 恒真。`feishu_read_document` 这类只读调用会弹审批，体验上偏重，但比"读到别人文档却以为是本地文件"安全。白名单留到有真实痛感再加。
+
+### 8.3 验收实测
+
+- 单测：`internal/mcp` 6 条（握手/列工具/正常调用/`isError`/超时杀进程/坏 server 隔离 + 前缀与审批约束）全绿；`internal/loop/mask_test.go` 5 条、`internal/tool/observ_test.go` 3 条、`restore_observation_test.go` 5 条全绿。
+- 真机：`go run ./cmd/mcp-probe -name feishu -cmd ~/.local/bin/uv -arg run --directory tools/feishu-mcp python server.py -list` → 握手 3.1s、11 个工具；`-call feishu_auth_status` 返回真实 JSON（`kind=bot`、`app_id=cli_aa1ab…`）。
+- 应用内：`config.json` 写入 `mcp.servers` 后重启，日志 `mcp: feishu 就绪，11 个工具`，`POST /api/rpc {"method":"McpStatus"}` 返回 `state=ready, tools=11`。
+- 未做：`feishu_patch_block` 在测试文档上的真实写入（需要一份可改的测试文档与用户身份），列为下次联调项。
+
+### 8.4 踩到的坑
+
+- **GUI 进程 `PATH` 不含 `~/.local/bin`**：`command: "uv"` 直接失败（`executable file not found in $PATH`）。配置里必须写绝对路径，这一点已写进第 3 节。
+- `kill` 开发态应用进程会让 `mygo dev` 一起退出（托管关系），要重新 `npx mygo dev` 才会带新配置启动。

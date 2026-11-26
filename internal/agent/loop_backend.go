@@ -162,7 +162,11 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	}
 
 	reg := tool.NewRegistry()
-	builtin.RegisterRoots(reg, workDir, a.EffectiveExtraDirs())
+	reg.ObservDir = m.ObservDir()
+	builtin.RegisterRoots(reg, workDir, a.EffectiveExtraDirs(), m.ObservDir())
+	// 外部 MCP 工具：只装已经握手成功的那些。还没启动完就等下一轮，
+	// 不让一次 prompt 卡在 uv 安装或服务端超时上。
+	m.MCP().Register(reg)
 	if appr := m.Approvals(); appr != nil {
 		reg.Approver = appr.Approver(a.ID, a.Name)
 	}
@@ -286,6 +290,7 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 		Store:        store,
 		System:       system,
 		ContextLimit: llm.ContextLimit(cfg),
+		ObservDir:    m.ObservDir(),
 		SteerCh:      steerCh,
 		SaveImage: func(png []byte) (string, error) {
 			return llm.SaveImage(m.ImageDir(), "image/png", png)

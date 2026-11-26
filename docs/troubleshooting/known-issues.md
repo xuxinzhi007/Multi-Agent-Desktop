@@ -551,3 +551,19 @@
 **护栏**：`api_agentstate_test.go`（条数与 `ListAgents` 一致、不重复、新建会话必须 idle）；`tsc --noEmit`；浏览器实测粘贴 320×220 图后量坐标（图片 692–764、输入框 772–810，零重叠）。
 
 ![图片草稿与输入框实测](../reviews/image-draft-check.png)
+
+## 26. 整包跑 `internal/agent` 必超时，单跑却通过
+
+**现象**（2026-11-26 21:40）：`go test ./internal/agent/ -count=1` 跑到 600s（默认 10m）崩在 `panic: test timed out`，报的"正在跑"是 `TestFleetThreeHopRelay`；把 `-timeout 100s` 缩短复现，同样只挂这一条。
+
+**实测**：
+
+| 跑法 | 结果 |
+|---|---|
+| 当前工作树，单跑 `-run TestFleetThreeHopRelay` | ok 8.8s（连跑两次都过） |
+| 干净基线（`git worktree add /tmp/mad-base HEAD`），同一测试 | ok 9.2s |
+| 当前工作树，整包 `-skip 'TestFleetThreeHopRelay\|TestFleetConnectivityMatrix'` | ok 121s，其余全绿 |
+
+**判断**：不是本次改动引入，是既有测试对并发密度敏感。这两个 fleet 测试各自建 3–4 个 agent、走 mock LLM 的排队通道，整包并行时 mock 响应被拉长，超过测试内的 60s ctx 后就永久等下去（`beginAsk` 的等待边没有 ctx 兜底）。
+
+**规避**：本地整包回归用 `go test ./internal/agent/ -skip 'TestFleet(ConnectivityMatrix|ThreeHopRelay)'`，改这两个测试时单独 `-run` 跑。真要修，得给 `askAgentTool` 的等待加 ctx 取消（现在只有 `ctx` 传给 Execute，等待边本身不看 ctx），属独立任务，不在上下文预算这期做。

@@ -8,6 +8,7 @@ package tool
 
 import (
 	"context"
+	"log"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -130,6 +131,9 @@ type Registry struct {
 	OnWrite func(call Call)
 	// MaxResultBytes 限制回填给模型的文本长度。0 表示用默认值。
 	MaxResultBytes int
+	// ObservDir 是观察原文的目录（会话数据目录）。非空时，被截断的输出会先
+	// 原样落盘，模型之后能用 restore_observation 取回。空则退回「裁了就没了」。
+	ObservDir string
 	// Timeout 是单次工具执行的硬上限。0 表示用默认值。
 	Timeout time.Duration
 }
@@ -339,6 +343,7 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 		}
 	}
 
+	res.CallID = c.ID
 	res = r.truncate(res)
 
 	r.mu.Lock()
@@ -380,6 +385,12 @@ func (r *Registry) truncate(res Result) Result {
 	if raw <= limit {
 		res.Meta.BytesSent = raw
 		return res
+	}
+	// 先留存完整原文，再裁。顺序不能反：裁过之后 head/tail 之外的内容就找不回来了。
+	if r.ObservDir != "" && res.CallID != "" {
+		if _, err := SaveObservation(r.ObservDir, res.CallID, []byte(res.Content)); err != nil {
+			log.Printf("tool: 留存观察原文失败 call=%s: %v", res.CallID, err)
+		}
 	}
 	half := limit / 2
 	head := res.Content[:half]

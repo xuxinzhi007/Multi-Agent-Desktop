@@ -15,6 +15,7 @@ import (
 	"multi-agent-desktop/internal/audit"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/loop"
+	"multi-agent-desktop/internal/mcp"
 	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/workdir"
@@ -151,6 +152,10 @@ type Manager struct {
 	emit      Emitter
 	store     string // 持久化文件路径，空则不持久化
 	imageDir  string // 图片字节目录，与 json 分开
+	observDir string // 工具输出原文目录，供 context 折叠后还原
+	// mcps 是外部 MCP Server 的连接池。工具在本应用之外执行，
+	// 每轮 prompt 只把已就绪的那部分包进工具表。
+	mcps      *mcp.Manager
 	workDir   string // CLI agent 默认工作目录
 	knowledge KnowledgeProvider
 	// memory 是跨会话长期记忆库；nil 表示未启用（测试/无数据目录）。
@@ -278,6 +283,33 @@ func systemPromptFor(role string) string {
 	_ = role
 	return "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。" +
 		" 声称任务完成前必须调用 verify，只有 verify 通过才算完成；不要用 bash 跑一次命令代替 verify。"
+}
+
+// SetObservDir 指定工具输出原文放在哪。空则不做上下文折叠（宁可多花 token，
+// 也不能折叠了却还原不了）。
+func (m *Manager) SetObservDir(dir string) {
+	m.mu.Lock()
+	m.observDir = dir
+	m.mu.Unlock()
+}
+
+// SetMCP 接入外部 MCP Server。nil 表示没有配置，工具表里就不会出现 mcp__*。
+func (m *Manager) SetMCP(mcps *mcp.Manager) {
+	m.mu.Lock()
+	m.mcps = mcps
+	m.mu.Unlock()
+}
+
+func (m *Manager) MCP() *mcp.Manager {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mcps
+}
+
+func (m *Manager) ObservDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.observDir
 }
 
 // SetImageDir 指定图片字节放在哪。空则带图的消息存不下来。
@@ -507,6 +539,15 @@ func (m *Manager) Load() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, saved := range data {
+		// SetStore 自己会 Load 一次；调用方再显式 Load 时不能重复装载：
+		// 同一个 ID 建两个 worker，后一个覆盖 map，前一个永远不会被 close(done)，
+		// WaitWorkers 就永远等不到零（CI 上表现为 test timed out）。
+		if saved.ID == "" {
+			continue
+		}
+		if _, dup := m.agents[saved.ID]; dup {
+			continue
+		}
 		a := &Agent{
 			ID:             saved.ID,
 			Name:           saved.Name,

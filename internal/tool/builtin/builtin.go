@@ -540,12 +540,12 @@ func displayPath(p string) string {
 
 // Register 把 4 个原语工具装进注册表。
 func Register(r *tool.Registry, workDir string) {
-	RegisterRoots(r, workDir, nil)
+	RegisterRoots(r, workDir, nil, "")
 }
 
 // RegisterRoots 装文件、搜索与 shell 工具。extra 是主根之外声明的工作区根：
 // 文件工具与跨根检索覆盖整组根；bash 默认在主根跑，可用 cwd 切到某个已声明根内。
-func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
+func RegisterRoots(r *tool.Registry, workDir string, extra []string, observDir string) {
 	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra})
@@ -557,4 +557,5 @@ func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
 	r.Register(&RepoMap{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Changeset{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WorktreeMerge{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&RestoreObservation{ObservDir: observDir})
 }

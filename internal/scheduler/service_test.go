@@ -118,6 +118,10 @@ func TestServiceIntervalDue(t *testing.T) {
 func TestServiceCronDue(t *testing.T) {
 	runner := &fakeRunner{}
 	svc := newTestService(t, runner, map[string]bool{"a1": true}, Options{})
+	// 默认静默时段 23:00–08:00 会吞掉 07:30 的任务；CI 跑在 UTC，
+	// 07:30 UTC 就是本地 07:30，于是这里只测 cron 到期、先关掉静默。
+	// 显式排 07:30 晨报却永远不跑，是另一个产品问题，见 progress 文档。
+	svc.cfg.Quiet = QuietWindow{StartHour: 12, EndHour: 12}
 	clk := svc.clock.(*fakeClock)
 	clk.Set(time.Date(2026, 11, 26, 7, 0, 0, 0, time.UTC))
 

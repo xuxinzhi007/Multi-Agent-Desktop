@@ -191,7 +191,7 @@ func TestApplyPatchDeniedByApprover(t *testing.T) {
 	dir := tmpDir(t)
 	r := tool.NewRegistry()
 	r.Approver = denyApprover{}
-	RegisterRoots(r, dir, nil)
+	RegisterRoots(r, dir, nil, "")
 
 	res := r.Invoke(context.Background(), tool.Call{
 		ID:    "c1",
