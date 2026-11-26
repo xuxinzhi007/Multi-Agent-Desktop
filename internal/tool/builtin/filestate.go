@@ -60,11 +60,11 @@ func fingerprintFile(abs string) (fileVersion, error) {
 	}, nil
 }
 
-// readState 是"这个进程最后一次读到某个文件的哪个版本"。
+// readState 是"某个会话最后一次读到某个文件的哪个版本"。
 //
-// 键用绝对路径（调用方已 resolve 过 root 边界）。
-// 多个会话共享同一张表：语义是"进程内最后一次读"，比按会话隔离更严格，
-// 只会多报一次 READ 要求，不会漏报覆盖。
+// 键由会话作用域 + 绝对路径组成（调用方已 resolve 过 root 边界）。
+// 同一 Agent 的多次读取会推进自己的版本；其它 Agent 的读写不会替它推进，
+// 因此后写者不能借用先写者的新版本状态绕过 STALE_WRITE。
 type readState struct {
 	version string
 	at      time.Time
@@ -75,24 +75,35 @@ var readStates = struct {
 	m map[string]readState
 }{m: map[string]readState{}}
 
-// RememberRead 记录一次读取的版本。供 ReadFile 调用。
-func RememberRead(abs, version string) {
+// stateKey 把读取版本按会话隔离。
+//
+// 不能只按文件路径共享：A 读过 v1、B 也读过 v1 后，A 写入 v2 会刷新
+// 全局记录；如果 B 再基于 v1 修改，共享记录会误以为 B 已经见过 v2，
+// 从而放过一次过期写入。scope 在同一 Agent 的多轮工具注册表之间保持稳定。
+func stateKey(scope, abs string) string { return scope + "\x00" + abs }
+
+// RememberRead 记录一次无会话作用域的读取。保留给包内兼容入口与测试。
+func RememberRead(abs, version string) { rememberRead("", abs, version) }
+
+func rememberRead(scope, abs, version string) {
 	readStates.Lock()
-	readStates.m[abs] = readState{version: version, at: time.Now()}
+	readStates.m[stateKey(scope, abs)] = readState{version: version, at: time.Now()}
 	readStates.Unlock()
 }
 
-// ForgetRead 丢弃记录。删除文件后调用，避免后续 add 被旧版本拦住。
-func ForgetRead(abs string) {
+// ForgetRead 丢弃无会话作用域的记录。删除文件后调用 scoped 版本。
+func ForgetRead(abs string) { forgetRead("", abs) }
+
+func forgetRead(scope, abs string) {
 	readStates.Lock()
-	delete(readStates.m, abs)
+	delete(readStates.m, stateKey(scope, abs))
 	readStates.Unlock()
 }
 
-func remembered(abs string) (readState, bool) {
+func remembered(scope, abs string) (readState, bool) {
 	readStates.Lock()
 	defer readStates.Unlock()
-	st, ok := readStates.m[abs]
+	st, ok := readStates.m[stateKey(scope, abs)]
 	return st, ok
 }
 
@@ -119,6 +130,10 @@ func (e *staleWriteError) Error() string {
 //  2. 没给：只在"本进程读过这个文件、且版本已经变了"时拒绝。
 //     没读过的新文件不拦——否则模型写新文件要先读一个不存在的文件。
 func writeGuard(abs, ifVersion string) (fileVersion, error) {
+	return writeGuardScoped("", abs, ifVersion)
+}
+
+func writeGuardScoped(scope, abs, ifVersion string) (fileVersion, error) {
 	cur, err := fingerprintFile(abs)
 	if err != nil {
 		return fileVersion{}, err
@@ -134,7 +149,7 @@ func writeGuard(abs, ifVersion string) (fileVersion, error) {
 		}
 		return cur, nil
 	}
-	if st, ok := remembered(abs); ok && st.version != cur.String() {
+	if st, ok := remembered(scope, abs); ok && st.version != cur.String() {
 		old := st.version
 		if len(old) >= 12 {
 			old = old[:12]
@@ -149,20 +164,24 @@ func writeGuard(abs, ifVersion string) (fileVersion, error) {
 	return cur, nil
 }
 
-// rememberWrite 在写成功后刷新状态：此刻磁盘内容就是"最新读到的"。
-func rememberWrite(abs string) {
+// rememberWrite 在写成功后刷新本会话的状态：此刻磁盘内容就是"最新读到的"。
+func rememberWrite(abs string) { rememberWriteScoped("", abs) }
+
+func rememberWriteScoped(scope, abs string) {
 	if v, err := fingerprintFile(abs); err == nil {
-		RememberRead(abs, v.String())
+		rememberRead(scope, abs, v.String())
 	}
 }
 
 // versionHint 是附在 read_file 输出末尾的一行，让模型能把它带回 ifVersion。
 // 不放在 Meta 里是因为 Meta 不回填模型上下文，模型就无从拿到这个值。
-func versionHint(abs string) string {
+func versionHint(abs string) string { return versionHintScoped("", abs) }
+
+func versionHintScoped(scope, abs string) string {
 	v, err := fingerprintFile(abs)
 	if err != nil {
 		return ""
 	}
-	RememberRead(abs, v.String())
+	rememberRead(scope, abs, v.String())
 	return fmt.Sprintf("\n[file version %s · 写这个文件时带上 ifVersion=%s]\n", v.short(), v.short())
 }

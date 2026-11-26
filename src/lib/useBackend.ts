@@ -490,9 +490,18 @@ export function useBackend() {
       if (openedRef.current && openedRef.current !== e.id) return
       pushBuf(reasonBuf, reasonGen, e.id, e.reasoning)
     })
-    sub(events.agentTool, (e) => {
-      // 后端 status 是 string，这里收窄到 Inspector 认识的联合类型，
-      // 未知状态一律当 ok —— 不要因为一个新状态值就让类型崩掉。
+    sub(events.agentTool, (event) => {
+      // 新字段由后端运行时事件补充；生成的旧客户端类型未更新时也能平滑接收。
+      const e = event as typeof event & {
+        callId?: string
+        input?: string
+        output?: string
+        path?: string
+        diff?: string
+        truncated?: boolean
+        exitCode?: number
+        durationMs?: number
+      }
       // cancelled 是「被用户插话打断」，不是错误，单独走中性态，不进失败统计。
       const status: ToolCall['status'] =
         e.status === 'waiting'
@@ -520,17 +529,51 @@ export function useBackend() {
             pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
             tools: [
               ...s.tools,
-              { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
-            ].slice(-60),
+              {
+                id: e.id,
+                callId: e.callId,
+                tool: e.tool,
+                target: e.content ?? '',
+                status,
+                input: e.input,
+                at: Date.now(),
+              },
+            ].slice(-120),
           }
         }
         const tools = s.tools.slice()
+        let idx = -1
         for (let i = tools.length - 1; i >= 0; i--) {
-          if (tools[i].id === e.id && tools[i].tool === e.tool && (tools[i].status === 'running' || tools[i].status === 'waiting')) {
-            tools[i] = { ...tools[i], status, detail: detail || tools[i].detail }
+          const t = tools[i]
+          if (
+            t.id === e.id &&
+            (t.status === 'running' || t.status === 'waiting') &&
+            (e.callId ? t.callId === e.callId : t.tool === e.tool)
+          ) {
+            idx = i
             break
           }
         }
+        const previous = idx >= 0 ? tools[idx] : undefined
+        const finished: ToolCall = {
+          id: e.id,
+          callId: e.callId,
+          tool: e.tool,
+          target: previous?.target ?? e.tool,
+          status,
+          detail: detail || previous?.detail,
+          input: e.input || previous?.input,
+          output: e.output ?? e.content ?? '',
+          path: e.path,
+          diff: e.diff,
+          truncated: e.truncated,
+          exitCode: e.exitCode,
+          durationMs: e.durationMs,
+          at: previous?.at ?? Date.now(),
+        }
+        // 窗口中途订阅时可能只收到 end；补一条完成记录，不再静默丢结果。
+        if (idx >= 0) tools[idx] = finished
+        else tools.push(finished)
         return { ...s, tools }
       })
     })

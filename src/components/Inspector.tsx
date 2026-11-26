@@ -1,9 +1,17 @@
 export type ToolCall = {
   id: string
+  callId?: string
   tool: string
   target: string
   status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'
   detail?: string
+  input?: string
+  output?: string
+  path?: string
+  diff?: string
+  truncated?: boolean
+  exitCode?: number
+  durationMs?: number
   at: number
 }
 
@@ -16,7 +24,7 @@ const TOOL_META = {
   cancelled: { icon: '⊘', color: 'var(--text-tertiary)', label: '已打断' },
 } as const
 
-type Tab = 'tools' | 'knowledge' | 'caps'
+type Tab = 'tools' | 'changes' | 'knowledge' | 'caps'
 
 export default function Inspector({
   tab,
@@ -35,6 +43,11 @@ export default function Inspector({
   /** 能力面板：这个会话有哪些工具与技能，哪些现在用不了 */
   caps?: { node: React.ReactNode }
 }) {
+  const changes = tools.filter((t) => t.path || t.diff)
+  const changeCount = new Set(
+    changes.flatMap((t) => (t.path || '未标注路径').split(',').map((p) => p.trim()).filter(Boolean)),
+  ).size
+
   return (
     <aside
       className="c-col slide-in"
@@ -83,6 +96,12 @@ export default function Inspector({
           active={tab === 'tools'}
           onClick={() => onTab('tools')}
         />
+        <TabBtn
+          label="改动"
+          count={changeCount}
+          active={tab === 'changes'}
+          onClick={() => onTab('changes')}
+        />
         {knowledge && (
           <TabBtn
             label="知识"
@@ -98,6 +117,7 @@ export default function Inspector({
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {tab === 'tools' && <ToolList tools={tools} />}
+        {tab === 'changes' && <ChangeList tools={changes} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
         {tab === 'caps' && caps && caps.node}
       </div>
@@ -166,12 +186,12 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
 
   return (
     <div style={{ padding: 'var(--space-2)' }}>
-      {tools.map((t) => {
+      {tools.map((t, index) => {
         const meta = TOOL_META[t.status]
         const cancelled = t.status === 'cancelled'
         return (
           <div
-            key={t.id}
+            key={`${t.id}:${t.callId ?? t.tool}:${t.at}:${index}`}
             data-tool-status={t.status}
             style={{
               background: cancelled ? 'var(--bg-glass)' : 'var(--bg-surface)',
@@ -221,9 +241,101 @@ function ToolList({ tools }: { tools: ToolCall[] }) {
                 {t.detail}
               </div>
             )}
+            {(t.exitCode !== undefined || t.durationMs !== undefined || t.truncated) && (
+              <div style={{ marginTop: 5, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>
+                {t.exitCode !== undefined && `exit ${t.exitCode}`}
+                {t.durationMs !== undefined && ` · ${t.durationMs}ms`}
+                {t.truncated && ' · 展示已截断'}
+              </div>
+            )}
+            {(t.input || t.output || t.diff) && (
+              <details style={{ marginTop: 7 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 'var(--text-xs)', color: 'var(--accent-bright)' }}>
+                  查看调用与结果
+                </summary>
+                {t.input && <DetailBlock title="输入" text={t.input} />}
+                {t.output && <DetailBlock title="输出" text={t.output} />}
+                {t.diff && <DetailBlock title="文件 diff" text={t.diff} />}
+              </details>
+            )}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+function DetailBlock({ title, text }: { title: string; text: string }) {
+  return (
+    <div style={{ marginTop: 7 }}>
+      <div style={{ marginBottom: 3, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>{title}</div>
+      <pre
+        className="mono"
+        style={{
+          margin: 0,
+          padding: 8,
+          maxHeight: 260,
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 'var(--radius-md)',
+          background: 'var(--bg-inset)',
+          color: 'var(--text-secondary)',
+          fontSize: 'var(--text-xs)',
+          lineHeight: 1.55,
+        }}
+      >
+        {text}
+      </pre>
+    </div>
+  )
+}
+
+function ChangeList({ tools }: { tools: ToolCall[] }) {
+  if (tools.length === 0) {
+    return (
+      <div className="c-empty">
+        还没有可见的文件改动
+        <br />
+        <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
+          文件工具成功落盘后，路径和 diff 会出现在这里
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div style={{ padding: 'var(--space-2)' }}>
+      <div style={{ padding: '4px 4px 10px', color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)', lineHeight: 1.6 }}>
+        按工具完成顺序记录。终端命令造成的改动不在此列表中，可在项目里用 git diff 复核。
+      </div>
+      {tools.map((t, index) => (
+        <section
+          key={`${t.id}:${t.callId ?? t.tool}:${t.at}:${index}`}
+          data-file-change={t.path || 'unknown'}
+          style={{
+            marginBottom: 'var(--space-2)',
+            padding: '9px 10px',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--bg-surface)',
+          }}
+        >
+          <div className="mono" style={{ color: 'var(--accent-bright)', fontSize: 'var(--text-xs)', overflowWrap: 'anywhere' }}>
+            {t.path || '未标注路径'}
+          </div>
+          <div style={{ marginTop: 3, color: 'var(--text-disabled)', fontSize: 'var(--text-xs)' }}>
+            {t.tool} · {t.status === 'ok' ? '已落盘' : t.status === 'error' ? '失败' : t.status}
+          </div>
+          {t.diff ? (
+            <DetailBlock title="统一 diff" text={t.diff} />
+          ) : (
+            <div style={{ marginTop: 7, color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
+              这个运行时只报告了文件路径，没有提供 diff。
+            </div>
+          )}
+        </section>
+      ))}
     </div>
   )
 }

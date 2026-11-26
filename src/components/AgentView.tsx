@@ -139,7 +139,7 @@ function ThinkRail({
   tone?: 'wait' | 'think' | 'tool'
   children?: ReactNode
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(!!live)
   const bodyRef = useRef<HTMLDivElement>(null)
   const pin = useRef(true)
   const onBodyScroll = () => {
@@ -205,15 +205,15 @@ function Thinking({
   const waited = pace ? Math.max(0, Math.round((now - pace.since) / 1000)) : 0
   const label = current
     ? stepText(current.tool, current.target)
-    : latest?.detail
-      ? latest.detail
-      : thinking
-        ? '思考中'
+    : thinking
+      ? '思考中'
+      : latest?.detail
+        ? latest.detail
         : waited >= 20
           ? '模型还没有返回'
           : '在等模型'
   const parts = [label]
-  const showingResult = !current && !!latest?.detail
+  const showingResult = !current && !thinking && !!latest?.detail
   if (!showingResult && pace) parts.push(`已等 ${formatWait(waited)}`)
   if (!showingResult && pace?.first != null) parts.push(`首字 ${(pace.first / 1000).toFixed(1)}s`)
   return (
@@ -768,8 +768,8 @@ export default function AgentView(p: Props) {
         {running && !p.agent.busy && !p.streaming && (
           <Thinking steps={p.steps ?? []} reasoning={p.reasoning} pace={p.pace} />
         )}
-        {!!p.streaming && !p.agent.busy && (p.steps?.length ?? 0) > 0 && (
-          <Thinking steps={p.steps ?? []} pace={p.pace} />
+        {!!p.streaming && !p.agent.busy && ((p.steps?.length ?? 0) > 0 || !!p.reasoning) && (
+          <Thinking steps={p.steps ?? []} reasoning={p.reasoning} pace={p.pace} />
         )}
 
         {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}

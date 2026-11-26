@@ -158,3 +158,42 @@ func TestVersionHintIsParseable(t *testing.T) {
 		t.Fatalf("versionHint 不可解析：%q", out)
 	}
 }
+
+// 两个 Agent 同时读到 v1 后，A 先写 v2。A 的写入只能刷新 A 的版本记录，
+// 不能替 B 证明「B 已经看过 v2」；B 仍基于 v1 的编辑必须被拒绝。
+func TestWriteVersionStateIsIsolatedBetweenAgents(t *testing.T) {
+	dir := tmpDir(t)
+	path := filepath.Join(dir, "shared.go")
+	v1 := "var X = 1\nvar FromA = false\n"
+	v2 := "var X = 1\nvar FromA = true\n"
+	if err := os.WriteFile(path, []byte(v1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	readA := &ReadFile{WorkDir: dir, Scope: "agent-a"}
+	readB := &ReadFile{WorkDir: dir, Scope: "agent-b"}
+	if res := invoke(t, readA, `{"path":"shared.go"}`); res.Status != tool.StatusOK {
+		t.Fatalf("A read: %s", res.Content)
+	}
+	if res := invoke(t, readB, `{"path":"shared.go"}`); res.Status != tool.StatusOK {
+		t.Fatalf("B read: %s", res.Content)
+	}
+
+	writeA := &WriteFile{WorkDir: dir, Scope: "agent-a"}
+	if res := invoke(t, writeA, `{"path":"shared.go","content":"`+strings.ReplaceAll(v2, "\n", `\n`)+`"}`); res.Status != tool.StatusOK {
+		t.Fatalf("A write: %s", res.Content)
+	}
+
+	editB := &EditFile{WorkDir: dir, Scope: "agent-b"}
+	res := invoke(t, editB, `{"path":"shared.go","oldText":"var X = 1","newText":"var X = 2"}`)
+	if res.Status != tool.StatusError || !strings.Contains(res.Content, "STALE_WRITE") {
+		t.Fatalf("B 的过期写入必须被拒绝：%q %s", res.Status, res.Content)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != v2 {
+		t.Fatalf("B 覆盖了 A 的写入：%q", data)
+	}
+}

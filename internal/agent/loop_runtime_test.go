@@ -122,3 +122,17 @@ func TestRuntimeEventFromLoop(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEventFromLoopKeepsFileChangeMetadata(t *testing.T) {
+	call := &tool.Call{ID: "write-1", Name: "edit_file", Input: []byte(`{"path":"a.go"}`)}
+	ev, ok := runtimeEventFromLoop(loop.Event{
+		Kind: "tool.end", Call: call, Status: tool.StatusOK, Content: "edited",
+		Result: &tool.Result{Meta: tool.Meta{Path: "a.go", Diff: "@@ -1 +1 @@\n-old\n+new", Truncated: true}},
+	})
+	if !ok {
+		t.Fatal("tool.end 没有翻译成协议事件")
+	}
+	if ev.Meta["path"] != "a.go" || ev.Meta["diff"] == "" || ev.Meta["truncated"] != "true" {
+		t.Fatalf("文件元数据丢失：%+v", ev.Meta)
+	}
+}

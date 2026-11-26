@@ -162,7 +162,7 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	}
 
 	reg := tool.NewRegistry()
-	builtin.RegisterRoots(reg, workDir, a.EffectiveExtraDirs())
+	builtin.RegisterRootsScoped(reg, workDir, a.EffectiveExtraDirs(), a.ID)
 	if appr := m.Approvals(); appr != nil {
 		reg.Approver = appr.Approver(a.ID, a.Name)
 	}

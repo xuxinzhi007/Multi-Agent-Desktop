@@ -361,7 +361,7 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
 
   await expect(page.getByText('loop.go:120-145')).toBeVisible()
   await expect(page.getByRole('button', { name: 'loop.go:120-145' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '改动', exact: true })).toBeVisible()
 
   await page.locator('.c-artifact', { hasText: '知识库' }).click()
   await expect(page.getByRole('button', { name: '知识', exact: true })).toBeVisible()

@@ -213,7 +213,7 @@ test('切到对话视图时检查器自动展开', async ({ page }) => {
 
   await page.getByRole('button', { name: /对话/ }).first().click()
   await expect(page.getByRole('button', { name: '工具', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '改动', exact: true })).toBeVisible()
   // 精确匹配：侧栏底部的「⑂ 自动拆任务」不该被当成检查器的任务页
   await expect(page.getByRole('button', { name: '任务', exact: true })).toHaveCount(0)
 })

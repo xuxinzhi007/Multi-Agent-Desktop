@@ -105,10 +105,10 @@ func TestGlobCrossRoots(t *testing.T) {
 	if res.Status != tool.StatusOK {
 		t.Fatalf("%q: %s", res.Status, res.Content)
 	}
-	if !strings.Contains(res.Content, filepath.Join(main, "main.txt")) {
+	if !strings.Contains(res.Content, filepath.ToSlash(filepath.Join(main, "main.txt"))) {
 		t.Errorf("缺主根命中: %q", res.Content)
 	}
-	if !strings.Contains(res.Content, filepath.Join(other, "other.txt")) {
+	if !strings.Contains(res.Content, filepath.ToSlash(filepath.Join(other, "other.txt"))) {
 		t.Errorf("缺第二根命中: %q", res.Content)
 	}
 }
@@ -133,11 +133,11 @@ func TestGrepCrossRoots(t *testing.T) {
 
 	g := &Grep{WorkDir: main, ExtraDirs: []string{other}}
 	res := invoke(t, g, `{"pattern":"alpha"}`)
-	if !strings.Contains(res.Content, filepath.Join(main, "a.txt")) {
+	if !strings.Contains(res.Content, filepath.ToSlash(filepath.Join(main, "a.txt"))) {
 		t.Errorf("缺主根命中: %q", res.Content)
 	}
 	res = invoke(t, g, `{"pattern":"beta"}`)
-	if !strings.Contains(res.Content, filepath.Join(other, "b.txt")) {
+	if !strings.Contains(res.Content, filepath.ToSlash(filepath.Join(other, "b.txt"))) {
 		t.Errorf("缺第二根命中: %q", res.Content)
 	}
 }
