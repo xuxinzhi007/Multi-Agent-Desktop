@@ -7,6 +7,7 @@ import {
   type Channel,
   type ChannelMessage,
   type Config,
+  type FileIntentEvent,
   type Note,
   type Room,
   type ShellEvent,
@@ -62,6 +63,12 @@ type State = {
   stops: Record<string, { reason: string; iter: number; used: number; at: number }>
   /** 等待用户决定的写操作。队列按到达顺序，模态框只展示最前面一张。 */
   approvals: ApprovalView[]
+  /**
+   * 最近 60 秒的写意图：谁要改哪些文件。
+   * 多个会话/多个窗口同时改同一个仓库时，这是"冲突在发生前就能看见"的唯一来源。
+   * 只保留近期的，过期由渲染侧按 at 过滤——不做定时清理，避免多余的重渲染。
+   */
+  intents: FileIntentEvent[]
 }
 
 const EMPTY: State = {
@@ -87,6 +94,7 @@ const EMPTY: State = {
   pending: {},
   stops: {},
   approvals: [],
+  intents: [],
 }
 
 const PAGE = 40
@@ -633,6 +641,16 @@ export function useBackend() {
     )
     sub(events.toolApprovalDone, (id) =>
       setState((s) => ({ ...s, approvals: s.approvals.filter((x) => x.id !== id) })),
+    )
+
+    // 写意图：落盘前广播"谁要改哪个文件"。
+    // 同一 agent 对同一文件的重复意图只留最后一条，避免刷屏；最多留 12 条。
+    sub(events.agentFileIntent, (e) =>
+      setState((s) => {
+        const fresh = s.intents.filter((x) => Date.now() / 1000 - x.at < 60)
+        const kept = fresh.filter((x) => !(x.agentId === e.agentId && x.paths[0] === e.paths[0]))
+        return { ...s, intents: [...kept, e].slice(-12) }
+      }),
     )
 
     return () => {

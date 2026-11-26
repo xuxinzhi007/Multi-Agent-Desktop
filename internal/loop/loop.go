@@ -280,6 +280,9 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 	noProgress := 0
 	badArgs := 0
 	lastFail := ""
+	// verify 连续失败次数。它在"改完不验"的产品里是唯一的硬约束：
+	// 模型可以嘴上说完成，但 verify 的红是它自己跑出来的证据。
+	verifyFails := 0
 
 	for {
 		// ── 1. 停止信号。放在最前面，保证任何阶段被打断都能立刻退出。
@@ -451,6 +454,9 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		anySuccess := false
 		allBadArgs := len(turn.Calls) > 0
+		verifyFailed := false
+		verifyOK := false
+		verifyDetail := ""
 		for i, c := range turn.Calls {
 			if !outcomes[i].invoked {
 				// 取消前未派发：与改动前逐条 break 一致，不回填消息、不计预算。
@@ -466,6 +472,42 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			if res.Status != tool.StatusOK && res.Status != tool.StatusTruncated {
 				lastFail = c.Name + ": " + clipReason(res.Content)
 			}
+			// 同参数重复调用被注册表拦下时，结果也是 error，但它证明的是"在打转"，
+			// 不是"验证失败"。把它算进 verify 连败会让停止理由误导人。
+			if c.Name == "verify" && !isRepeatBlock(res.Content) {
+				switch res.Status {
+				case tool.StatusOK, tool.StatusTruncated:
+					verifyOK = true
+				default:
+					verifyFailed = true
+					if verifyDetail == "" {
+						verifyDetail = res.Content
+					}
+				}
+			}
+		}
+
+		// ── 7.5 verify 闭环：红了就把红的事实写回上下文，连红三次就停。
+		// 为什么必须在这里做而不是靠系统提示：提示只是请求，模型可以选择忽略；
+		// 把失败摘要串成一条消息，它下一轮就无法假装没看见。
+		switch {
+		case verifyFailed:
+			verifyFails++
+			st.Messages = append(st.Messages, llm.Message{
+				Role:      "system",
+				Content:   verifyNudge(verifyDetail, verifyFails),
+				Timestamp: time.Now().Unix(),
+			})
+			if verifyFails >= maxVerifyFails {
+				st.Phase = PhaseFailed
+				st.StopReason = fmt.Sprintf(
+					"verify 连续 %d 次未通过，停下来交给人：%s", verifyFails, clipReason(verifyDetail))
+				r.emit(Event{Kind: "failed", Phase: st.Phase, Iter: st.Iteration, Reason: st.StopReason})
+				r.checkpoint(runCtx, st)
+				return st
+			}
+		case verifyOK:
+			verifyFails = 0
 		}
 
 		// ── 8. 防打转。连续多轮没有任何成功的工具调用、也没有最终答案，
@@ -497,6 +539,29 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			}
 		}
 	}
+}
+
+// isRepeatBlock 判断结果是不是"同参数重复调用被拦"。
+func isRepeatBlock(content string) bool {
+	return strings.Contains(content, "called 3 times with identical arguments")
+}
+
+// maxVerifyFails 是 verify 连续失败的容忍上限。
+// 3 次足够覆盖"改一处 → 红 → 再改 → 还红"的正常迭代；再红就是方向错了，
+// 继续跑只会烧预算，也会诱使它去改测试。
+const maxVerifyFails = 3
+
+// verifyNudge 把失败事实压成一条给模型看的系统消息。
+// 明确给出"可以退出"的口径（无关失败 + 依据），否则它会为了变绿而改断言。
+func verifyNudge(detail string, n int) string {
+	d := strings.TrimSpace(detail)
+	if len([]rune(d)) > 600 {
+		d = string([]rune(d)[:600]) + "…"
+	}
+	return fmt.Sprintf("[verify 未通过 · 第 %d/%d 次] %s\n\n"+
+		"这不算完成。改到通过再声明完成；如果确认失败与本次改动无关（例如仓库本来就是红的），"+
+		"用一句话说明依据并停下，不要反复重跑同一条命令。",
+		n, maxVerifyFails, d)
 }
 
 // clipReason 把失败原因压成一行，终止理由要能直接摆在界面上。

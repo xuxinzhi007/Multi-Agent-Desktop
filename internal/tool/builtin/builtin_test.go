@@ -248,8 +248,8 @@ func TestRegisterAllBuiltin(t *testing.T) {
 	r := tool.NewRegistry()
 	Register(r, tmpDir(t))
 	specs := r.Specs()
-	if len(specs) != 8 {
-		t.Fatalf("got %d tools, want 8", len(specs))
+	if len(specs) != 11 {
+		t.Fatalf("got %d tools, want 11", len(specs))
 	}
 	names := map[string]bool{}
 	for _, s := range specs {
@@ -258,7 +258,11 @@ func TestRegisterAllBuiltin(t *testing.T) {
 			t.Fatalf("%s has no schema", s.Name)
 		}
 	}
-	for _, want := range []string{"bash", "read_file", "write_file", "edit_file", "grep", "glob", "apply_patch", "verify"} {
+	for _, want := range []string{
+		"bash", "read_file", "write_file", "edit_file", "grep", "glob", "apply_patch", "verify",
+		// 2026-11-26 新增：导航（repo_map）、自查（changeset）、把隔离分支合回主干（worktree_merge）
+		"repo_map", "changeset", "worktree_merge",
+	} {
 		if !names[want] {
 			t.Fatalf("missing tool %q", want)
 		}

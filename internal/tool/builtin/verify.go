@@ -112,6 +112,9 @@ type verifyReport struct {
 	ExitCode   int             `json:"exitCode"`
 	DurationMS int             `json:"durationMs"`
 	Commands   []verifyCommand `json:"commands"`
+	// ChangedTests 是本次改动涉及的测试文件。非空时"红变绿"要被人看见，
+	// 它也是模型可以自证的线索（不是我改的断言，那就是别人改的）。
+	ChangedTests []string `json:"changedTests,omitempty"`
 }
 
 // plan 解析入参，定出 scope 与要跑的步骤。默认命令不是硬编码一条：
@@ -140,11 +143,23 @@ func (v *Verify) plan(in verifyInput) (scope string, steps []verifyStep, overrid
 	switch scope {
 	case "go":
 		steps = append(steps, goVerifySteps()...)
+		if st, ok := goTestStep(v.WorkDir); ok {
+			steps = append(steps, st)
+		}
 	case "ts":
 		steps = append(steps, verifyStep{Kind: "ts", Command: tsVerifyCommand(v.WorkDir)})
+		if st, ok := tsLintStep(v.WorkDir); ok {
+			steps = append(steps, st)
+		}
 	case "both":
 		steps = append(steps, goVerifySteps()...)
+		if st, ok := goTestStep(v.WorkDir); ok {
+			steps = append(steps, st)
+		}
 		steps = append(steps, verifyStep{Kind: "ts", Command: tsVerifyCommand(v.WorkDir)})
+		if st, ok := tsLintStep(v.WorkDir); ok {
+			steps = append(steps, st)
+		}
 	}
 	return scope, steps, "", nil
 }
@@ -363,7 +378,7 @@ func (v *Verify) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	}
 
 	timeout := time.Duration(timeoutSec) * time.Second
-	rep := verifyReport{Scope: scope}
+	rep := verifyReport{Scope: scope, ChangedTests: changedTestFiles(gitChangedFiles(v.WorkDir))}
 	overall := "ok"
 	overallCode := 0
 
@@ -502,6 +517,10 @@ func renderVerifyReport(rep verifyReport) string {
 	verb := map[string]string{"ok": "通过", "fail": "失败", "timeout": "超时"}[rep.Status]
 	fmt.Fprintf(&b, "verify: %s（scope: %s，%d 条命令，共 %dms）", verb, rep.Scope, len(rep.Commands), rep.DurationMS)
 
+	if len(rep.ChangedTests) > 0 {
+		fmt.Fprintf(&b, "\n注意：本次改动包含测试文件（%s）。测试从红变绿时，先确认是通过实现修好的，还是断言被放宽了。",
+			strings.Join(rep.ChangedTests, ", "))
+	}
 	for _, vc := range rep.Commands {
 		fmt.Fprintf(&b, "\n[%s] %s — ", vc.Kind, vc.Command)
 		switch vc.Status {

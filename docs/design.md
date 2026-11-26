@@ -646,6 +646,27 @@ Claude Code 的 `--add-dir` / `permissions.additionalDirectories` 一手证据�
 
 ---
 
+## 7.x 写安全：多会话改同一个仓库（2026-11-26 落地）
+
+**问题**：多个会话/子 Agent 同时改同一份检出。`edit_file` / `apply_patch` 只保证"锚点唯一"，
+但锚点唯一是内容级判断，挡不住"读完之后别人改了同一处"——后写者静默覆盖先写者。
+
+**三层**：
+
+1. **读过就记版本**：`read_file` 记 `size + mtime(ns) + sha1前12`，并在输出末尾回给模型；
+   写工具带 `ifVersion`，或"读过且版本已变"即 `STALE_WRITE`，零写入（patch 整批原子）。
+2. **冲突提前可见**：写操作通过审批、落盘前发 `agent.file.intent`，桌面顶部条与 SSE 客户端都能看见
+   "谁在改哪个文件"。
+3. **默认隔离 + 可合回**：`config.worktree.mode`（`children` 默认 / `all` / `off`）；子会话自动落在
+   `.mad-worktrees/<repo>/<slug>`、分支 `mad/<slug>`；`worktree_merge` 先试 ff，冲突 `merge --abort`
+   干净退回，双端不干净就拒绝。
+
+**不做什么**：不做三方合并、不做跨机器锁、不做 CRDT。冲突的语义只有写的人知道，工具只负责把冲突
+变成一次明确的失败。
+
+**编码能力同源的三个闭环**（详见 `docs/reviews/req-code-capability-2026-11-26.md` §9）：verify 带相关测试、
+连续 3 次未过即停并交人、`repo_map` 导航、`changeset` 收尾自查。
+
 ## 8. 参考
 
 - MyGo: https://github.com/egoist/mygo

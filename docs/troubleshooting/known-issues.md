@@ -23,6 +23,7 @@
 | 21 | ACP 会话一启动就失败：配的命令根本不是 ACP agent（`pi`） | 启动前探针 |
 | 22 | 浏览器打开只有假数据，还多出一套 `/remote` 页面 | Go test + 单页判定 |
 | 23 | 桌面已处理完的审批，网页还挂着；点下去报「审批已失效或已完成」 | 对账（连上/聚焦/失效即收卡） |
+| 24 | 并行会话静默覆盖同一个文件（锚点唯一 ≠ 文件未变） | Go test（`filestate_test.go`） |
 
 ---
 
@@ -513,3 +514,19 @@
 护栏：`src/lib/useBackend.ts`（`resync` 三条路径 + `decideApproval` 幂等收卡）、
 `internal/gateway/broker_test.go`（补发顺序 / 缓冲上限 / `Last-Event-ID` 解析 4 条）、
 `internal/gateway/server_test.go` 的 `TestSSEReplayHTTP`（端到端：先补发、再进实时通道）
+
+## 24. 并行会话静默覆盖同一个文件
+
+**现象**：两个会话（或一个会话 + 一个子 Agent）同时改同一个仓库。A 读完文件、B 改了一行、A 再写——A 的锚点仍然唯一匹配，于是 B 的改动被无声覆盖。读者只会在很久以后发现"这一行怎么退回去了"。
+
+**为什么旧代码挡不住**：`edit_file` / `apply_patch` 只校验"锚点在不在、唯一不唯一"，不校验"文件还是不是读到的那一份"。锚点唯一是**内容级**判断，版本变化是**时间级**判断，两者不等价。
+
+**修法**（2026-11-26 落地）：
+
+1. `read_file` 输出末尾带 `[file version size-mtime-sha前12]`，同时把版本记进进程内读状态（`internal/tool/builtin/filestate.go`）。
+2. 写工具支持 `ifVersion`；不带时，只要"本进程读过且磁盘版本已变"，返回 `STALE_WRITE` 并**零写入**（`apply_patch` 保持整批原子）。
+3. 写操作通过审批后、落盘前广播 `agent.file.intent`（`Registry.OnWrite` → `internal/agent/write_intent.go`），界面顶部显示"X 正在修改 Y"。
+
+**边界**：读状态只在进程内，重启后失效（代价是重启后第一次写要求重读，可接受）。跨机器不覆盖——那需要分布式锁，按非目标不做。
+
+**护栏**：`filestate_test.go`（读后改→拒绝且字节未变、新版本通过、patch 整批不动、新文件免读）；`worktree/merge_test.go`（隔离后合回：ff / 冲突 abort 干净 / 脏工作树拒绝）。

@@ -153,6 +153,37 @@ export default function App() {
         gateway={{ enabled: gw.status.gateway, running: gw.status.running, listenError: gw.status.listenError ?? '' }}
         onOpenApprovals={() => setApprovalOpen(true)}
       />
+      {(() => {
+        // 写意图提示条：别的会话正在改什么，在覆盖发生前就让人看见。
+        // 过滤用 60 秒窗口；App 本身有 6 秒一次的网关状态刷新，过期条目会自动消失。
+        const now = Date.now() / 1000
+        const live = (s.intents ?? []).filter((i) => now - i.at < 60).slice(-3)
+        if (live.length === 0) return null
+        return (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '4px 14px',
+              fontSize: 12,
+              color: 'var(--tx-2, #b9bdc9)',
+              borderBottom: '1px solid rgba(255,255,255,0.06)',
+              background: 'rgba(255,255,255,0.03)',
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: '#e5b454' }} />
+            {live.map((i, idx) => (
+              <span key={`${i.agentId}-${i.paths[0]}-${idx}`}>
+                {idx > 0 ? ' · ' : ''}
+                <strong style={{ fontWeight: 600 }}>{i.agentName || i.agentId}</strong> 正在修改{' '}
+                {i.paths[0]}
+                {i.paths.length > 1 ? ` 等 ${i.paths.length} 个文件` : ''}
+              </span>
+            ))}
+          </div>
+        )
+      })()}
       <div
         style={{
           display: 'flex',

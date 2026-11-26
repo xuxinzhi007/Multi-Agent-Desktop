@@ -331,7 +331,8 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 	if end < len(lines) {
 		fmt.Fprintf(&sb, "... (%d more lines)\n", len(lines)-end)
 	}
-	return tool.OK(sb.String())
+	// 版本随内容一起回给模型：它必须有机会把 ifVersion 带回来。
+	return tool.OK(sb.String() + versionHint(abs))
 }
 
 // WriteFile 写入整个文件。
@@ -354,7 +355,8 @@ func (*WriteFile) Schema() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"path": {"type": "string"},
-			"content": {"type": "string"}
+			"content": {"type": "string"},
+			"ifVersion": {"type": "string", "description": "read_file 返回的 file version；给出时会被校验，防止覆盖别人在你读过之后的改动"}
 		},
 		"required": ["path", "content"],
 		"additionalProperties": false
@@ -388,8 +390,9 @@ func (w *WriteFile) Preview(ctx context.Context, raw json.RawMessage) (tool.Prev
 
 func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path      string `json:"path"`
+		Content   string `json:"content"`
+		IfVersion string `json:"ifVersion"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("cannot parse arguments: %v", err)
@@ -402,9 +405,16 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 		return tool.Fail("cannot create parent directory: %v", err)
 	}
 	before, _ := os.ReadFile(abs)
+	// 已存在的文件才校验版本；新建文件没有"旧版本"可比，直接放行。
+	if _, statErr := os.Stat(abs); statErr == nil {
+		if _, err := writeGuard(abs, in.IfVersion); err != nil {
+			return tool.Fail("%v", err)
+		}
+	}
 	if err := os.WriteFile(abs, []byte(in.Content), 0o644); err != nil {
 		return tool.Fail("cannot write %s: %v", in.Path, err)
 	}
+	rememberWrite(abs)
 	res := tool.OK(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path))
 	res.Meta.Path = displayPath(in.Path)
 	res.Meta.Diff = diff.Unified(displayPath(in.Path), string(before), in.Content, 3)
@@ -432,7 +442,8 @@ func (*EditFile) Schema() json.RawMessage {
 		"properties": {
 			"path": {"type": "string"},
 			"oldText": {"type": "string"},
-			"newText": {"type": "string"}
+			"newText": {"type": "string"},
+			"ifVersion": {"type": "string", "description": "read_file 返回的 file version；给出时会被校验，防止覆盖别人在你读过之后的改动"}
 		},
 		"required": ["path", "oldText", "newText"],
 		"additionalProperties": false
@@ -450,9 +461,10 @@ type editPlan struct {
 // Preview 和 Execute 共用，保证「审批时看到的」就是「真要写的」。
 func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	var in struct {
-		Path    string `json:"path"`
-		OldText string `json:"oldText"`
-		NewText string `json:"newText"`
+		Path      string `json:"path"`
+		OldText   string `json:"oldText"`
+		NewText   string `json:"newText"`
+		IfVersion string `json:"ifVersion"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return editPlan{}, fmt.Errorf("cannot parse arguments: %v", err)
@@ -467,6 +479,9 @@ func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	if err != nil {
 		return editPlan{}, err
 	}
+	if _, err := writeGuard(abs, in.IfVersion); err != nil {
+		return editPlan{}, relGuardError(in.Path, abs, err)
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return editPlan{}, fmt.Errorf("cannot read %s: %v", in.Path, err)
@@ -476,7 +491,7 @@ func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	if n == 0 {
 		return editPlan{}, fmt.Errorf(
 			"oldText not found in %s. Read the file again and copy the exact text, "+
-				"including whitespace and indentation.", in.Path)
+				"including whitespace and indentation.%s", in.Path, nearbyExcerpt(src, in.OldText, 5))
 	}
 	if n > 1 {
 		return editPlan{}, fmt.Errorf(
@@ -511,6 +526,7 @@ func (e *EditFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 	if err := os.WriteFile(p.Abs, []byte(p.After), 0o644); err != nil {
 		return tool.Fail("cannot write %s: %v", p.Path, err)
 	}
+	rememberWrite(p.Abs)
 	res := tool.OK(fmt.Sprintf("edited %s (%d bytes -> %d bytes)", p.Path, len(p.Before), len(p.After)))
 	res.Meta.Path = displayPath(p.Path)
 	res.Meta.Diff = diff.Unified(displayPath(p.Path), p.Before, p.After, 3)
@@ -538,4 +554,7 @@ func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
 	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Verify{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&RepoMap{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&Changeset{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&WorktreeMerge{WorkDir: workDir, ExtraDirs: extra})
 }

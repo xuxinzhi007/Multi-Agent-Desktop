@@ -167,6 +167,9 @@ type Manager struct {
 	waiting map[string]string
 	// routed 记录转发出去、还没结束的目标。
 	routed map[string][]string
+	// worktreeMode 决定谁自动开独立 git 工作树：children(默认) / all / off。
+	// 默认只隔离子会话：父会话隔离会让用户"自己选的目录"消失，代价不对等。
+	worktreeMode string
 	// running 是全局并发执行的名额。同时跑多个 agent 会同时拉起多个模型流，
 	// 每个还各开一棵工作树，不限量会把用户机器拖死。nil 表示不限（测试）。
 	running chan struct{}
@@ -188,9 +191,10 @@ type Manager struct {
 
 func NewManager(cfg llm.Config, emit Emitter) *Manager {
 	return &Manager{
-		agents: make(map[string]*Agent),
-		llmCfg: cfg,
-		emit:   emit,
+		agents:       make(map[string]*Agent),
+		llmCfg:       cfg,
+		emit:         emit,
+		worktreeMode: "children",
 	}
 }
 
@@ -619,6 +623,36 @@ func (m *Manager) LLMConfigFor(id string) llm.Config {
 	return a.EffectiveLLM(m)
 }
 
+// SetWorktreeMode 设置自动隔离的范围：children / all / off。
+func (m *Manager) SetWorktreeMode(mode string) {
+	switch mode {
+	case "all", "off", "children":
+	default:
+		// 非法值按默认处理，不让一条写错的配置把隔离能力全关掉。
+		mode = "children"
+	}
+	m.mu.Lock()
+	m.worktreeMode = mode
+	m.mu.Unlock()
+}
+
+// autoIsolate 判断这个会话选目录时是否该自动开工作树。
+func (m *Manager) autoIsolate(a *Agent) bool {
+	m.mu.RLock()
+	mode := m.worktreeMode
+	m.mu.RUnlock()
+	switch mode {
+	case "off":
+		return false
+	case "all":
+		return true
+	default:
+		// children：只有委派出来的子会话隔离。read 临时运行不建常驻会话、
+		// 也不会走到这里，天然不隔离。
+		return a.ParentID != ""
+	}
+}
+
 // SetAgentWorkDir 设置会话级工作目录（不影响其他会话）。
 func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	a, ok := m.Get(id)
@@ -634,6 +668,15 @@ func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	a.mu.Unlock()
 	m.syncApprovalRoots(a)
 	m.goSave()
+
+	// 默认隔离：目录是 git 仓库时给这个会话一份独立检出，避免和别的会话抢同一份。
+	// 失败静默——不是仓库、没有权限、目录太宽，都不该拦住"选目录"这件正事；
+	// 写安全的版本校验仍会在共享检出时兜住覆盖。
+	if dir != "" && m.autoIsolate(a) {
+		if err := m.EnableWorktree(context.Background(), id); err != nil {
+			log.Printf("auto worktree for %s: %v", id, err)
+		}
+	}
 	return nil
 }
 
@@ -1515,6 +1558,16 @@ func (m *Manager) acquireSlot(a *Agent, req PromptRequest) bool {
 		// 名额在 runSafely 结束后由 releaseSlot 归还。
 		return true
 	case <-parent.Done():
+		a.mu.Lock()
+		a.Status = StatusIdle
+		a.BusyPlace = ""
+		a.mu.Unlock()
+		complete(req, "", "已停止")
+		return false
+	case <-a.done:
+		// 会话已停止（done 在 stop() 里关闭）。排队中的请求如果只等
+		// parent.Done()，而 parent 是 Background（比如测试/内部入队），
+		// 就永远醒不过来，worker 也就永远退不出——门禁与关停都会被拖死。
 		a.mu.Lock()
 		a.Status = StatusIdle
 		a.BusyPlace = ""

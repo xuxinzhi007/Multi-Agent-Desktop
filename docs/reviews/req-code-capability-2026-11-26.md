@@ -1,6 +1,6 @@
 # 需求：把"会写"变成"写得对"——编码能力提升
 
-状态：**提案**，未开发 ｜ 日期 2026-11-26 ｜ 预估 4.5 人天（P0 2.6d）
+状态：**P0 + P1-1/P1-3 已实现（2026-11-26 晚）**，P1-2 部分、P2 未做 ｜ 日期 2026-11-26 ｜ 预估 4.5 人天
 
 ## 1. 结论先行
 
@@ -126,3 +126,25 @@
 - 编码能力用它做 `repo_map` 缓存失效、`changeset` 的"哪些文件真变了"、`verify` 的"哪些测试受影响"。
 
 所以顺序建议：先做写安全的 P0-A（1.5d），再并行推本需求的 P0-1/P0-2/P0-3（1.5d）。两边都不改既有语义，可以同时开工。
+
+## 9. 落地清单（2026-11-26 晚）
+
+| 提案项 | 落点 | 测试 |
+|---|---|---|
+| P0-1 verify 扩维 | `internal/tool/builtin/verify_scope.go`：改动包 → `go test <改动包>`（≤8 个包）；`package.json` 有 `lint` 脚本才跑 `npm run lint`；报告新增 `changedTests` | `verify_scope_test.go` 6 条（包去重/截断、测试文件识别、lint 检测、真仓库取改动） |
+| P0-2 失败闭环 | `internal/loop/loop.go`：verify 失败 → 把失败摘要以系统消息写回上下文；连续 3 次 → `PhaseFailed` 停下；绿一次即清零；"同参重复被拦"不算验证失败 | `verify_loop_test.go` 3 条 |
+| P0-3 编辑失败给现场 | `excerpt.go`（同写安全需求共用） | 见 `filestate_test.go` |
+| P1-1 repo_map | `internal/tool/builtin/repo_map.go`：Go AST + TS 行级，跳过 `node_modules`/工作树，focus 排序，行数硬上限 | `repo_map_test.go` 3 条（声明覆盖、focus 优先、40 行预算） |
+| P1-3 changeset | `internal/tool/builtin/changeset.go`：`git status` + `numstat`（工作区与暂存）+ 未跟踪标记 + 测试文件提醒 | `changeset_test.go` 2 条 |
+
+### 修正提案里的两处误判（实测后改）
+
+1. **verify 不是"只跑 build"**：原代码已有 `go build` + `go vet`（`goVerifySteps()`），提案低估了现状。本次在其后追加"相关测试"，`ts` 侧追加 lint。
+2. **`apply_patch` 已是原子批**：不需要重建，只在 `plan` 阶段插入版本校验，保留"任一条失败整批零写入"。
+
+### 未做（明确留白）
+
+- P1-2 的"审批标题标出『修改测试』"：`changedTests` 已经在 verify 报告和 changeset 里可见，
+  但审批卡标题还没接（审批标题在 `Preview` 生成，需与审批中心一起改）。
+- P1-3 的"任务结束自动附 changeset"：现在是模型主动调 `changeset`，没有在收尾时强制注入。
+- P2 全部（gopls/tsserver、覆盖率驱动、任务计划板、回滚）。

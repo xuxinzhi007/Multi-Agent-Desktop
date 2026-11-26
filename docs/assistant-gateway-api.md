@@ -340,6 +340,7 @@ data: {"id":"ap-…"}
 | `gateway.reply.skipped` | `{channel, chatId, agentId, reason}` | 目标渠道不归网关管（如飞书由 Hub 发），已跳过，避免重复回复 |
 | `agent.*` | 透传内核事件 | `agent.message` / `agent.status` / `agent.delta` / `agent.channel.reply` / `agent.error` 等，形状沿用内核 Emitter 约定 |
 | `tool.approval` / `tool.approval.done` | 透传审批事件 | 新审批到达 / 审批已结束 |
+| `agent.file.intent` | `{agentId, agentName, tool, paths[], at}` | 写操作已通过审批、尚未落盘。用于在覆盖发生前把"谁在改哪个文件"广播给其它客户端 |
 
 > 内核事件由装配层（`internal/gateway/host`）在桌面 `emit` 里逐条灌入
 > `Service.HandleAgentEvent(event, data)`，飞书事件也在其中；出站回复只对网关接管渠道执行，

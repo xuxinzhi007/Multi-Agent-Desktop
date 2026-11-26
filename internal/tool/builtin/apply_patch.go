@@ -54,7 +54,8 @@ func (*ApplyPatch) Schema() json.RawMessage {
 						"op": {"type": "string", "enum": ["add", "update", "delete"]},
 						"content": {"type": "string", "description": "Full file content for op=add."},
 						"oldText": {"type": "string", "description": "Unique context anchor for op=update."},
-						"newText": {"type": "string", "description": "Replacement for op=update."}
+						"newText": {"type": "string", "description": "Replacement for op=update."},
+						"ifVersion": {"type": "string", "description": "read_file 返回的该文件 file version；给出时会被校验，防止覆盖别人在你读过之后的改动"}
 					},
 					"required": ["path", "op"],
 					"additionalProperties": false
@@ -67,11 +68,12 @@ func (*ApplyPatch) Schema() json.RawMessage {
 }
 
 type patchEntry struct {
-	Path    string `json:"path"`
-	Op      string `json:"op"`
-	Content string `json:"content"`
-	OldText string `json:"oldText"`
-	NewText string `json:"newText"`
+	Path      string `json:"path"`
+	Op        string `json:"op"`
+	Content   string `json:"content"`
+	OldText   string `json:"oldText"`
+	NewText   string `json:"newText"`
+	IfVersion string `json:"ifVersion"`
 }
 
 // patchItem 是一条已经校验通过、算好前后全文的计划条目。
@@ -143,6 +145,9 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 			if e.OldText == e.NewText {
 				return nil, fmt.Errorf("%s: oldText and newText are identical; nothing to do", rel)
 			}
+			if _, err := writeGuard(abs, e.IfVersion); err != nil {
+				return nil, relGuardError(rel, abs, err)
+			}
 			src, err := os.ReadFile(abs)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -155,7 +160,7 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 			if n == 0 {
 				return nil, fmt.Errorf(
 					"%s: anchor (oldText) not found. Read the file again and copy the exact text, "+
-						"including whitespace and indentation.", rel)
+						"including whitespace and indentation.%s", rel, nearbyExcerpt(before, e.OldText, 5))
 			}
 			if n > 1 {
 				return nil, fmt.Errorf(
@@ -166,6 +171,17 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 			item.After = strings.Replace(before, e.OldText, e.NewText, 1)
 
 		case patchOpDelete:
+			// 先确认文件在，再校验版本：否则"文件不存在"会被报成一个 stat 错误，
+			// 模型会以为是自己参数写错了。
+			if _, statErr := os.Stat(abs); statErr != nil {
+				if os.IsNotExist(statErr) {
+					return nil, fmt.Errorf("%s: file not found; nothing to delete", rel)
+				}
+				return nil, fmt.Errorf("%s: cannot stat: %v", rel, statErr)
+			}
+			if _, err := writeGuard(abs, e.IfVersion); err != nil {
+				return nil, relGuardError(rel, abs, err)
+			}
 			src, err := os.ReadFile(abs)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -244,14 +260,17 @@ func (a *ApplyPatch) Execute(ctx context.Context, raw json.RawMessage) tool.Resu
 			if err := os.WriteFile(it.Abs, []byte(it.After), 0o644); err != nil {
 				return tool.Fail("cannot write %s: %v", it.Rel, err)
 			}
+			rememberWrite(it.Abs)
 		case patchOpUpdate:
 			if err := os.WriteFile(it.Abs, []byte(it.After), 0o644); err != nil {
 				return tool.Fail("cannot write %s: %v", it.Rel, err)
 			}
+			rememberWrite(it.Abs)
 		case patchOpDelete:
 			if err := os.Remove(it.Abs); err != nil {
 				return tool.Fail("cannot delete %s: %v", it.Rel, err)
 			}
+			ForgetRead(it.Abs)
 		}
 	}
 
@@ -267,4 +286,10 @@ func (a *ApplyPatch) Execute(ctx context.Context, raw json.RawMessage) tool.Resu
 	res.Meta.Path = strings.Join(rels, ", ")
 	res.Meta.Diff = mergedDiff(items)
 	return res
+}
+
+// relGuardError 把版本冲突错误里的绝对路径换回模型看到的相对路径。
+// 错误信息是给模型读的：它不认识绝对路径，也看不到工作树与主仓的区别。
+func relGuardError(rel, abs string, err error) error {
+	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), abs, rel))
 }

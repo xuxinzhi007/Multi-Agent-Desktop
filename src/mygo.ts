@@ -332,6 +332,15 @@ export interface FeishuView {
   userRead?: string;
 }
 
+/** FileIntentEvent 是一次写操作的意图（审批已通过、尚未落盘）。 */
+export interface FileIntentEvent {
+  agentId: string;
+  agentName: string;
+  tool: string;
+  paths: string[];
+  at: number;
+}
+
 /** GatewayAgentView 是网关侧会话快照的前端视图。 */
 export interface GatewayAgentView {
   id: string;
@@ -1253,6 +1262,11 @@ export const events = {
    * 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
    */
   agentTool: event<AgentToolEvent>("agent.tool"),
+  /**
+   * 写意图：谁要改哪些文件，在落盘之前广播。并行的会话（含浏览器第二个窗口）
+   * 靠它看见"有人正在改这个文件"，而不是等覆盖发生才发现。
+   */
+  agentFileIntent: event<FileIntentEvent>("agent.file.intent"),
   agentReasoning: event<AgentReasoningEvent>("agent.reasoning"),
   agentLoop: event<AgentLoopEvent>("agent.loop"),
   agentStopped: event<AgentStoppedEvent>("agent.stopped"),

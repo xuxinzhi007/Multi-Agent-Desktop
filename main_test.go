@@ -71,6 +71,15 @@ func stopAll(t *testing.T, s *API) {
 	for _, a := range s.mgr.List() {
 		s.mgr.Stop(a.ID)
 	}
+	// Stop 只取消当前这一轮，worker 协程仍活着（会话还能继续用）。测试收尾
+	// 必须把会话真正删掉：Delete 会 close(done)，worker 才会退出；否则下一个
+	// 用例的 t.Cleanup 写内存时，这里的 worker 还在读，-race 就报在
+	// execute/cancel 附近（根包 TestRouteShowsForwardInBothSessions 就是这样）。
+	for _, a := range s.mgr.List() {
+		s.mgr.Delete(a.ID)
+	}
+	s.mgr.WaitWorkers()
+	s.mgr.WaitSaves()
 }
 
 // ListModelsFor 必须用【已保存的凭据】，不接受前端草稿。

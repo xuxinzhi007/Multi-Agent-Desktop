@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTheme, type Theme } from '../lib/useTheme'
 import Modal from './Modal'
-import { API, type AgentView, type FeishuScopeView, type FeishuView, type ProviderEndpoint } from '../mygo'
+import { API, type AgentView, type FeishuScopeView, type FeishuView, type ProviderEndpoint, type KeepAwakeState } from '../mygo'
 import type { LLMConfig } from '../lib/useBackend'
 import DiagnosePanel from './DiagnosePanel'
 
@@ -1135,6 +1135,7 @@ export default function SettingsModal(p: Props) {
   const { theme, setTheme } = useTheme()
   const [tab, setTab] = useState<TabId>('appearance')
   const [settingsPath, setSettingsPath] = useState('')
+  const [keepAwakeState, setKeepAwakeState] = useState<KeepAwakeState | null>(null)
 
   const head = TAB_HEAD[tab]
 
@@ -1148,6 +1149,13 @@ export default function SettingsModal(p: Props) {
   useEffect(() => {
     if (!open) return
     setTab('appearance')
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    API.keepAwakeStatus()
+      .then(setKeepAwakeState)
+      .catch((e) => console.error('Failed to load keepAwake status:', e))
   }, [open])
 
   return (
@@ -1230,6 +1238,39 @@ export default function SettingsModal(p: Props) {
                       )
                     })}
                   </div>
+                </div>
+              </section>
+            )}
+
+            {tab === 'appearance' && keepAwakeState !== null && (
+              <section className="c-settings__card">
+                <div className="c-settings__card-head">
+                  <div>
+                    <div className="c-settings__card-title">保持唤醒</div>
+                    <div className="c-settings__card-sub">防止电脑进入休眠状态（macOS）</div>
+                  </div>
+                </div>
+                <div className="c-settings__card-body">
+                  <label className="c-settings__toggle">
+                    <input
+                      type="checkbox"
+                      aria-label="保持唤醒开关"
+                      checked={keepAwakeState.enabled}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          API.keepAwake()
+                            .then(() => setKeepAwakeState({ enabled: true }))
+                            .catch((err) => console.error('Failed to enable keepAwake:', err))
+                        } else {
+                          API.stopAwake()
+                            .then(() => setKeepAwakeState({ enabled: false }))
+                            .catch((err) => console.error('Failed to disable keepAwake:', err))
+                        }
+                      }}
+                    />
+                    <span className="c-settings__toggle-track"></span>
+                    <span className="c-settings__toggle-thumb"></span>
+                  </label>
                 </div>
               </section>
             )}

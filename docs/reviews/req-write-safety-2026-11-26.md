@@ -1,6 +1,6 @@
 # 需求：多写者下的写安全（Write Safety）
 
-状态：**提案**，未开发 ｜ 日期 2026-11-26 ｜ 预估 3.5～4.5 人天（P0 部分 2.8d）
+状态：**P0 已实现（2026-11-26 晚）**，P1/P2 未做 ｜ 日期 2026-11-26 ｜ 预估 3.5～4.5 人天，实际落地见 §9
 
 ## 1. 一句话
 
@@ -136,3 +136,30 @@ Claude Code 有：read-before-edit 的强制、编辑前校验文件未被外部
 - **台账误报**：外部格式化（gofmt 保存即触发）会让版本变化，模型被迫重读。缓解：只在"锚点仍能唯一匹配"时才允许继续（说明内容语义未变），否则报 `STALE_WRITE`。
 - **默认隔离的副作用**：用户会在 `.mad-worktrees/` 下看到一份"看起来像仓库"的东西，误以为改了两份。缓解：UI 明确标注"隔离工作树 · 分支 mad/xxx"，README 一条说明。
 - **合并冲突把工作流卡住**：只在用户主动点"合回"时发生，不自动合。冲突就交回人。
+
+## 9. 落地清单（2026-11-26 晚）
+
+已实现并带测试：
+
+| 提案项 | 落点 | 测试 |
+|---|---|---|
+| P0-A 读后写版本校验 | `internal/tool/builtin/filestate.go`（`fingerprintFile` / `writeGuard` / 进程内读状态）；`read_file` 输出末尾带 `[file version …]`；`write_file` / `edit_file` / `apply_patch` 支持 `ifVersion` | `filestate_test.go`：读后外部改 → 拒绝且零写入；带新版本通过；patch 一条过期整批不动；新文件免读 |
+| P0-3 锚点失配给现场 | `internal/tool/builtin/excerpt.go`（`nearbyExcerpt`，空白折叠 + 前缀逐级缩短） | `TestAnchorMissReturnsNearbyExcerpt`：多一个空格也能定位到第 3 行 |
+| P0-B 写意图广播 | `internal/tool/tool.go` 的 `Registry.OnWrite`；`internal/agent/write_intent.go`；事件 `agent.file.intent`（`main.go` 的 `FileIntent` + `toFileIntent`）；网关全事件桥接；前端 `useBackend` 的 `intents` + `App.tsx` 顶部提示条 | `TestToFileIntent`、`TestWriteIntentPaths` |
+| P0-C 隔离 + 合回 | `internal/worktree/merge.go`（`Merge`：ff 优先、冲突 abort、双端 clean 前置）；`worktree_merge` 工具；`config.worktree.mode`；`Manager.SetAgentWorkDir` 自动隔离 | `internal/worktree/merge_test.go` 4 条（ff / 冲突 abort 且主仓干净 / 工作树脏 / 主仓脏） |
+
+### 与提案的两处差异（写清楚原因，不留模糊）
+
+1. **默认不隔离父会话**：提案写"新会话默认隔离"，落地改为 `worktree.mode` 三态、默认 `children`。
+   原因：仓库里已有明确契约——`TestSupervisorChildrenGetIsolatedWorktrees`（父不该被隔离）、
+   `TestDelegateReadModeCreatesNoSessionOrWorktree`（read 子任务不建工作树）。父会话被隔离后
+   `WorkDir` 会变成 `.mad-worktrees/...`，用户会以为"我选的目录不见了"。要全局隔离把
+   `config.json` 改成 `{"worktree":{"mode":"all"}}` 即可。
+2. **版本校验不再强制"必须先读"**：提案原写"没带 ifVersion 就拒绝"。落地改成
+   只在"本进程读过该文件且磁盘版本已变"时拒绝。理由：强制带参会让大量既有调用路径
+   失败（模型经常直接写新文件/整份覆盖），而事故的真实形态恰恰是"读过之后被改"。
+
+### 未做（明确留白）
+
+- P1 文件树"你手上的版本已过期"标记（数据已有：`read_file` 的版本 + `agent.file.intent`，只差 UI）。
+- P2 跨仓库统一租约、跨机器协调、自动冲突解决——按提案的非目标不做。

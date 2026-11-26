@@ -36,6 +36,37 @@ type Settings struct {
 	Feishu Feishu `json:"feishu,omitempty"`
 	// FeishuBots 是企业自建机器人。Secret 与模型 Key 放在同一份 0600 文件里。
 	FeishuBots []FeishuBot `json:"feishuBots,omitempty"`
+	// Worktree 控制"新会话默认使用独立 git 工作树"。
+	Worktree Worktree `json:"worktree,omitempty"`
+}
+
+// Worktree 是工作树隔离设置。
+//
+// 三态而不是布尔，因为"父会话"和"子会话"需要不同默认：
+//   - children（默认）：只有委派出来的子会话隔离。父会话共享检出，
+//     这样用户自己的窗口看到的还是他选的那个目录；
+//   - all：新会话一律隔离（适合多个窗口同时改同一仓库）；
+//   - off：全关，只靠写安全的版本校验兜底。
+//
+// 为什么默认不是 all：父会话被隔离后目录会变成 .mad-worktrees 里的另一份，
+// 用户会以为"我选的目录不见了"；而子会话本来就是后台干活，隔离不打扰人。
+type Worktree struct {
+	Mode string `json:"mode,omitempty"`
+}
+
+const (
+	WorktreeModeChildren = "children"
+	WorktreeModeAll      = "all"
+	WorktreeModeOff      = "off"
+)
+
+// ModeOrDefault 返回实际生效的模式：空值按 children，非法值也按 children。
+func (w Worktree) ModeOrDefault() string {
+	switch w.Mode {
+	case WorktreeModeAll, WorktreeModeOff, WorktreeModeChildren:
+		return w.Mode
+	}
+	return WorktreeModeChildren
 }
 
 // Feishu 是飞书机器人的接入配置。

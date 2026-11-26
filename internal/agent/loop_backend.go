@@ -166,6 +166,19 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	if appr := m.Approvals(); appr != nil {
 		reg.Approver = appr.Approver(a.ID, a.Name)
 	}
+	// 写意图广播：审批通过、落盘之前发一条。并行的会话（含浏览器另一个窗口）
+	// 能从事件流里看到"谁要改哪个文件"，不用等覆盖发生才发现。
+	reg.OnWrite = func(c tool.Call) {
+		if paths := writeIntentPaths(c.Input); len(paths) > 0 {
+			m.emit("agent.file.intent", map[string]any{
+				"agentId":   a.ID,
+				"agentName": a.Name,
+				"tool":      c.Name,
+				"paths":     paths,
+				"at":        time.Now().Unix(),
+			})
+		}
+	}
 	registerSpawnTools(reg, m, a, channelID)
 	for _, t := range m.testTools {
 		reg.Register(t)

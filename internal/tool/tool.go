@@ -124,6 +124,10 @@ type Registry struct {
 
 	// Approver 在写操作执行前被调用。为 nil 表示不需要审批。
 	Approver Approver
+	// OnWrite 在写操作通过审批、真正执行之前被调用（只对 Writes() 为真的工具）。
+	// 用途：把"谁要改哪些文件"广播出去，让并行的会话/界面在覆盖发生前就能看见。
+	// 它不阻塞、失败不影响执行——观测永远不该让业务失败。
+	OnWrite func(call Call)
 	// MaxResultBytes 限制回填给模型的文本长度。0 表示用默认值。
 	MaxResultBytes int
 	// Timeout 是单次工具执行的硬上限。0 表示用默认值。
@@ -309,6 +313,10 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 			r.forget(fp)
 			return done(c, Result{Status: StatusDenied, Content: msg}, start)
 		}
+	}
+
+	if t.Writes() && r.OnWrite != nil {
+		r.OnWrite(c)
 	}
 
 	timeout := r.Timeout

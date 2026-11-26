@@ -134,7 +134,10 @@ var (
 	ToolStart    = mygo.NewEvent[ToolStartEvent]("tool.start")
 	// loop 内工具调用与运行结局。循环真的在跑，界面必须能看到，
 	// 否则「停止」和「预算用尽」都只发生在后台，用户完全无感。
-	AgentTool      = mygo.NewEvent[AgentToolEvent]("agent.tool")
+	AgentTool = mygo.NewEvent[AgentToolEvent]("agent.tool")
+	// 写意图：谁要改哪些文件，在落盘之前广播。并行的会话（含浏览器第二个窗口）
+	// 靠它看见"有人正在改这个文件"，而不是等覆盖发生才发现。
+	FileIntent     = mygo.NewEvent[FileIntentEvent]("agent.file.intent")
 	AgentReasoning = mygo.NewEvent[AgentReasoningEvent]("agent.reasoning")
 	AgentLoop      = mygo.NewEvent[AgentLoopEvent]("agent.loop")
 	AgentStopped   = mygo.NewEvent[AgentStoppedEvent]("agent.stopped")
@@ -202,6 +205,15 @@ type ToolStartEvent struct {
 type AgentReasoningEvent struct {
 	ID        string `json:"id"`
 	Reasoning string `json:"reasoning"`
+}
+
+// FileIntentEvent 是一次写操作的意图（审批已通过、尚未落盘）。
+type FileIntentEvent struct {
+	AgentID   string   `json:"agentId"`
+	AgentName string   `json:"agentName"`
+	Tool      string   `json:"tool"`
+	Paths     []string `json:"paths"`
+	At        int64    `json:"at"`
 }
 
 // AgentToolEvent 是一次 loop 内工具调用的开始或结束。
@@ -1222,6 +1234,34 @@ func toAgentTool(data any) (AgentToolEvent, bool) {
 	return AgentToolEvent{ID: id, Tool: tool, Phase: phase, Status: status, Content: content}, true
 }
 
+func toFileIntent(data any) (FileIntentEvent, bool) {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return FileIntentEvent{}, false
+	}
+	v := FileIntentEvent{}
+	v.AgentID, _ = m["agentId"].(string)
+	v.AgentName, _ = m["agentName"].(string)
+	v.Tool, _ = m["tool"].(string)
+	if at, ok := m["at"].(int64); ok {
+		v.At = at
+	}
+	switch paths := m["paths"].(type) {
+	case []string:
+		v.Paths = paths
+	case []any:
+		for _, p := range paths {
+			if s, ok := p.(string); ok {
+				v.Paths = append(v.Paths, s)
+			}
+		}
+	}
+	if v.AgentID == "" || len(v.Paths) == 0 {
+		return FileIntentEvent{}, false
+	}
+	return v, true
+}
+
 func toAgentLoop(data any) (AgentLoopEvent, bool) {
 	m, ok := data.(map[string]any)
 	if !ok {
@@ -1442,6 +1482,10 @@ func emitToWindow(win *mygo.Window, mgr *agent.Manager, chMgr *channel.Manager, 
 			if v, ok := toToolStart(data); ok {
 				ToolStart.Emit(win, v)
 			}
+		case "agent.file.intent":
+			if v, ok := toFileIntent(data); ok {
+				FileIntent.Emit(win, v)
+			}
 		case "agent.tool":
 			if v, ok := toAgentTool(data); ok {
 				AgentTool.Emit(win, v)
@@ -1581,6 +1625,7 @@ func main() {
 	cfg = effective.LLM
 	mgr = agent.NewManager(cfg, emit)
 	mgr.SetMemory(memStore)
+	mgr.SetWorktreeMode(effective.Worktree.ModeOrDefault())
 
 	// 计划调度：任务持久化在桌面数据目录，30s 心跳；初始化失败只降级，不阻断桌面。
 	if svc, planErr := scheduler.NewService(scheduler.Config{
