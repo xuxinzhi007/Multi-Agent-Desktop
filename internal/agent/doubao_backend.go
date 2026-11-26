@@ -78,6 +78,10 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 	}
 
 	var full, reasoning strings.Builder
+	// tool_result 事件只带 tool_use_id，不带工具名和文件路径，这两样只在 tool_use 上出现。
+	// 按 callId 记住，结束事件才认得出「哪个工具改了哪个文件」，也才取得到 diff；
+	// 少了这一步，改动页只剩一条空壳。
+	calls := map[string]toolRef{}
 	for c := range stream {
 		if c.Err != "" {
 			m.finish(a, StatusError, c.Err)
@@ -103,6 +107,9 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 				a.mu.Lock()
 				a.LastTool = label
 				a.mu.Unlock()
+				if c.CallID != "" {
+					calls[c.CallID] = toolRef{tool: c.Tool, path: c.Path}
+				}
 				m.emit("agent.tool", map[string]any{
 					"id": a.ID, "tool": c.Tool, "phase": "start", "content": label,
 					"callId": c.CallID, "input": c.Input, "path": shortPath(workDir, c.Path),
@@ -117,11 +124,14 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 					"content": c.Content, "callId": c.CallID, "output": clipResult(c.Content, 4000),
 				}
 				// 文件类工具带上路径与 diff：界面据此把「改过哪个文件」摆出来，
-				// 而不是只留一句「改了」。Bash 没有路径，就不硬编。
-				if c.Path != "" {
-					payload["path"] = shortPath(workDir, c.Path)
-					if d := gitFileDiff(workDir, c.Path); d != "" {
-						payload["diff"] = d
+				// 而不是只留一句「改了」。Bash 没有路径、Read/Glob 的 path 是搜索位置，
+				// 都不该被当成落盘改动，所以只有写盘工具去取 diff。
+				if ref, ok := resolveToolRef(c, calls); ok && ref.path != "" {
+					payload["path"] = shortPath(workDir, ref.path)
+					if writesFile(ref.tool) {
+						if d := gitFileDiff(workDir, ref.path); d != "" {
+							payload["diff"] = d
+						}
 					}
 				}
 				m.emit("agent.tool", payload)
@@ -230,6 +240,39 @@ func doubaoImagePaths(m *Manager, blocks []llm.Block) []string {
 		}
 	}
 	return out
+}
+
+// toolRef 记下一次调用碰的工具名和文件路径：tool_use 时写入，tool_result 时回查。
+type toolRef struct {
+	tool string
+	path string
+}
+
+// resolveToolRef 找出这次工具调用用的是哪个工具、碰的是哪个文件。
+// tool_use 自带路径与工具名；tool_result 只有 tool_use_id，只能按 callId 回查。
+func resolveToolRef(c llm.Chunk, calls map[string]toolRef) (toolRef, bool) {
+	var ref toolRef
+	if c.CallID != "" {
+		ref = calls[c.CallID]
+	}
+	if c.Path != "" {
+		ref.path = c.Path
+	}
+	if c.Tool != "" && c.Tool != "tool" {
+		ref.tool = c.Tool
+	}
+	return ref, ref.path != ""
+}
+
+// writesFile 判断工具是否会写盘。只有写盘工具才值得去取 diff：
+// Glob 的 path 是搜索根目录、Read 只是读，把它们当成改动是误导。
+func writesFile(tool string) bool {
+	switch strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "").Replace(tool)) {
+	case "write", "writefile", "edit", "editfile", "multiedit", "notebookedit",
+		"applypatch", "patch", "strreplace", "createfile", "deletefile":
+		return true
+	}
+	return false
 }
 
 // shortPath 把绝对路径收成工作目录内的相对路径，超出目录就原样保留。

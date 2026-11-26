@@ -40,6 +40,8 @@ type Props = {
   onShell: (command: string) => void
   /** 打开检查器的「改动」页：对话里的改动清单点击后跳到这里看 diff */
   onOpenChanges?: () => void
+  /** 本轮改动过的文件（按路径去重，来自全部工具事件，不受 steps 截断影响） */
+  changes?: { path: string; diff?: string }[]
   /** 本会话执行过的命令，直接渲染在对话流里 */
   shellLogs?: ShellLog[]
   /** 这一轮已经发生的工具步骤。思考中靠它显示在读什么、跑了什么。 */
@@ -114,19 +116,13 @@ function presentTranscript(messages: Message[]): Shown[] {
  * 这里按路径去重，给一行可点击的清单，点击直接跳到检查器的 diff。
  */
 function TurnChanges({
-  steps,
+  files,
   onOpen,
 }: {
-  steps: NonNullable<Props['steps']>
+  files: { path: string; diff?: string }[]
   onOpen?: () => void
 }) {
-  const files = new Map<string, { path: string; diff?: string }>()
-  for (const s of steps) {
-    if (!s.path) continue
-    const prev = files.get(s.path)
-    if (!prev || (!prev.diff && s.diff)) files.set(s.path, { path: s.path, diff: s.diff ?? prev?.diff })
-  }
-  if (files.size === 0) return null
+  if (files.length === 0) return null
   const stat = (d?: string) => {
     if (!d) return ''
     const lines = d.split('\n')
@@ -147,7 +143,7 @@ function TurnChanges({
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-          本轮改了 {files.size} 个文件
+          本轮改了 {files.length} 个文件
         </span>
         {onOpen && (
           <button
@@ -160,7 +156,7 @@ function TurnChanges({
         )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-        {[...files.values()].map((f) => (
+        {files.map((f) => (
           <button
             key={f.path}
             type="button"
@@ -738,7 +734,7 @@ export default function AgentView(p: Props) {
           <Thinking steps={p.steps ?? []} reasoning={p.reasoning} pace={p.pace} />
         )}
 
-        {!running && <TurnChanges steps={p.steps ?? []} onOpen={p.onOpenChanges} />}
+        {!running && <TurnChanges files={p.changes ?? []} onOpen={p.onOpenChanges} />}
 
         {(p.shellLogs?.length ?? 0) > 0 && <ShellCard logs={p.shellLogs ?? []} />}
         </div>

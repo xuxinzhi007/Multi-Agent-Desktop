@@ -507,6 +507,13 @@ func (m *Manager) Load() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, saved := range data {
+		// Load 是幂等的：同一个 ID 已经在内存里就不再造第二个 Agent。
+		// 早先这里无条件 append + 起 worker，第二次 Load（SetStore 内部一次、
+		// 调用方再显式一次）会把同一会话的旧 worker 变成孤儿：done 永远不会被
+		// close，WaitWorkers 永远不返回，测试直接挂死，m.order 里还会出现重复 ID。
+		if _, exists := m.agents[saved.ID]; exists {
+			continue
+		}
 		a := &Agent{
 			ID:             saved.ID,
 			Name:           saved.Name,

@@ -660,6 +660,11 @@ func TestExtraDirsSurviveRoundTrip(t *testing.T) {
 	if got := back.EffectiveExtraDirs(); len(got) != 1 || got[0] != other {
 		t.Fatalf("重启后 extraDirs = %v，持久化白名单漏了字段", got)
 	}
+	// 重复 Load 不能重复造会话：否则旧 worker 变成孤儿协程，
+	// 收尾时 WaitWorkers 永远等不到，测试会挂死。
+	if n := len(m2.List()); n != 1 {
+		t.Fatalf("重复 Load 后会话数 = %d，want 1", n)
+	}
 }
 
 // 附加目录的校验和主目录一样严，不能拿它绕开过宽目录的限制。

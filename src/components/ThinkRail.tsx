@@ -7,6 +7,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
  * 之前频道只有一个「正在思考中…」的静态提示，单聊有工具步骤 + 等待计时，
  * 同一个 agent 在两个视图里看起来像两个产品。
  */
+import { toolLabel } from '../lib/tool-names'
+
 export type ThinkStep = {
   tool: string
   target: string
@@ -16,15 +18,8 @@ export type ThinkStep = {
 
 export type Pace = { since: number; first?: number; heard?: 'reason' | 'text' }
 
-const TOOL_LABEL: Record<string, string> = {
-  read_file: '读取',
-  write_file: '写入',
-  edit_file: '修改',
-  bash: '执行',
-}
-
 export function stepText(tool: string, target: string) {
-  const label = TOOL_LABEL[tool] ?? tool
+  const label = toolLabel(tool)
   const prefix = tool + ' '
   const detail = target.startsWith(prefix) ? target.slice(prefix.length) : target
   const line = detail.replace(/\s+/g, ' ').trim()
