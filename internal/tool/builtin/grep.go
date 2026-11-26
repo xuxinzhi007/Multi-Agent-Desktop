@@ -31,6 +31,9 @@ func (*Grep) Name() string { return "grep" }
 
 func (*Grep) Writes() bool { return false }
 
+// ConcurrencySafe 显式声明：只读遍历文件、不持有共享可变状态，可在同一轮并发执行。
+func (*Grep) ConcurrencySafe() bool { return true }
+
 func (*Grep) Description() string {
 	return "Search file contents recursively. Output lines as path:line: text. " +
 		"Supports include/exclude globs, case-insensitive match, regexp or literal substring. " +

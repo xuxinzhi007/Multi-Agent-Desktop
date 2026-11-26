@@ -11,8 +11,10 @@ test.beforeEach(async ({ page }) => {
   await page.getByRole('button', { name: '会话 后端开发', exact: true }).click()
 })
 
-test('输入栏能切权限档位，默认逐次审批', async ({ page }) => {
-  const chip = page.getByRole('button', { name: /逐次审批/ })
+// mock 的 AgentPermission 固定返回 ask：这里验证接口返回 ask 时显示谨慎模式，
+// 以及切到只读能生效。真实默认 auto 由 Go 侧 approval/api 用例覆盖，不在此制造假信号。
+test('接口返回 ask 时显示谨慎模式；切到只读生效', async ({ page }) => {
+  const chip = page.getByRole('button', { name: /谨慎模式/ })
   await expect(chip).toBeVisible()
   await chip.click()
 

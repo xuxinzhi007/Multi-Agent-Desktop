@@ -1,0 +1,118 @@
+# CI 门禁：把 build / vet / test / 前端类型检查与打包变成每次提交都能验的门槛。
+#
+# 范围与边界（2026-11-26 核实）：
+#   - 只在 ubuntu-latest 上跑静态/单测类检查；不跑真实模型任务，不跑 Playwright。
+#   - Go 版本按 go.mod（1.27.3）由 actions/setup-go 读取；Node 固定 20（与本机 v20.20.2 对齐）。
+#
+# 测试包列表来源：本机 `go list ./...`（分支 fix/p0-correctness-stopgap，HEAD 151779f）。
+# 没有盲抄 `go test ./...`，下面显式列出包路径。
+#
+# 排除/裁剪项及理由：
+#   1. e2e 构建标签的测试（main_diagnose_test.go、main_llamacpp_e2e_test.go、
+#      main_modellist_e2e_test.go）：文件头带 `//go:build e2e`，默认不编译；
+#      它们需要真实 llama.cpp 服务与 macOS 用户数据目录，CI 不具备，故不追加 `-tags e2e`。
+#   2. `-short`：跳过依赖外部存活服务的集成用例（如 internal/llm/llamacpp_test.go
+#      在短模式下 t.Skip，健康检查不通也会 Skip）；不打任何真实模型调用。
+#   3. internal/privacy：权限探测实现分平台 —— check_darwin.go 只在 darwin 编译，
+#      Linux 走 check_other.go 的 unknown 回落；其测试里的 darwin 断言由 runtime.GOOS 门控，
+#      在 Linux 上不会执行该分支，因此包本身保留在测试列表内。
+#   4. 不依赖 cgo：SQLite 用 modernc.org/sqlite（纯 Go），Linux runner 无需 gcc。
+#
+# 有意不进 CI：
+#   - Playwright（`npm run test:e2e`）：playwright.config.ts 走系统 Chrome channel，
+#     webServer 起 `npm run dev:web`（localhost:5173，reuseExistingServer），
+#     需要浏览器与本地 dev server；本机基线 133 条通过，另跑，不在本 workflow 内。
+#   - `npm run build`（mygo 桌面打包）：依赖平台桌面工具链，CI 只验 web 端 vite 产物。
+
+name: ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+# 同分支/同 PR 的旧跑被新跑取代，避免排队烧额度。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build / vet / test / frontend
+    runs-on: ubuntu-latest
+    # 单测本机 internal 约 11s（缓存）、根包短模式约 47s；留足余量，卡死自动终止。
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # ── Go ──────────────────────────────────────────────────────────────
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      # 显式包路径（来自 `go list ./...`）；根包 + cmd + internal 全部在列。
+      # proc 包无测试文件，列在这里只做编译校验，不影响结果。
+      - name: Go test (short, explicit packages)
+        run: |
+          go test -short \
+            . \
+            ./cmd/acp-probe \
+            ./cmd/mad-gateway \
+            ./internal/agent \
+            ./internal/approval \
+            ./internal/audit \
+            ./internal/browser \
+            ./internal/channel \
+            ./internal/config \
+            ./internal/diff \
+            ./internal/feishu \
+            ./internal/gateway \
+            ./internal/gateway/host \
+            ./internal/knowledge \
+            ./internal/llm \
+            ./internal/loop \
+            ./internal/memory \
+            ./internal/privacy \
+            ./internal/proc \
+            ./internal/pty \
+            ./internal/runtime \
+            ./internal/runtime/acp \
+            ./internal/scheduler \
+            ./internal/shellguard \
+            ./internal/skill \
+            ./internal/tool \
+            ./internal/tool/builtin \
+            ./internal/tool/web \
+            ./internal/workdir \
+            ./internal/worktree
+
+      # ── 前端 ────────────────────────────────────────────────────────────
+      # 本机实测：tsc --noEmit 约 0.7s、vite build 约 0.6s（依赖已装），耗时可控，纳入 CI。
+
+      - name: Frontend typecheck
+        run: npx tsc --noEmit -p tsconfig.app.json
+
+      - name: Frontend production bundle (vite)
+        run: npx vite build

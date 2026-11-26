@@ -37,10 +37,12 @@ func (s *API) DecideApproval(id string, allow, remember bool) error {
 	}
 	// 放行清单要落盘，否则重启后又从头问一遍。
 	// 在 Decide 之前拿卡片：Decide 会把它从 pending 里删掉。
+	// 记忆粒度是 工具 + 命中的根目录 (+ bash 命令族签名)；卡片上的 Root 拿不到时
+	// 退化为工具级，Sig 解析不出时这条 bash 不入记忆。
 	if allow && remember {
 		for _, v := range center.Pending() {
 			if v.ID == id {
-				s.mgr.RememberTool(v.AgentID, v.Tool)
+				s.mgr.RememberTool(v.AgentID, v.Tool, v.Root, v.Sig)
 				break
 			}
 		}
@@ -75,15 +77,15 @@ func (s *API) AuditPath() string {
 func (s *API) AgentPermission(agentID string) string {
 	c := s.mgr.Approvals()
 	if c == nil {
-		return string(approval.ModeAsk)
+		return string(approval.ModeAuto)
 	}
 	return string(c.ModeOf(agentID))
 }
 
 // SetAgentPermission 改这个会话的权限模式。
 //
-//	ask      每次写操作都问（默认）
-//	auto     工作目录内的写与命令自动执行
+//	ask      谨慎模式：每次写操作都问
+//	auto     默认档：工作区根内的文件编辑自动放行；bash 与其他写操作仍走审批
 //	readonly 只读，写操作直接拒绝
 //
 // 工作目录是工具层的硬边界，任何一档都放不开它；
@@ -101,14 +103,17 @@ func (s *API) SetAgentPermission(agentID, mode string) (string, error) {
 	m := approval.ParseMode(mode)
 	c.SetMode(agentID, m)
 	s.mgr.SetPermissionMode(agentID, string(m))
-	// 改成自动或只读后，还挂着的卡已经没有意义：
-	// 自动就放行，只读就拒绝，别让它们继续等到超时。
+	// 改成自动或只读后，还挂着的卡按新档位收口：只读一律拒绝；自动只放行
+	// 文件编辑类卡，bash 卡仍保留等人决定——auto 不放行命令执行。
 	for _, v := range c.Pending() {
 		if v.AgentID != agentID {
 			continue
 		}
 		switch m {
 		case approval.ModeAuto:
+			if v.Tool == "bash" {
+				continue
+			}
 			_ = c.Decide(v.ID, true, false, "已切到自动")
 		case approval.ModeReadOnly:
 			_ = c.Decide(v.ID, false, false, "已切到只读")

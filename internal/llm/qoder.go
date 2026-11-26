@@ -167,6 +167,7 @@ func qoderTurn(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	defer resp.Body.Close()
 	var turn Turn
 	var acc []qoderToolAcc
+	var lastUsage = unknownUsage()
 	var turnErr error
 	err = qoderRead(ctx, resp.Body, func(d qoderDelta) bool {
 		if d.err != "" {
@@ -176,8 +177,12 @@ func qoderTurn(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 		turn.Text += d.content
 		turn.Reasoning += d.reasoning
 		acc = qoderMergeTools(acc, d.tools)
+		if d.usage.Source != "" {
+			lastUsage = d.usage
+		}
 		return !d.done
 	})
+	turn.Usage = lastUsage
 	if turnErr != nil {
 		return Turn{}, turnErr
 	}
@@ -213,6 +218,7 @@ func qoderTurnStream(ctx context.Context, client *http.Client, cfg Config, msgs 
 	defer resp.Body.Close()
 	var turn Turn
 	var acc []qoderToolAcc
+	var lastUsage = unknownUsage()
 	var turnErr error
 	err = qoderRead(ctx, resp.Body, func(d qoderDelta) bool {
 		if d.err != "" {
@@ -225,8 +231,12 @@ func qoderTurnStream(ctx context.Context, client *http.Client, cfg Config, msgs 
 		turn.Text += d.content
 		turn.Reasoning += d.reasoning
 		acc = qoderMergeTools(acc, d.tools)
+		if d.usage.Source != "" {
+			lastUsage = d.usage
+		}
 		return !d.done
 	})
+	turn.Usage = lastUsage
 	if ctx.Err() != nil {
 		return Turn{}, ctx.Err()
 	}
@@ -263,6 +273,7 @@ type qoderDelta struct {
 	done      bool
 	tokensIn  int
 	tokensOut int
+	usage     Usage
 }
 
 type qoderToolDelta struct {
@@ -518,18 +529,16 @@ func qoderRead(ctx context.Context, r io.Reader, emit func(qoderDelta) bool) err
 					} `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-			} `json:"usage"`
+			Usage json.RawMessage `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(innerRaw), &inner); err != nil {
 			continue
 		}
 		d := qoderDelta{}
-		if inner.Usage != nil {
-			d.tokensIn = inner.Usage.PromptTokens
-			d.tokensOut = inner.Usage.CompletionTokens
+		if len(inner.Usage) > 0 {
+			d.usage = parseUsage(inner.Usage)
+			d.tokensIn = d.usage.PromptTokens
+			d.tokensOut = d.usage.CompletionTokens
 		}
 		if len(inner.Choices) > 0 {
 			delta := inner.Choices[0].Delta

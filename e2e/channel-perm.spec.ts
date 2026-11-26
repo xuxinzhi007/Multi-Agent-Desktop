@@ -85,7 +85,7 @@ test('成员名单里能直接改权限', async ({ page }) => {
   await page.locator('[title="查看成员名单"]').click()
   await expect(page.getByText('成员 · 评审群')).toBeVisible()
 
-  const chips = page.getByRole('button', { name: /逐次审批/ })
+  const chips = page.getByRole('button', { name: /谨慎模式/ })
   await expect(chips).toHaveCount(2)
   await chips.first().click()
   await page.getByRole('menu').getByRole('menuitemradio', { name: /自动/ }).click()
@@ -108,5 +108,5 @@ test('个人主页里有权限选择器', async ({ page }) => {
   await page.locator('[title="看他的个人主页"]').first().click()
   await expect(page.getByText('个人主页')).toBeVisible()
   await expect(page.getByText('干活权限')).toBeVisible()
-  await expect(page.getByRole('button', { name: /逐次审批/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /谨慎模式/ })).toBeVisible()
 })

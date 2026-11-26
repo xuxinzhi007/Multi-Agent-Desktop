@@ -141,6 +141,10 @@ export interface ApprovalView {
   detail: string;
   diff?: string;
   createdAt: number;
+  /** Root 是这次调用命中的工作区根；「以后都允许」按 工具 + 这个根 记忆。 */
+  root?: string;
+  /** Sig 是 bash 的命令族签名；文件工具为空。 */
+  sig?: string;
 }
 
 export interface Block {
@@ -1095,8 +1099,8 @@ export const API = {
   /**
    * SetAgentPermission 改这个会话的权限模式。
    *
-   * 	ask      每次写操作都问（默认）
-   * 	auto     工作目录内的写与命令自动执行
+   * 	ask      谨慎模式：每次写操作都问
+   * 	auto     默认档：工作区根内的文件编辑自动放行；bash 与其他写操作仍走审批
    * 	readonly 只读，写操作直接拒绝
    *
    * 工作目录是工具层的硬边界，任何一档都放不开它；

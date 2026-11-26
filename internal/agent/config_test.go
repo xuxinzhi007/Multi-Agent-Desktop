@@ -378,9 +378,12 @@ func (s *stubKnowledge) NotesForSystemPrompt() []string {
 func TestSystemPromptFor(t *testing.T) {
 	got := systemPromptFor("后端专家")
 	// 角色不再拼进 system：它由会话首条消息带出，系统提示只留应用级的边界。
-	want := "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。"
-	if got != want {
-		t.Errorf("systemPromptFor(\"后端专家\") = %q, want %q", got, want)
+	if !strings.Contains(got, "你在 multi-agent-desktop 里工作") {
+		t.Errorf("systemPromptFor(\"后端专家\") = %q, missing base sentence", got)
+	}
+	// 完成前必须 verify 的规则要在首条 system 里就立住。
+	if !strings.Contains(got, "verify") {
+		t.Errorf("systemPromptFor(\"后端专家\") = %q, missing verify rule", got)
 	}
 	if strings.Contains(got, "知识库") {
 		t.Errorf("systemPromptFor(\"后端专家\") = %q, want no knowledge section", got)
@@ -702,8 +705,9 @@ func TestPermissionModeSurvivesRestart(t *testing.T) {
 	a := m.Create("a1", "甲", "r")
 	m.SetApprovals(approval.New(func(string, any) {}))
 	m.SetPermissionMode(a.ID, "auto")
-	m.RememberTool(a.ID, "bash")
-	m.RememberTool(a.ID, "bash") // 幂等
+	// 记忆条目带根标识（文件工具无签名段）；落盘条目 "write_file@<dir>"，幂等去重。
+	m.RememberTool(a.ID, "write_file", dir, "")
+	m.RememberTool(a.ID, "write_file", dir, "")
 	m.waitSaves()
 
 	// 重新开一份 Manager，模拟重启。
@@ -722,7 +726,7 @@ func TestPermissionModeSurvivesRestart(t *testing.T) {
 	if c := m2.Approvals(); c.ModeOf("a1") != approval.ModeAuto {
 		t.Fatalf("审批中心没拿到自动档：%v", c.ModeOf("a1"))
 	}
-	if v := got.Snapshot(); len(v.AllowedTools) != 1 || v.AllowedTools[0] != "bash" {
+	if v := got.Snapshot(); len(v.AllowedTools) != 1 || v.AllowedTools[0] != "write_file@"+dir {
 		t.Fatalf("放行清单没恢复或重复：%v", v.AllowedTools)
 	}
 }

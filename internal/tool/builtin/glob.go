@@ -28,6 +28,9 @@ func (*Glob) Name() string { return "glob" }
 
 func (*Glob) Writes() bool { return false }
 
+// ConcurrencySafe 显式声明：只读遍历文件、不持有共享可变状态，可在同一轮并发执行。
+func (*Glob) ConcurrencySafe() bool { return true }
+
 func (*Glob) Description() string {
 	return "List files matching a glob pattern. Supports ** for any number of directories, " +
 		"* and ? within one path segment. Results are sorted by path and capped."

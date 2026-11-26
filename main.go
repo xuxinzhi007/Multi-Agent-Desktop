@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -163,13 +164,17 @@ type ApprovalView struct {
 	Detail    string `json:"detail"`
 	Diff      string `json:"diff,omitempty"`
 	CreatedAt int64  `json:"createdAt"`
+	// Root 是这次调用命中的工作区根；「以后都允许」按 工具 + 这个根 记忆。
+	Root string `json:"root,omitempty"`
+	// Sig 是 bash 的命令族签名；文件工具为空。
+	Sig string `json:"sig,omitempty"`
 }
 
 func toApprovalView(v approval.View) ApprovalView {
 	return ApprovalView{
 		ID: v.ID, AgentID: v.AgentID, AgentName: v.AgentName,
 		Tool: v.Tool, Title: v.Title, Detail: v.Detail, Diff: v.Diff,
-		CreatedAt: v.CreatedAt,
+		CreatedAt: v.CreatedAt, Root: v.Root, Sig: v.Sig,
 	}
 }
 
@@ -1175,6 +1180,8 @@ func toApprovalEvent(data any) (ApprovalView, bool) {
 			Title:     str(v["title"]),
 			Detail:    str(v["detail"]),
 			Diff:      str(v["diff"]),
+			Root:      str(v["root"]),
+			Sig:       str(v["sig"]),
 		}
 		out.CreatedAt, _ = v["createdAt"].(int64)
 		return out, true
@@ -1487,7 +1494,10 @@ func main() {
 	var mgr *agent.Manager
 	var win *mygo.Window
 	var api *API
-	var gw *gwhost.Host
+	// gw 由 emit（可能在其它 goroutine 里被回调）读取，在构造阶段写入；
+	// 用 atomic.Pointer 消除未同步读写的竞态。未就绪时 Load 返回 nil，
+	// emit 安静丢弃事件，不阻塞、不改事件契约。
+	var gwHost atomic.Pointer[gwhost.Host]
 
 	// emitter 把 agent 事件转成 MyGo Event 发给前端
 	var chMgr *channel.Manager
@@ -1512,8 +1522,9 @@ func main() {
 			}
 		}
 		// 全事件桥接给内嵌网关；渠道归属/是否回复由 Service 侧过滤。
-		if gw != nil {
-			gw.OnAgentEvent(event, data)
+		// 网关尚未就绪时安静丢弃，不阻塞 emit。
+		if h := gwHost.Load(); h != nil {
+			h.OnAgentEvent(event, data)
 		}
 		// agent.message 旁路进记忆库；异步、去重、限流，不阻塞 emit。
 		if memBridge != nil {
@@ -1678,28 +1689,27 @@ func main() {
 	api.syncFeishu()
 
 	// 内嵌网关：桌面进程直接挂 HTTP/SSE。初始化或监听失败只记日志，
-	// 绝不能阻断桌面启动；失败时 gw=nil，前端显示「未启用」。
+	// 绝不能阻断桌面启动；失败时网关指针为 nil，前端显示「未启用」。
 	gwAddr := strings.TrimSpace(os.Getenv("MAD_GATEWAY_ADDR"))
 	if gwAddr == "" {
 		gwAddr = "127.0.0.1:8780"
 	}
-	var gwErr error
-	gw, gwErr = gwhost.New(gwhost.Deps{
+	host, gwErr := gwhost.New(gwhost.Deps{
 		Manager:   mgr,
 		Approvals: mgr.Approvals(),
 		DataDir:   dataDir,
 	})
 	if gwErr != nil {
 		log.Printf("gateway: init failed: %v", gwErr)
-		gw = nil
 	} else {
-		if err := gw.Start(gwAddr, os.Getenv("MAD_GATEWAY_TOKEN")); err != nil {
+		if err := host.Start(gwAddr, os.Getenv("MAD_GATEWAY_TOKEN")); err != nil {
 			log.Printf("gateway: listen %s failed, desktop continues: %v", gwAddr, err)
 		} else {
 			log.Printf("gateway: listening on %s", gwAddr)
 		}
+		gwHost.Store(host)
 	}
-	api.gw = gw
+	api.gw = gwHost.Load()
 
 	// 心跳在窗口创建前启动；任务只入队 Prompt，仍走现有审批与队列。
 	if planSvc != nil {
@@ -1727,9 +1737,9 @@ func main() {
 			_ = memStore.Close()
 		}
 		// 先关网关（停止接收外部入站），再停会话内核。Close 幂等。
-		if gw != nil {
+		if h := gwHost.Load(); h != nil {
 			closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = gw.Close(closeCtx)
+			_ = h.Close(closeCtx)
 			cancel()
 		}
 		if mgr != nil {

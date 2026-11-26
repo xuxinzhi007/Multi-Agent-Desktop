@@ -103,6 +103,12 @@ type State struct {
 	// Summary 是上一次压缩产出的摘要，随状态落盘。
 	// 下次压缩把它当迭代上下文交给摘要器，而不是每次从头再丢一遍。
 	Summary string `json:"summary,omitempty"`
+	// SummaryAtIter 是产出当前摘要时的迭代号。0 表示从未摘要过。
+	// 旧检查点没有这两个字段，反序列化读到 0，按首次摘要处理，不崩、不改既有行为。
+	SummaryAtIter int `json:"summaryAtIter,omitempty"`
+	// SummaryDroppedTokens 是产出当前摘要时，被丢掉部分的估算 token。
+	// 用来算距上次摘要又新增了多少被丢内容，达到阈值才重算摘要。
+	SummaryDroppedTokens int `json:"summaryDroppedTokens,omitempty"`
 }
 
 // Model 是循环依赖的模型能力。
@@ -197,6 +203,15 @@ type Runner struct {
 
 // defaultNoProgress 是默认的「原地打转」容忍轮数。
 const defaultNoProgress = 3
+
+// summaryDropThreshold 是 Epoch 冻结的增量触发线：距上次摘要后，
+// 新被丢进压缩范围的部分估算达到这么多 token，才真的再调一次摘要模型。
+// 不到线就复用旧摘要做本地裁剪，不再花一次模型调用。
+const summaryDropThreshold = 1200
+
+// summaryMaxEpoch 是轮次触发线：距上次摘要跨过这么多轮，即使增量没到线
+// 也强制重算一次，避免摘要在超长会话里长期滞后于最新进展。
+const summaryMaxEpoch = 10
 
 // Stop 请求终止当前运行。
 //
@@ -386,21 +401,16 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		// ── 7. 执行工具
 		st.Phase = PhaseActing
+		outcomes := r.runCalls(runCtx, st, turn.Calls)
+
 		anySuccess := false
 		allBadArgs := len(turn.Calls) > 0
-		for _, c := range turn.Calls {
-			if runCtx.Err() != nil {
-				break
+		for i, c := range turn.Calls {
+			if !outcomes[i].invoked {
+				// 取消前未派发：与改动前逐条 break 一致，不回填消息、不计预算。
+				continue
 			}
-			st.Budget.UsedToolCalls++
-			r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c), Call: &c})
-
-			var res tool.Result
-			if r.Tools != nil {
-				res = r.Tools.Invoke(runCtx, c)
-			} else {
-				res = tool.Fail("no tools registered")
-			}
+			res := outcomes[i].res
 			if res.Status == tool.StatusOK || res.Status == tool.StatusTruncated {
 				anySuccess = true
 			}
@@ -410,14 +420,6 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			if res.Status != tool.StatusOK && res.Status != tool.StatusTruncated {
 				lastFail = c.Name + ": " + clipReason(res.Content)
 			}
-
-			st.Messages = append(st.Messages, toolMessage(c, res, r.SaveImage))
-			keepLatestImage(st.Messages)
-			call := c
-			r.emit(Event{
-				Kind: "tool.end", Phase: st.Phase, Iter: st.Iteration,
-				Tool: c.Name, Status: res.Status, Content: res.Content, Result: &res, Call: &call,
-			})
 		}
 
 		// ── 8. 防打转。连续多轮没有任何成功的工具调用、也没有最终答案，
@@ -531,6 +533,148 @@ func (r *Runner) emit(ev Event) {
 	if r.Emitter != nil {
 		r.Emitter.Emit(ev)
 	}
+}
+
+// maxConcurrentSafeCalls 是同一批并发安全工具调用的并发上限。
+//
+// 一轮读 5 个文件本来要 5 次往返；并发后只等最慢的一次。上限不是按 CPU 定的：
+// 绝大多数等待在 IO 上，但一次开几十个 goroutine 同时扫目录/读盘也会互相挤，压在 4。
+const maxConcurrentSafeCalls = 4
+
+// callOutcome 记录一条调用是否被派发，以及派发后的结果。
+type callOutcome struct {
+	res     tool.Result
+	invoked bool
+}
+
+// runCalls 执行一轮工具调用，按「连续且并发安全」分段派发。
+//
+// 分段规则：连续的 ConcurrencySafe 调用合成一批，批内并发（上限见
+// maxConcurrentSafeCalls）；其余调用逐条独占串行。批次之间仍按 Calls 顺序推进。
+//
+// 顺序契约（与改动前逐条串行时一致）：
+//   - tool.start 按 Calls 原序在派发前发出；
+//   - tool.end 按 Calls 原序在整批完成后发出，不按完成时间乱序；
+//   - st.Messages 的 tool 消息按 Calls 原序回填；SaveImage / keepLatestImage
+//     这类有副作用的处理只在串行回填阶段按序执行，不放进并发段。
+func (r *Runner) runCalls(ctx context.Context, st *State, calls []tool.Call) []callOutcome {
+	out := make([]callOutcome, len(calls))
+
+	type group struct {
+		safe   []int // 并发安全的连续段；unsafeIdx < 0 时有效
+		unsafe int   // 串行独占调用的下标；>= 0 时有效
+	}
+	var groups []group
+	for i := 0; i < len(calls); {
+		if r.Tools != nil && r.Tools.ConcurrencySafe(calls[i].Name) {
+			j := i
+			for j < len(calls) && r.Tools.ConcurrencySafe(calls[j].Name) {
+				j++
+			}
+			seg := make([]int, j-i)
+			for k := range seg {
+				seg[k] = i + k
+			}
+			groups = append(groups, group{safe: seg, unsafe: -1})
+			i = j
+		} else {
+			groups = append(groups, group{unsafe: i})
+			i++
+		}
+	}
+
+	for _, g := range groups {
+		if ctx.Err() != nil {
+			break
+		}
+		if g.unsafe >= 0 {
+			out[g.unsafe] = r.runSerialCall(ctx, st, calls[g.unsafe])
+			continue
+		}
+		r.runSafeBatch(ctx, st, calls, g.safe, out)
+	}
+	return out
+}
+
+// runSerialCall 执行一条必须独占串行的调用（写操作、verify、web、未标记的新工具）。
+func (r *Runner) runSerialCall(ctx context.Context, st *State, c tool.Call) callOutcome {
+	st.Budget.UsedToolCalls++
+	r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c), Call: &c})
+
+	res := r.invokeOne(ctx, c)
+
+	r.backfillTool(st, c, res)
+	call := c
+	r.emit(Event{
+		Kind: "tool.end", Phase: st.Phase, Iter: st.Iteration,
+		Tool: c.Name, Status: res.Status, Content: res.Content, Result: &res, Call: &call,
+	})
+	return callOutcome{res: res, invoked: true}
+}
+
+// runSafeBatch 并发执行一段连续的安全调用，结果按 Calls 原序写回 out。
+func (r *Runner) runSafeBatch(ctx context.Context, st *State, calls []tool.Call, idx []int, out []callOutcome) {
+	// 先按原序发 tool.start、记预算；取消时未派发的调用不计数、不发事件。
+	active := make([]int, 0, len(idx))
+	for _, i := range idx {
+		if ctx.Err() != nil {
+			break
+		}
+		st.Budget.UsedToolCalls++
+		active = append(active, i)
+		c := calls[i]
+		r.emit(Event{Kind: "tool.start", Phase: st.Phase, Iter: st.Iteration, Tool: c.Name, Text: callHint(c), Call: &c})
+	}
+
+	results := make([]tool.Result, len(active))
+	if len(active) > 0 {
+		sem := make(chan struct{}, maxConcurrentSafeCalls)
+		var wg sync.WaitGroup
+		for k, i := range active {
+			wg.Add(1)
+			go func(k int, i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				// 并发段里的 panic 必须就地收敛成结构化失败，
+				// 否则单个工具崩掉会带走整个进程。
+				defer func() {
+					if rec := recover(); rec != nil {
+						results[k] = tool.Fail("tool %q panicked: %v", calls[i].Name, rec)
+					}
+				}()
+				results[k] = r.invokeOne(ctx, calls[i])
+			}(k, i)
+		}
+		wg.Wait()
+	}
+
+	// 串行回填：消息顺序、图片落盘与 tool.end 事件都按 Calls 原序。
+	for k, i := range active {
+		r.backfillTool(st, calls[i], results[k])
+		call := calls[i]
+		r.emit(Event{
+			Kind: "tool.end", Phase: st.Phase, Iter: st.Iteration,
+			Tool: call.Name, Status: results[k].Status, Content: results[k].Content,
+			Result: &results[k], Call: &call,
+		})
+		out[i] = callOutcome{res: results[k], invoked: true}
+	}
+}
+
+// invokeOne 走注册表治理入口；注册表为空时退回既有失败文案。
+func (r *Runner) invokeOne(ctx context.Context, c tool.Call) tool.Result {
+	if r.Tools != nil {
+		return r.Tools.Invoke(ctx, c)
+	}
+	return tool.Fail("no tools registered")
+}
+
+// backfillTool 把结果写进消息历史。SaveImage 与 keepLatestImage 都有副作用/
+// 依赖历史顺序，只能在串行回填阶段按序执行，不能放进并发段。
+func (r *Runner) backfillTool(st *State, c tool.Call, res tool.Result) {
+	st.Messages = append(st.Messages, toolMessage(c, res, r.SaveImage))
+	keepLatestImage(st.Messages)
 }
 
 // checkpoint 落盘运行状态。
@@ -676,23 +820,59 @@ var ErrNotFound = errors.New("loop: checkpoint not found")
 
 // compact 收历史进窗口，并把这次的摘要记回状态。
 //
-// 有 Summarize 时用模型产出结构化摘要；没有时退回本地截断。
-// 摘要写回 st.Summary，下一轮压缩拿它做迭代上下文——这是 pi 的做法，
-// 保证被丢掉的信息不是每次重新丢，而是累积进一份能续跑的摘要里。
+// 预算内（未超线）原样返回，绝不压缩——这条行为不变。
+// 超线后走 Epoch 冻结：已有摘要时，只有「新增被丢 token 达阈值」或
+// 「跨过足够多轮」才真的再调一次模型摘要；其余轮次复用旧摘要做本地裁剪，
+// 同一窗口内不重复调 Summarize。摘要写回 st.Summary，下一轮压缩拿它做
+// 迭代上下文——这是 pi 的做法，保证被丢掉的信息累积进一份能续跑的摘要里。
 func (r *Runner) compact(raw []llm.Message, budget int, st *State) []llm.Message {
 	if budget <= 0 || llm.EstMessages(raw) <= budget {
 		return raw
 	}
 	var made string
+	var droppedTokens int
 	out := llm.CompactWith(raw, budget, func(dropped []llm.Message, previous string, b int) string {
+		droppedTokens = llm.EstMessages(dropped)
 		if r.Summarize == nil {
 			return ""
+		}
+		// 冻结窗口：不该重算时直接续用旧摘要，不调模型。
+		// 旧摘要为空时返回 ""，由 CompactWith 退回本地截断兜底，不强行塞空串把摘要弄丢。
+		if !r.shouldRecomputeSummary(st, droppedTokens) {
+			return previous
 		}
 		made = r.Summarize(dropped, previous, b)
 		return made
 	}, st.Summary)
 	if strings.TrimSpace(made) != "" {
 		st.Summary = made
+		st.SummaryAtIter = st.Iteration
+		st.SummaryDroppedTokens = droppedTokens
 	}
 	return out
+}
+
+// shouldRecomputeSummary 判断本轮压缩是否该真的调模型重算摘要（Epoch 冻结）。
+//
+// 从未摘要过（Summary 为空，或旧检查点 SummaryAtIter=0）时，超线就重算一次。
+// 已有摘要后，两条路之一才重算：
+//   - 增量：距上次摘要新被丢进压缩范围的部分 ≥ summaryDropThreshold token；
+//   - 轮次：距上次摘要跨过 ≥ summaryMaxEpoch 轮。
+//
+// 两条都不满足就复用旧摘要，本轮不再花一次模型调用。
+func (r *Runner) shouldRecomputeSummary(st *State, droppedTokens int) bool {
+	if strings.TrimSpace(st.Summary) == "" || st.SummaryAtIter <= 0 {
+		return true
+	}
+	newDropped := droppedTokens - st.SummaryDroppedTokens
+	if newDropped < 0 {
+		newDropped = 0
+	}
+	if newDropped >= summaryDropThreshold {
+		return true
+	}
+	if st.Iteration-st.SummaryAtIter >= summaryMaxEpoch {
+		return true
+	}
+	return false
 }

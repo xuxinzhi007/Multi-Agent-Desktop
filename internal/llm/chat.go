@@ -25,6 +25,8 @@ type Turn struct {
 	Reasoning string
 	// Calls 是模型想执行的工具。为空表示它认为任务已经完成。
 	Calls []tool.Call
+	// Usage 是上游真实返回的 token 用量；上游没给时 Usage.Unknown 为 true。
+	Usage Usage
 }
 
 // Delta 是流式 Turn 里已经切好的一段增量。
@@ -217,6 +219,7 @@ func (c *ChatModel) turnNow(ctx context.Context, msgs []Message, tools []tool.Sp
 				ToolCalls        []wireToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -232,7 +235,7 @@ func (c *ChatModel) turnNow(ctx context.Context, msgs []Message, tools []tool.Sp
 	}
 
 	msg := out.Choices[0].Message
-	turn := Turn{Text: msg.Content, Reasoning: msg.ReasoningContent}
+	turn := Turn{Text: msg.Content, Reasoning: msg.ReasoningContent, Usage: parseUsage(out.Usage)}
 	for _, tc := range msg.ToolCalls {
 		args := tc.Function.Arguments
 		if strings.TrimSpace(args) == "" {
@@ -385,6 +388,7 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
 	var turn Turn
 	var acc []toolAcc
+	var lastUsage json.RawMessage
 	saw := false
 	for sc.Scan() {
 		if ctx.Err() != nil {
@@ -413,6 +417,7 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 					} `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
+			Usage json.RawMessage `json:"usage"`
 			Error *struct {
 				Message string `json:"message"`
 			} `json:"error"`
@@ -422,6 +427,10 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 		}
 		if chunk.Error != nil && chunk.Error.Message != "" {
 			return Turn{}, fmt.Errorf("llm: %s", chunk.Error.Message)
+		}
+		if len(chunk.Usage) > 0 {
+			// 流式 usage 通常只在最后一个 chunk 出现；保留最后一份覆盖前面的。
+			lastUsage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -458,6 +467,7 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 		return Turn{}, fmt.Errorf("llm: empty stream")
 	}
 	turn.Calls = calls
+	turn.Usage = parseUsage(lastUsage)
 	return turn, nil
 }
 

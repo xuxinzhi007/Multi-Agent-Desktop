@@ -235,6 +235,9 @@ func (*ReadFile) Name() string        { return "read_file" }
 func (*ReadFile) Writes() bool        { return false }
 func (*ReadFile) Description() string { return "Read a text file. Returns content with line numbers." }
 
+// ConcurrencySafe 显式声明：只读文件、不持有共享可变状态，可在同一轮并发执行。
+func (*ReadFile) ConcurrencySafe() bool { return true }
+
 func (*ReadFile) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -504,4 +507,5 @@ func RegisterRoots(r *tool.Registry, workDir string, extra []string) {
 	r.Register(&Grep{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&Verify{WorkDir: workDir, ExtraDirs: extra})
 }

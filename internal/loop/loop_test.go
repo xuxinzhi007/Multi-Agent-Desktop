@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -791,5 +792,210 @@ func TestExplicitBudgetStillEnforced(t *testing.T) {
 	b.UsedIterations = 3
 	if b.Exhausted() == "" {
 		t.Fatal("显式设的上限没生效")
+	}
+}
+
+// ── Epoch 冻结：计数式摘要器，记录调用次数、每次被丢 token 估算与收到的 previous ──
+type countingSummarizer struct {
+	mu      sync.Mutex
+	calls   int
+	dropped []int
+	prev    []string
+}
+
+func (s *countingSummarizer) fn() func([]llm.Message, string, int) string {
+	return func(dropped []llm.Message, previous string, budget int) string {
+		s.mu.Lock()
+		s.calls++
+		s.dropped = append(s.dropped, llm.EstMessages(dropped))
+		s.prev = append(s.prev, previous)
+		s.mu.Unlock()
+		return "已压缩摘要：目标与进度与下一步。"
+	}
+}
+
+func (s *countingSummarizer) snapshot() (int, []int, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, append([]int(nil), s.dropped...), append([]string(nil), s.prev...)
+}
+
+// overBudgetHistory 造一段超预算的 user/assistant 历史。
+func overBudgetHistory(n int) []llm.Message {
+	var msgs []llm.Message
+	for i := 0; i < n; i++ {
+		msgs = append(msgs,
+			llm.Message{Role: "user", Content: strings.Repeat("问", 60)},
+			llm.Message{Role: "assistant", Content: strings.Repeat("答", 60)},
+		)
+	}
+	return msgs
+}
+
+// 长历史连跑 ≥10 轮：Epoch 冻结下摘要模型只调 1–2 次，不允许每轮重算。
+func TestRunFreezesSummaryAcrossRounds(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&fakeTool{name: "t"})
+
+	var turns []llm.Turn
+	for i := 0; i < 11; i++ {
+		turns = append(turns, llm.Turn{
+			Text: "继续干活",
+			Calls: []tool.Call{{
+				ID:    "1",
+				Name:  "t",
+				Input: json.RawMessage(fmt.Sprintf(`{"a":"x%d"}`, i)),
+			}},
+		})
+	}
+	turns = append(turns, llm.Turn{Text: "完成"})
+
+	m := &scriptedModel{turns: turns}
+	r, _ := newRunner(m, reg)
+	sum := &countingSummarizer{}
+	r.Summarize = sum.fn()
+
+	b := DefaultBudget()
+	b.MaxPromptTokens = 500
+	st := r.Run(context.Background(), &State{
+		ID:       "freeze",
+		Messages: overBudgetHistory(16),
+		Budget:   b,
+	})
+
+	if st.Phase != PhaseDone {
+		t.Fatalf("phase = %q reason %q", st.Phase, st.StopReason)
+	}
+	if st.Budget.UsedIterations < 10 {
+		t.Fatalf("跑了 %d 轮，want >= 10", st.Budget.UsedIterations)
+	}
+	calls, dropped, _ := sum.snapshot()
+	if calls < 1 || calls > 2 {
+		t.Fatalf("Summarize 调用 %d 次，want 1–2（Epoch 冻结，同一窗口不重复调）", calls)
+	}
+	for i, d := range dropped {
+		if d <= 0 {
+			t.Fatalf("第 %d 次摘要记录的 dropped token = %d", i+1, d)
+		}
+	}
+	t.Logf("跑 %d 轮，Summarize 调用 %d 次，dropped 估算=%v", st.Budget.UsedIterations, calls, dropped)
+}
+
+// 增量触发：距上次摘要新增被丢 token 达阈值才重算；不到线必须复用旧摘要。
+func TestSummaryRecomputeOnDropThreshold(t *testing.T) {
+	r := &Runner{}
+	sum := &countingSummarizer{}
+	r.Summarize = sum.fn()
+
+	// 已有摘要：停在第 1 轮，上次摘要只丢了 100 token。
+	st := &State{
+		Summary:              "旧摘要",
+		SummaryAtIter:        1,
+		SummaryDroppedTokens: 100,
+		Iteration:            2,
+	}
+
+	// 历史 A：增量没到阈值、轮次也没跨过 → 冻结，复用旧摘要。
+	out := r.compact(overBudgetHistory(8), 400, st)
+	calls, _, _ := sum.snapshot()
+	if calls != 0 {
+		t.Fatalf("增量未达阈值且未跨轮，不该重算：calls=%d", calls)
+	}
+	var reused bool
+	for _, m := range out {
+		if strings.Contains(m.Content, "旧摘要") {
+			reused = true
+		}
+	}
+	if !reused {
+		t.Fatal("冻结轮次必须复用旧摘要，不能把摘要弄丢")
+	}
+
+	// 历史 B：头部再压一大段，被丢增量 ≥ 阈值 → 重算一次。
+	r.compact(overBudgetHistory(40), 400, st)
+	calls, dropped, _ := sum.snapshot()
+	if calls != 1 {
+		t.Fatalf("增量达阈值后应重算一次：calls=%d", calls)
+	}
+	if st.SummaryAtIter != 2 || st.SummaryDroppedTokens != dropped[0] {
+		t.Fatalf("重算后应更新摘要元数据：%+v", st)
+	}
+}
+
+// 轮次触发：跨过 summaryMaxEpoch 轮，即使增量没到阈值也强制重算。
+func TestSummaryRecomputeOnEpoch(t *testing.T) {
+	r := &Runner{}
+	sum := &countingSummarizer{}
+	r.Summarize = sum.fn()
+
+	// 上次摘要丢了 5000 token：当前历史再怎么丢也形不成正增量；
+	// 但已经跨过 11 轮 ≥ summaryMaxEpoch。
+	st := &State{
+		Summary:              "旧摘要",
+		SummaryAtIter:        1,
+		SummaryDroppedTokens: 5000,
+		Iteration:            12,
+	}
+	r.compact(overBudgetHistory(8), 400, st)
+	calls, _, _ := sum.snapshot()
+	if calls != 1 {
+		t.Fatalf("跨过 %d 轮应按轮次重算：calls=%d", summaryMaxEpoch, calls)
+	}
+}
+
+// 预算内绝不压缩：短历史一次都不调摘要器。
+func TestCompactNeverSummarizesWithinBudget(t *testing.T) {
+	r := &Runner{}
+	sum := &countingSummarizer{}
+	r.Summarize = sum.fn()
+	st := &State{}
+	short := []llm.Message{
+		{Role: "user", Content: "你好"},
+		{Role: "assistant", Content: "你好，有什么可以帮你"},
+	}
+	out := r.compact(short, 2000, st)
+	calls, _, _ := sum.snapshot()
+	if calls != 0 {
+		t.Fatalf("预算内绝不压缩，calls=%d", calls)
+	}
+	if len(out) != 2 {
+		t.Fatal("预算内必须原样返回")
+	}
+}
+
+// 旧检查点兼容：缺新字段读到 0，按从未摘要过处理；老摘要仍作为 previous 传入。
+func TestStateLegacyCheckpointTreatedAsNeverSummarized(t *testing.T) {
+	raw := `{"id":"legacy","messages":[{"role":"user","content":"老会话"}],"summary":"老摘要"}`
+	var st State
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.SummaryAtIter != 0 || st.SummaryDroppedTokens != 0 {
+		t.Fatalf("旧字段应读到 0：%+v", st)
+	}
+
+	r := &Runner{}
+	var gotPrev string
+	r.Summarize = func(dropped []llm.Message, previous string, budget int) string {
+		gotPrev = previous
+		return "新摘要"
+	}
+	st.Iteration = 5
+	r.compact(overBudgetHistory(20), 400, &st)
+
+	if gotPrev != "老摘要" {
+		t.Fatalf("老摘要必须仍作为 previous 传入：%q", gotPrev)
+	}
+	if st.SummaryAtIter != 5 || st.SummaryDroppedTokens <= 0 {
+		t.Fatalf("重算后必须记录迭代号与 dropped 估算：%+v", st)
+	}
+
+	// 零值字段不带进 JSON（omitempty），落盘格式向后兼容。
+	out, err := json.Marshal(&State{ID: "z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "summaryAtIter") || strings.Contains(string(out), "summaryDroppedTokens") {
+		t.Fatalf("零值字段必须 omitempty：%s", out)
 	}
 }

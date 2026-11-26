@@ -1118,8 +1118,21 @@ func TestLastSentenceStripsInternalMarks(t *testing.T) {
 	}
 }
 
+// waitPendingCard 等一张审批卡真正挂上；挂不上直接失败。
+func waitPendingCard(t *testing.T, c *approval.Center) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(c.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(c.Pending()) == 0 {
+		t.Fatal("审批卡没有挂上")
+	}
+}
+
 // 切权限模式时，还挂着的审批卡要立刻有结果，不能继续等到超时。
-// 用户在飞书里问、卡片弹在应用内，等 5 分钟自动拒是最难受的失败方式。
+// 新语义（acceptEdits）：auto 只放行工作区内的文件编辑卡；bash 卡仍按规则，
+// 切到 auto 不会被静默放掉；readonly 一律拒绝。
 func TestSetAgentPermissionResolvesPendingCards(t *testing.T) {
 	s := newTestAPI(t)
 	defer stopAll(t, s)
@@ -1127,51 +1140,99 @@ func TestSetAgentPermissionResolvesPendingCards(t *testing.T) {
 	s.mgr.SetApprovals(approval.New(nil))
 	c := s.mgr.Approvals()
 
-	for _, tc := range []struct {
-		mode  string
-		allow bool
-	}{{"auto", true}, {"readonly", false}} {
+	// (a) 文件编辑卡：切 auto 立刻放行。
+	{
 		done := make(chan bool, 1)
 		go func() {
-			ok, _ := c.Approve(context.Background(), a.ID, a.Name, tool.Call{Name: "bash"})
+			ok, _ := c.Approve(context.Background(), a.ID, a.Name, tool.Call{
+				Name:  "edit_file",
+				Input: []byte(`{"path":"a.txt"}`),
+			})
 			done <- ok
 		}()
-		// 等卡片真的挂上
-		deadline := time.Now().Add(2 * time.Second)
-		for len(c.Pending()) == 0 && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
-		if len(c.Pending()) == 0 {
-			t.Fatal("审批卡没有挂上")
-		}
-		if _, err := s.SetAgentPermission(a.ID, tc.mode); err != nil {
+		waitPendingCard(t, c)
+		if _, err := s.SetAgentPermission(a.ID, "auto"); err != nil {
 			t.Fatal(err)
 		}
 		select {
 		case got := <-done:
-			if got != tc.allow {
-				t.Fatalf("%s 模式下应当 allow=%v，实际 %v", tc.mode, tc.allow, got)
+			if !got {
+				t.Fatal("auto 应当放行文件编辑卡")
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatalf("%s 模式下卡片没有被立刻处理", tc.mode)
+			t.Fatal("auto 下文件编辑卡没有被立刻处理")
 		}
-		if _, err := s.SetAgentPermission(a.ID, "ask"); err != nil {
+	}
+
+	// (b) bash 卡：切 auto 后仍然 pending，不被静默放行；随后显式决定清掉，避免污染后续用例。
+	{
+		done := make(chan bool, 1)
+		go func() {
+			ok, _ := c.Approve(context.Background(), a.ID, a.Name, tool.Call{
+				Name:  "bash",
+				Input: []byte(`{"command":"ls"}`),
+			})
+			done <- ok
+		}()
+		waitPendingCard(t, c)
+		if _, err := s.SetAgentPermission(a.ID, "auto"); err != nil {
 			t.Fatal(err)
+		}
+		if len(c.Pending()) != 1 {
+			t.Fatalf("bash 卡在 auto 下应当仍 pending，pending=%d", len(c.Pending()))
+		}
+		pending := c.Pending()[0]
+		if err := c.Decide(pending.ID, false, false, ""); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+	}
+
+	// (c) readonly 下 bash 卡立刻拒绝。
+	{
+		done := make(chan bool, 1)
+		go func() {
+			ok, _ := c.Approve(context.Background(), a.ID, a.Name, tool.Call{
+				Name:  "bash",
+				Input: []byte(`{"command":"ls"}`),
+			})
+			done <- ok
+		}()
+		waitPendingCard(t, c)
+		if _, err := s.SetAgentPermission(a.ID, "readonly"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-done:
+			if got {
+				t.Fatal("readonly 应当拒绝 bash 卡")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("readonly 下卡片没有被立刻处理")
 		}
 	}
 }
 
-// 不认识的模式必须回到最保守的一档，不能静默变成放行。
+// 不认识的模式回到默认档 auto；auto 仍不放行 bash 与越界写，因此不是全放行。
 func TestSetAgentPermissionRejectsUnknownMode(t *testing.T) {
 	s := newTestAPI(t)
 	defer stopAll(t, s)
 	s.mgr.SetApprovals(approval.New(nil))
+	c := s.mgr.Approvals()
 	a := s.CreateAgent(CreateAgentRequest{Name: "A", Role: "r"})
 	got, err := s.SetAgentPermission(a.ID, "sudo-everything")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "ask" {
-		t.Fatalf("未知模式应当落到 ask，实际 %q", got)
+	if got != "auto" {
+		t.Fatalf("未知模式应当落到默认档 auto，实际 %q", got)
 	}
+	// 回落 auto 不等于全放行：bash 没有记忆时仍要审批，挂得上卡。
+	go func() {
+		_, _ = c.Approve(context.Background(), a.ID, a.Name, tool.Call{
+			Name:  "bash",
+			Input: []byte(`{"command":"ls"}`),
+		})
+	}()
+	waitPendingCard(t, c)
 }

@@ -5,8 +5,8 @@ import { API } from '../mygo'
  * PermissionPicker —— 这个会话能自己动手到什么程度。
  *
  * 三档，语义不重叠：
- *   逐次审批  每次写操作都问（默认）
- *   自动      工作目录内的写与命令直接执行
+ *   谨慎模式  每次写操作都问
+ *   自动      默认档：工作区内文件改动直接执行，命令仍按规则审批
  *   只读      写操作直接拒绝，适合生产环境排查
  *
  * 刻意不做「完整权限」：工作目录是工具层的硬边界，
@@ -14,13 +14,13 @@ import { API } from '../mygo'
  */
 
 const MODES = [
-  { id: 'ask', label: '逐次审批', hint: '每次写操作都问你', icon: '◐' },
-  { id: 'auto', label: '自动', hint: '工作目录内直接执行', icon: '⚡' },
+  { id: 'ask', label: '谨慎模式（每步确认）', hint: '每次写操作都问你', icon: '◐' },
+  { id: 'auto', label: '自动', hint: '工作区内文件改动直接执行，命令仍按规则', icon: '⚡' },
   { id: 'readonly', label: '只读', hint: '只查不改，写操作直接拒', icon: '◌' },
 ] as const
 
 export default function PermissionPicker({ agentId, placement = 'up' }: { agentId: string; placement?: 'up' | 'down' }) {
-  const [mode, setMode] = useState('ask')
+  const [mode, setMode] = useState('auto')
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const box = useRef<HTMLDivElement>(null)
@@ -29,7 +29,7 @@ export default function PermissionPicker({ agentId, placement = 'up' }: { agentI
     let dead = false
     API.agentPermission(agentId)
       .then((m) => {
-        if (!dead) setMode(m || 'ask')
+        if (!dead) setMode(m || 'auto')
       })
       .catch(() => {})
     return () => {

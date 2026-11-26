@@ -258,7 +258,8 @@ func (m *Manager) buildSystemPrompt(role string) string {
 // 首条 system 只写角色。已挂到会话上的笔记由当轮循环按 knowledgeIDs 带上。
 func systemPromptFor(role string) string {
 	_ = role
-	return "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。"
+	return "你在 multi-agent-desktop 里工作。工具规则、工作目录和安全约束由应用持有。回答要具体、可执行。" +
+		" 声称任务完成前必须调用 verify，只有 verify 通过才算完成；不要用 bash 跑一次命令代替 verify。"
 }
 
 // SetImageDir 指定图片字节放在哪。空则带图的消息存不下来。
@@ -581,6 +582,7 @@ func (m *Manager) SetAgentWorkDir(id, dir string) error {
 	a.mu.Lock()
 	a.WorkDir = dir
 	a.mu.Unlock()
+	m.syncApprovalRoots(a)
 	m.goSave()
 	return nil
 }
@@ -605,6 +607,7 @@ func (m *Manager) SetAgentExtraDirs(id string, dirs []string) error {
 	a.mu.Lock()
 	a.ExtraDirs = append([]string(nil), roots[1:]...)
 	a.mu.Unlock()
+	m.syncApprovalRoots(a)
 	m.emit("agent.config", a.viewMap())
 	m.goSave()
 	return nil
@@ -2054,8 +2057,11 @@ func (m *Manager) SetPermissionMode(id, mode string) {
 	m.goSave()
 }
 
-// RememberTool 记下「本会话对这个工具以后都放行」并落盘。
-func (m *Manager) RememberTool(id, toolName string) {
+// RememberTool 记下「本会话对这个工具 + 这个根 (+ 命令族签名) 以后都放行」并落盘。
+// rootKey 为空表示拿不到根，退化为工具级记忆；sig 非空仅 bash 有（命令族签名）。
+// 落盘条目：`tool@root`、`tool@*`（工具级）、`bash@root#sig`。
+// 旧版裸工具名与 `tool@*` 条目在 RestorePermissions 里丢弃。
+func (m *Manager) RememberTool(id, toolName, rootKey, sig string) {
 	if toolName == "" {
 		return
 	}
@@ -2063,16 +2069,33 @@ func (m *Manager) RememberTool(id, toolName string) {
 	if !ok {
 		return
 	}
+	entry := toolName + "@*"
+	if rootKey != "" {
+		entry = toolName + "@" + rootKey
+	}
+	if sig != "" {
+		entry += "#" + sig
+	}
 	a.mu.Lock()
 	for _, cur := range a.AllowedTools {
-		if cur == toolName {
+		if cur == entry {
 			a.mu.Unlock()
 			return
 		}
 	}
-	a.AllowedTools = append(a.AllowedTools, toolName)
+	a.AllowedTools = append(a.AllowedTools, entry)
 	a.mu.Unlock()
 	m.goSave()
+}
+
+// syncApprovalRoots 把会话的工作区根同步给审批中心；没装审批中心时是空操作。
+// auto 档判断「文件是否在工作区内」靠的就是这份根目录。
+func (m *Manager) syncApprovalRoots(a *Agent) {
+	c := m.Approvals()
+	if c == nil {
+		return
+	}
+	c.SetRoots(a.ID, a.EffectiveWorkDir(m), a.EffectiveExtraDirs())
 }
 
 // RestorePermissions 把落盘的权限档和放行清单装回审批中心。
@@ -2082,13 +2105,42 @@ func (m *Manager) RestorePermissions() {
 	if c == nil {
 		return
 	}
+	var legacy int
 	for _, a := range m.List() {
 		sn := a.Snapshot()
 		if sn.PermissionMode != "" {
 			c.SetMode(sn.ID, approval.Mode(sn.PermissionMode))
 		}
-		for _, name := range sn.AllowedTools {
-			c.AllowTool(sn.ID, name)
+		// 工作区根也要装回去：auto 档判断文件是否在工作区内靠这份集合。
+		c.SetRoots(sn.ID, sn.WorkDir, sn.ExtraDirs)
+		for _, entry := range sn.AllowedTools {
+			toolName, rootKey, sig, ok := parseAllowedEntry(entry)
+			if !ok {
+				// 旧版存档只有裸工具名、或旧的工具级 `tool@*`，没有根目录/签名
+				// 标识。按新语义不能再当成跨根、跨命令族放行：一次性丢弃，并在
+				// 启动日志说明；下次勾「以后都允许」会按 工具 + 根 (+ 签名) 重新记。
+				// 不静默误放行。
+				legacy++
+				continue
+			}
+			c.AllowTool(sn.ID, toolName, rootKey, sig)
 		}
 	}
+	if legacy > 0 {
+		log.Printf("[approval] 丢弃 %d 条旧版工具级放行记录（无根目录标识）；如仍需放行，请在审批卡里重新勾选「以后都允许」", legacy)
+	}
+}
+
+// parseAllowedEntry 解析落盘条目：`tool@root`、`tool@root#sig`。
+// root 为 "*" 的旧版工具级条目与没有 "@" 的裸工具名条目解析失败，由调用方丢弃。
+func parseAllowedEntry(entry string) (toolName, rootKey, sig string, ok bool) {
+	toolName, rest, found := strings.Cut(entry, "@")
+	if !found || strings.TrimSpace(toolName) == "" {
+		return "", "", "", false
+	}
+	if rest == "*" {
+		return "", "", "", false
+	}
+	rootKey, sig, _ = strings.Cut(rest, "#")
+	return toolName, rootKey, sig, true
 }

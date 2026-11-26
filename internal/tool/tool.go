@@ -64,6 +64,15 @@ type Previewer interface {
 	Preview(ctx context.Context, in json.RawMessage) (Preview, error)
 }
 
+// ConcurrencySaver 可选实现：显式声明该工具可以在同一轮里与其它调用并发执行。
+//
+// 判定必须由工具自己给，不能用 Writes() 取反：verify 虽然不写文件但会跑命令，
+// web 持有浏览器共享状态，二者都必须串行。新增工具忘了实现时默认不安全，
+// 不会因为「只读」就被误并发。
+type ConcurrencySaver interface {
+	ConcurrencySafe() bool
+}
+
 // Call 是模型发起的一次工具调用。
 type Call struct {
 	ID    string          `json:"id"`
@@ -110,8 +119,8 @@ type Tool interface {
 type Registry struct {
 	mu      sync.RWMutex
 	tools   map[string]Tool
-	seen    map[string]Result // 幂等键 -> 上次结果
-	repeats map[string]int    // 幂等键 -> 连续重复次数
+	seen    map[string]*seenEntry // 幂等键 -> 首个调用的结果与完成信号
+	repeats map[string]int        // 幂等键 -> 连续重复次数
 
 	// Approver 在写操作执行前被调用。为 nil 表示不需要审批。
 	Approver Approver
@@ -119,6 +128,17 @@ type Registry struct {
 	MaxResultBytes int
 	// Timeout 是单次工具执行的硬上限。0 表示用默认值。
 	Timeout time.Duration
+}
+
+// seenEntry 记录一个幂等键的首个调用。
+//
+// ready 在首个调用结束时关闭：并发到来的同参数调用在这里等待，
+// 而不是读到占位的空 Result{}。done 标记结果是否已经落定；
+// 未 done 时 res 是零值，绝不允许回给模型。
+type seenEntry struct {
+	res   Result
+	ready chan struct{}
+	done  bool
 }
 
 const (
@@ -139,7 +159,7 @@ type Approver interface {
 func NewRegistry() *Registry {
 	return &Registry{
 		tools:          map[string]Tool{},
-		seen:           map[string]Result{},
+		seen:           map[string]*seenEntry{},
 		repeats:        map[string]int{},
 		MaxResultBytes: DefaultMaxResultBytes,
 		Timeout:        DefaultTimeout,
@@ -151,6 +171,22 @@ func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
+}
+
+// ConcurrencySafe 报告名为 name 的工具是否可在同一轮内与其它调用并发执行。
+// 工具不存在、或未显式实现 ConcurrencySafe() 一律返回 false ——
+// 安全是白名单，不是「不是写操作就算只读」。
+func (r *Registry) ConcurrencySafe(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	if cs, ok := t.(ConcurrencySaver); ok {
+		return cs.ConcurrencySafe()
+	}
+	return false
 }
 
 // Specs 返回所有工具的定义，供组装模型上下文时描述可用能力。
@@ -205,25 +241,43 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 
 	fp := fingerprint(c)
 	r.mu.Lock()
-	if prev, hit := r.seen[fp]; hit {
-		r.repeats[fp]++
-		n := r.repeats[fp]
-		if n >= repeatLimit {
-			r.mu.Unlock()
-			return done(c, Fail(
-				"%s was called %d times with identical arguments and returned the same result. "+
-					"Repeating it will not produce new information — change your approach or finish.",
-				c.Name, n), start)
+	for {
+		entry, hit := r.seen[fp]
+		if !hit {
+			r.seen[fp] = &seenEntry{ready: make(chan struct{})}
+			r.repeats[fp] = 1
+			break
 		}
+		if entry.done {
+			r.repeats[fp]++
+			n := r.repeats[fp]
+			if n >= repeatLimit {
+				r.mu.Unlock()
+				return done(c, Fail(
+					"%s was called %d times with identical arguments and returned the same result. "+
+						"Repeating it will not produce new information — change your approach or finish.",
+					c.Name, n), start)
+			}
+			r.mu.Unlock()
+			// 第 2 次没到拦截线：返回缓存结果，但附一句提示
+			prev := entry.res
+			prev.Meta.Repeated = true
+			prev.CallID = c.ID
+			prev.Content = prev.Content + "\n\n(note: you already called this with the same arguments; result is identical)"
+			return done(c, prev, start)
+		}
+		// 首个同参数调用还在跑：占位期不能把空 Result{} 交出去。
+		// 挂在完成信号上等它落定，再回到判定循环走「重复调用」逻辑。
+		ready := entry.ready
 		r.mu.Unlock()
-		// 第 2 次没到拦截线：返回缓存结果，但附一句提示
-		prev.Meta.Repeated = true
-		prev.CallID = c.ID
-		prev.Content = prev.Content + "\n\n(note: you already called this with the same arguments; result is identical)"
-		return done(c, prev, start)
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			// 等待期间运行被取消：未跑完的调用不伪造成功，按既有失败风格回填。
+			return done(c, Fail("cancelled"), start)
+		}
+		r.mu.Lock()
 	}
-	r.seen[fp] = Result{} // 占位，防止并发同调用
-	r.repeats[fp] = 1
 	r.mu.Unlock()
 
 	// 写操作先让工具交底：标题、命令、diff。没有这一步，审批只是盲签。
@@ -280,11 +334,24 @@ func (r *Registry) Invoke(ctx context.Context, c Call) Result {
 	res = r.truncate(res)
 
 	r.mu.Lock()
+	entry := r.seen[fp]
 	if res.Status == StatusOK || res.Status == StatusTimeout {
-		r.seen[fp] = res
+		if entry == nil {
+			entry = &seenEntry{ready: make(chan struct{})}
+			r.seen[fp] = entry
+		}
+		entry.res = res
+		entry.done = true
 	} else {
 		delete(r.seen, fp)
 		delete(r.repeats, fp)
+	}
+	if entry != nil && entry.ready != nil {
+		select {
+		case <-entry.ready:
+		default:
+			close(entry.ready)
+		}
 	}
 	r.mu.Unlock()
 
@@ -328,8 +395,17 @@ func done(c Call, res Result, start time.Time) Result {
 
 // forget 清掉占位的幂等键。被拒或策略拦截的调用没有执行，
 // 不该在缓存里留下一条空结果，否则模型重试会拿到假的「相同结果」。
+// 同时关闭完成信号：可能挂在占位上等待的并发调用要被唤醒，
+// 醒来后发现条目已删，按全新调用重新执行。
 func (r *Registry) forget(fp string) {
 	r.mu.Lock()
+	if entry, hit := r.seen[fp]; hit && entry.ready != nil {
+		select {
+		case <-entry.ready:
+		default:
+			close(entry.ready)
+		}
+	}
 	delete(r.seen, fp)
 	delete(r.repeats, fp)
 	r.mu.Unlock()
@@ -340,6 +416,6 @@ func (r *Registry) forget(fp string) {
 func (r *Registry) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.seen = map[string]Result{}
+	r.seen = map[string]*seenEntry{}
 	r.repeats = map[string]int{}
 }

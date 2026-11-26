@@ -15,18 +15,25 @@ type Event struct {
 	Data  json.RawMessage `json:"data,omitempty"`
 }
 
+// subscription 是一个订阅者。ch 是业务事件通道，生命周期内永不关闭；
+// done 在 Unsubscribe 时关闭，作为发布方与消费方退出的信号。
+type subscription struct {
+	ch   chan Event
+	done chan struct{}
+}
+
 // Broker 是进程内发布订阅总线。SSE 处理器订阅它；内核事件由主进程装配时
 // 调 Publish 或 Service.HandleAgentEvent 灌进来。不做跨进程持久化。
 type Broker struct {
 	mu     sync.Mutex
-	subs   map[uint64]chan Event
+	subs   map[uint64]*subscription
 	nextID atomic.Uint64
 	seq    atomic.Uint64
 }
 
 // NewBroker 造一个空总线。
 func NewBroker() *Broker {
-	return &Broker{subs: map[uint64]chan Event{}}
+	return &Broker{subs: map[uint64]*subscription{}}
 }
 
 // Publish 发布一条事件。data 为 nil 时负载为 null；序列化失败也不阻断发布。
@@ -48,15 +55,17 @@ func (b *Broker) Publish(event string, data any) {
 	}
 
 	b.mu.Lock()
-	subs := make([]chan Event, 0, len(b.subs))
-	for _, ch := range b.subs {
-		subs = append(subs, ch)
+	subs := make([]*subscription, 0, len(b.subs))
+	for _, sub := range b.subs {
+		subs = append(subs, sub)
 	}
 	b.mu.Unlock()
 
-	for _, ch := range subs {
+	for _, sub := range subs {
 		select {
-		case ch <- ev:
+		case sub.ch <- ev:
+		case <-sub.done:
+			// 已取消订阅；业务通道不关闭，跳过即可。
 		default:
 			// 订阅者消费不过来时丢最旧的后续事件，不阻塞发布方。
 		}
@@ -64,25 +73,26 @@ func (b *Broker) Publish(event string, data any) {
 }
 
 // Subscribe 订阅事件。返回的通道带缓冲；取消订阅必须调 Unsubscribe。
+// 业务通道在生命周期内永不关闭，消费方按 context 或 done 信号退出。
 func (b *Broker) Subscribe() (uint64, <-chan Event) {
 	id := b.nextID.Add(1)
-	ch := make(chan Event, 32)
+	sub := &subscription{ch: make(chan Event, 32), done: make(chan struct{})}
 	b.mu.Lock()
-	b.subs[id] = ch
+	b.subs[id] = sub
 	b.mu.Unlock()
-	return id, ch
+	return id, sub.ch
 }
 
-// Unsubscribe 关闭并移除一个订阅。幂等。
+// Unsubscribe 移除一个订阅并关闭其 done 信号。幂等；业务通道不关闭。
 func (b *Broker) Unsubscribe(id uint64) {
 	b.mu.Lock()
-	ch, ok := b.subs[id]
+	sub, ok := b.subs[id]
 	if ok {
 		delete(b.subs, id)
 	}
 	b.mu.Unlock()
-	if ch != nil {
-		close(ch)
+	if ok {
+		close(sub.done)
 	}
 }
 

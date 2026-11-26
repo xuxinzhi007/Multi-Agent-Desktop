@@ -215,6 +215,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	// 业务通道由总线持有、永不关闭；连接断开（ctx.Done）后由 defer 取消订阅，
+	// 总线通过 done 信号感知，不存在靠 close(ch) 结束循环的路径。
 	for {
 		select {
 		case <-ctx.Done():

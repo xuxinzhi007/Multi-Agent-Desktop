@@ -16,6 +16,7 @@
 | [`code-review-gateway-m3-2026-11-26.md`](code-review-gateway-m3-2026-11-26.md) | 内嵌网关 M3 + 记忆/调度/前端 | **评审快照**；§4.1 的 #1/#2 仍未修，见 [`status-2026-11-26.md`](status-2026-11-26.md) |
 | [`status-2026-11-26.md`](status-2026-11-26.md) | 当前收工状态、验证结果、已知风险 | **当前有效**，优先于 11-25 的上下文与待办 |
 | [`capability-gap-and-integration-2026-11-26.md`](capability-gap-and-integration-2026-11-26.md) | 能力短板核实 + 二次开发四路线 + 上下文工程（§7 gp-context-lab） | **核实版**；替换一份口头分析（其中 3 条已过期），§4 标出未核实的外部说法；§7 为参考仓合并结论 |
+| [`todo-2026-11-26.md`](todo-2026-11-26.md) | 今日清单（逐条核实到行号，P0→P3 排序） | **当前有效**；P0 为网关并发两处 + verify 闭环，含「不做」及理由 |
 | [`final-acceptance-2026-11-25.md`](final-acceptance-2026-11-25.md) | 全量验收命令与清单 | 带有 11-26 收尾更新，历史清单保留 |
 | [`review-recheck-2026-11-25.md`](review-recheck-2026-11-25.md) | 三份评审对当前代码的逐条复核 | 当前有效 |
 
