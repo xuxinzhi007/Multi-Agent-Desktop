@@ -228,6 +228,23 @@ export function useBackend() {
       reasonGap.delete(id)
     }
 
+    // 状态落盘只走这一条：事件流和对账都用它。
+    //
+    // 分开写两份曾经出过事——对账只改 status 不清 streaming，输入框照样显示
+    // 「这一轮还在进行」、发送键照样是「停止」，用户看到的就是「完成了还在跑」。
+    const applyAgentStatus = (s: State, id: string, status: string, busy?: string): State => ({
+      ...s,
+      agents: s.agents.map((a) =>
+        a.id === id
+          ? { ...a, status: status as Agent['status'], busy: status === 'running' ? busy || '' : '' }
+          : a,
+      ),
+      streaming: status === 'running' ? s.streaming : omit(s.streaming, id),
+      channelStreaming: status === 'running' ? s.channelStreaming : omit(s.channelStreaming, id),
+      reasoning: status === 'running' ? s.reasoning : omit(s.reasoning, id),
+      pace: status === 'running' ? { ...(s.pace ?? {}), [id]: s.pace?.[id] ?? { since: Date.now() } } : omit(s.pace, id),
+    })
+
     const sub = <T>(evt: { on: (cb: (p: T) => void) => () => void }, cb: (p: T) => void) => {
       unsubs.push(evt.on((p) => alive && cb(p)))
     }
@@ -295,6 +312,33 @@ export function useBackend() {
       pullApprovals()
       pullAgents()
     }
+
+    // 状态对账：事件是主路径，但断线窗口里丢一条 idle，界面就永久停在「执行中」——
+    // 进程里早已回 idle，用户看到的是「活干完了还在跑」（known-issues #25）。
+    // 8 秒一次、只取 id+status+busy，14 个会话不到 1KB；页面不可见时跳过。
+    const syncStates = () => {
+      if (document.visibilityState !== 'visible') return
+      API.agentStates()
+        .then((list) => {
+          if (!alive || !list) return
+          setState((s) => {
+            let next = s
+            for (const st of list) {
+              const cur = s.agents.find((a) => a.id === st.id)
+              if (!cur || (cur.status === st.status && (cur.busy ?? '') === (st.busy ?? ''))) continue
+              if (st.status !== 'running') {
+                dropDeltas(st.id)
+                dropReason(st.id)
+              }
+              next = applyAgentStatus(next, st.id, st.status, st.busy)
+            }
+            return next
+          })
+        })
+        .catch(() => {})
+    }
+    const syncTimer = window.setInterval(syncStates, 8000)
+    unsubs.push(() => window.clearInterval(syncTimer))
     const rawOn = (globalThis as { mygo?: { on?: (n: string, f: () => void) => () => void } }).mygo?.on
     if (rawOn) unsubs.push(rawOn('gateway.connected', resync))
 
@@ -364,21 +408,7 @@ export function useBackend() {
         dropDeltas(id)
         dropReason(id)
       }
-      setState((s) => ({
-        ...s,
-        agents: s.agents.map((a) =>
-          a.id === id
-            ? { ...a, status: status as Agent['status'], busy: status === 'running' ? busy || '' : '' }
-            : a,
-        ),
-        streaming: status === 'running' ? s.streaming : omit(s.streaming, id),
-        channelStreaming: status === 'running' ? s.channelStreaming : omit(s.channelStreaming, id),
-        reasoning: status === 'running' ? s.reasoning : omit(s.reasoning, id),
-        pace:
-          status === 'running'
-            ? { ...(s.pace ?? {}), [id]: s.pace?.[id] ?? { since: Date.now() } }
-            : omit(s.pace, id),
-      }))
+      setState((s) => applyAgentStatus(s, id, status, busy))
     })
     sub(events.agentMessage, ({ id, message, tokensIn, tokensOut }) => {
       if (message.role === 'assistant') {

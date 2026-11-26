@@ -37,7 +37,7 @@ function fileToBase64(file: File): Promise<string> {
 export function ImageStrip({ images, onRemove }: { images: DraftImage[]; onRemove?: (i: number) => void }) {
   if (images.length === 0) return null
   return (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '8px 12px 0' }}>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '10px 12px 8px' }}>
       {images.map((img, i) => (
         <span key={img.url} style={{ position: 'relative' }}>
           <img src={img.url} alt="" style={{ height: 72, maxWidth: 140, objectFit: 'cover', borderRadius: 8, display: 'block' }} />

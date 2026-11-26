@@ -50,6 +50,18 @@ export interface AgentRuntimeRequest {
 }
 
 /**
+ * AgentState 是「只要状态、不要消息」的轻量快照。
+ *
+ * 为什么不复用 ListAgents：那边会把每个会话的全部消息一起序列化，14 个会话就是几百 KB。
+ * 前端对账每 8 秒问一次「谁还在跑」，只需要 id + status + 占用位置。
+ */
+export interface AgentState {
+  id: string;
+  status: string;
+  busy: string;
+}
+
+/**
  * AgentStoppedEvent 记录「为什么停」。用户按停止和预算用尽是两回事，
  * 界面要能说清是哪一种，否则用户不知道为什么没跑完。
  */
@@ -747,6 +759,16 @@ export const API = {
   /** AgentPermission 返回这个会话的权限模式：ask / auto / readonly。 */
   agentPermission(agentID: string): Promise<string> {
     return call("API.AgentPermission", agentID);
+  },
+  /**
+   * AgentStates 供前端做状态对账。
+   *
+   * 事件流是主路径，这里只是兜底：事件在断线窗口内丢了、或者客户端根本没收到，
+   * 界面就会永远停在「执行中」，而进程里的状态早就回 idle 了（真实事故见
+   * docs/troubleshooting/known-issues.md #25）。
+   */
+  agentStates(): Promise<AgentState[]> {
+    return call("API.AgentStates");
   },
   /**
    * AttachNoteToAgent 把一条笔记作为 system message 注入指定会话，

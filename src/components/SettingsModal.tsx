@@ -1153,7 +1153,7 @@ export default function SettingsModal(p: Props) {
 
   useEffect(() => {
     if (!open) return
-    API.keepAwakeStatus()
+    API.keepAwake()
       .then(setKeepAwakeState)
       .catch((e) => console.error('Failed to load keepAwake status:', e))
   }, [open])
@@ -1255,15 +1255,15 @@ export default function SettingsModal(p: Props) {
                     <input
                       type="checkbox"
                       aria-label="保持唤醒开关"
-                      checked={keepAwakeState.enabled}
+                      checked={keepAwakeState.on}
                       onChange={(e) => {
                         if (e.target.checked) {
                           API.keepAwake()
-                            .then(() => setKeepAwakeState({ enabled: true }))
+                            .then(() => setKeepAwakeState({ on: true }))
                             .catch((err) => console.error('Failed to enable keepAwake:', err))
                         } else {
                           API.stopAwake()
-                            .then(() => setKeepAwakeState({ enabled: false }))
+                            .then(() => setKeepAwakeState({ on: false }))
                             .catch((err) => console.error('Failed to disable keepAwake:', err))
                         }
                       }}

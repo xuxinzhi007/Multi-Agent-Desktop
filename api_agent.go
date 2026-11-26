@@ -343,3 +343,27 @@ func (s *API) SetAgentExtraDirs(agentID string, dirs []string) (AgentView, error
 	AgentConfig.Emit(s.win, catalogView(v))
 	return v, nil
 }
+
+// AgentState 是「只要状态、不要消息」的轻量快照。
+//
+// 为什么不复用 ListAgents：那边会把每个会话的全部消息一起序列化，14 个会话就是几百 KB。
+// 前端对账每 8 秒问一次「谁还在跑」，只需要 id + status + 占用位置。
+type AgentState struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Busy   string `json:"busy"`
+}
+
+// AgentStates 供前端做状态对账。
+//
+// 事件流是主路径，这里只是兜底：事件在断线窗口内丢了、或者客户端根本没收到，
+// 界面就会永远停在「执行中」，而进程里的状态早就回 idle 了（真实事故见
+// docs/troubleshooting/known-issues.md #25）。
+func (s *API) AgentStates() []AgentState {
+	list := s.mgr.List()
+	out := make([]AgentState, 0, len(list))
+	for _, a := range list {
+		out = append(out, AgentState{ID: a.ID, Status: string(a.Status), Busy: a.BusyPlace})
+	}
+	return out
+}
