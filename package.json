@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "mygo dev",
+    "cli": "go run . -headless",
     "dev:signed": "mygo dev -sign 'multi-agent-desktop dev'",
     "build": "mygo build",
     "build:app": "mygo build -skip-installer",

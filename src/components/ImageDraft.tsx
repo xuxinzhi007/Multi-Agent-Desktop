@@ -37,18 +37,37 @@ function fileToBase64(file: File): Promise<string> {
 export function ImageStrip({ images, onRemove }: { images: DraftImage[]; onRemove?: (i: number) => void }) {
   if (images.length === 0) return null
   return (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '10px 12px 8px' }}>
-      {images.map((img, i) => (
-        <span key={img.url} style={{ position: 'relative' }}>
-          <img src={img.url} alt="" style={{ height: 72, maxWidth: 140, objectFit: 'cover', borderRadius: 8, display: 'block' }} />
-          {onRemove && (
-            <button type="button" onClick={() => onRemove(i)} style={{ position: 'absolute', top: 2, right: 2 }}>
-              ×
-            </button>
-          )}
-        </span>
-      ))}
-    </div>
+    <>
+      <div className="c-image__telemetry">
+        <span>{images.length}/{MAX}</span>
+      </div>
+      <div className="c-image__strip">
+        {images.map((img, i) => (
+          <ImageThumb key={img.url} img={img} onRemove={onRemove ? () => onRemove(i) : undefined} />
+        ))}
+      </div>
+    </>
+  )
+}
+
+function ImageThumb({ img, onRemove }: { img: DraftImage; onRemove?: () => void }) {
+  const [dimensions, setDimensions] = useState('')
+  const kb = Math.max(1, Math.round(img.data.length * 3 / 4 / 1024))
+  return (
+    <span className="c-image__item" style={{ position: 'relative' }}>
+      <img
+        src={img.url}
+        alt=""
+        style={{ height: 72, maxWidth: 140, objectFit: 'cover', borderRadius: 8, display: 'block' }}
+        onLoad={(e) => setDimensions(`${e.currentTarget.naturalWidth}×${e.currentTarget.naturalHeight}`)}
+        title={`${dimensions || '尺寸读取中'} · 约 ${kb}KB · ${img.mime}`}
+      />
+      {onRemove && (
+        <button type="button" aria-label="移除图片" onClick={onRemove} className="c-image__remove" style={{ position: 'absolute', top: 2, right: 2 }}>
+          ×
+        </button>
+      )}
+    </span>
   )
 }
 

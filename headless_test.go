@@ -1,0 +1,102 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/egoist/mygo"
+
+	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/llm"
+)
+
+func TestHeadlessSkipsWindow(t *testing.T) {
+	on, id := headlessFlags([]string{"-headless", "-agent", "agent-1"})
+	if !on || id != "agent-1" {
+		t.Fatalf("flags = %v %q", on, id)
+	}
+
+	opened := 0
+	prev := newDesktopWindow
+	newDesktopWindow = func(api *API) *mygo.Window {
+		opened++
+		return &mygo.Window{}
+	}
+	t.Cleanup(func() { newDesktopWindow = prev })
+
+	if w := continueDesktop(true, nil); w != nil || opened != 0 {
+		t.Fatalf("headless opened a window: %v opened=%d", w, opened)
+	}
+
+	oldPlan, oldBridge, oldStore := planSvc, memBridge, memStore
+	planSvc, memBridge, memStore = nil, nil, nil
+	t.Cleanup(func() {
+		planSvc, memBridge, memStore = oldPlan, oldBridge, oldStore
+	})
+
+	var order []string
+	shutdownTraceMu.Lock()
+	prevTrace := shutdownTrace
+	shutdownTrace = &order
+	shutdownTraceMu.Unlock()
+	t.Cleanup(func() {
+		shutdownTraceMu.Lock()
+		shutdownTrace = prevTrace
+		shutdownTraceMu.Unlock()
+	})
+
+	mgr := agent.NewManager(llm.Config{}, func(string, any) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runHeadless(ctx, nil, mgr, ""); err == nil {
+		t.Fatal("canceled context returned nil")
+	}
+	shutdownRuntime(nil, mgr, nil)
+
+	gi, mi := -1, -1
+	for i, step := range order {
+		if step == "gateway" {
+			gi = i
+		}
+		if step == "manager" {
+			mi = i
+		}
+	}
+	if gi < 0 || mi < 0 || gi > mi {
+		t.Fatalf("close order %v, want gateway before manager", order)
+	}
+}
+
+func TestHeadlessPromptPrintsDelta(t *testing.T) {
+	var buf bytes.Buffer
+	h := &headlessIO{out: &buf, in: bufio.NewReader(strings.NewReader("你好\n"))}
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(event string, data any) {
+		h.write(event, data)
+	})
+	t.Cleanup(func() {
+		mgr.Shutdown()
+	})
+	a := mgr.Create("agent-cli", "甲", "后端")
+	a.Backend = "mock"
+
+	opened := 0
+	prev := newDesktopWindow
+	newDesktopWindow = func(*API) *mygo.Window {
+		opened++
+		return &mygo.Window{}
+	}
+	t.Cleanup(func() { newDesktopWindow = prev })
+
+	if err := runHeadless(context.Background(), h, mgr, a.ID); err != nil {
+		t.Fatalf("runHeadless: %v", err)
+	}
+	if opened != 0 {
+		t.Fatal("prompt path created a window")
+	}
+	if !strings.Contains(buf.String(), "收到：你好") {
+		t.Fatalf("stdout = %q", buf.String())
+	}
+}

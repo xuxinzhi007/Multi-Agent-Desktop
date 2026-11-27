@@ -13,6 +13,7 @@ const estimated = contextMeter({
 assert.equal(estimated.estimated, true)
 assert.equal(estimated.limit, 131072)
 assert.ok(estimated.used > 0)
+assert.equal(contextMeter({ messages: [], provider: 'openai', model: 'gpt-3.5' }).limit, 16384)
 
 const measured = contextMeter({
   messages: [{ content: '请求参数' }],

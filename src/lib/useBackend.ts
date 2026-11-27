@@ -142,6 +142,7 @@ export function useBackend() {
     const channelBuf = new Map<string, { g: number; text: string }>()
     const reasonGap = new Set<string>()
     let raf = 0
+    let toolSeq = 0
 
     const schedule = () => {
       if (raf) return
@@ -480,7 +481,10 @@ export function useBackend() {
       // 审批卡由 ApprovalModal 单独渲染；这里不能把 agent 标成 blocked。
       setState((s) => ({
         ...s,
-        tools: [...s.tools, { id: e.id, tool: e.tool, target: e.target, status: 'ok', at: Date.now() }],
+        tools: [
+          ...s.tools,
+          { key: `tool-${++toolSeq}`, id: e.agentId || e.id, tool: e.tool, target: e.target, status: 'ok' as const, at: Date.now() },
+        ].slice(-60),
       }))
     })
     // loop 内工具调用：start 时只记下正在做什么，并清掉还没落成回复的过程句。
@@ -512,6 +516,7 @@ export function useBackend() {
         e.phase !== 'end'
           ? ''
           : oneLine(e.content) || (status === 'cancelled' ? '调用被用户插话打断，未完成' : '')
+      const output = e.phase === 'end' ? (e.content ?? '').trim().slice(0, 4000) : ''
       setState((s) => {
         if (e.phase === 'start') {
           return {
@@ -520,14 +525,14 @@ export function useBackend() {
             pace: { ...(s.pace ?? {}), [e.id]: { since: Date.now() } },
             tools: [
               ...s.tools,
-              { id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
+              { key: `tool-${++toolSeq}`, id: e.id, tool: e.tool, target: e.content ?? '', status, at: Date.now() },
             ].slice(-60),
           }
         }
         const tools = s.tools.slice()
         for (let i = tools.length - 1; i >= 0; i--) {
           if (tools[i].id === e.id && tools[i].tool === e.tool && (tools[i].status === 'running' || tools[i].status === 'waiting')) {
-            tools[i] = { ...tools[i], status, detail: detail || tools[i].detail }
+            tools[i] = { ...tools[i], status, detail: detail || tools[i].detail, output: output || tools[i].output }
             break
           }
         }

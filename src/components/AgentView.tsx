@@ -22,7 +22,7 @@ import {
 } from '../lib/messagePresent'
 import DirectoryPicker from './DirectoryPicker'
 import { VirtualList } from './VirtualList'
-import { contextMeter } from '../lib/contextMeter'
+import { contextMeter, estimateTokens } from '../lib/contextMeter'
 import { previewMode } from '../lib/preview-runtime'
 
 type Props = {
@@ -689,6 +689,21 @@ export default function AgentView(p: Props) {
         </div>
       </header>
 
+      <div className="c-session-telemetry" data-session-telemetry>
+        <div className="c-session-telemetry__env">
+          <RuntimeChip agent={p.agent} />
+          <WorkDirChip agent={p.agent} onConfig={p.onConfig} />
+        </div>
+        <ContextMeter
+          messages={rawMessages}
+          streaming={p.streaming}
+          usage={p.tokenUsage}
+          provider={p.agent.llm?.provider || p.connection?.provider || ''}
+          model={p.agent.llm?.model || p.connection?.model || ''}
+          contextWindow={p.agent.llm?.contextWindow}
+        />
+      </div>
+
       {/* 频道动态：群聊回合不写进单聊历史，这里给出标识和入口，避免两边工作分不清 */}
       <ChannelStrip
         agent={p.agent}
@@ -861,9 +876,9 @@ export default function AgentView(p: Props) {
               alignItems: 'center',
               gap: 4,
               padding: '5px 8px 7px',
-              // 底栏元素不允许被压扁换行：模式按钮变成竖排文字
-              // 是宽度不够时最难看的一种失败方式。
-              flexWrap: 'nowrap',
+              // 窄窗口按组换行，不把模型与发送按钮挤成竖排或裁出可视区。
+              flexWrap: 'wrap',
+              rowGap: 4,
             }}
           >
             {mode === 'chat' && (
@@ -887,17 +902,18 @@ export default function AgentView(p: Props) {
               终端
             </ModeBtn>
 
-            {/* 会话级配置：工作目录 + 模型。放在输入框里，
-                跟它影响的「这一轮对话」在同一个视觉区，用户不必去头部找。 */}
+            {/* 模型与权限影响下一轮对话，留在输入栏；低频路径与运行时收敛到顶部。 */}
             <div
               style={{
                 marginLeft: 'auto',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 4,
-                // 窄窗口下这一组可以收缩，但按钮本身不许被压
+                // 组内也允许换行，权限、模型、发送各自保持完整点击目标。
                 minWidth: 0,
+                maxWidth: '100%',
                 flexShrink: 1,
+                flexWrap: 'wrap',
               }}
             >
               {/* 模型选择直接长在输入框底栏：用户换模型时不用离开对话。
@@ -937,12 +953,6 @@ export default function AgentView(p: Props) {
                   })
                 }}
               />
-              <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
-                <RuntimeChip agent={p.agent} />
-              </div>
-              <div className="composer-bar__dir" style={{ minWidth: 0, flexShrink: 1 }}>
-                <WorkDirChip agent={p.agent} onConfig={p.onConfig} />
-              </div>
             </div>
 
             {turnLive && (
@@ -978,13 +988,6 @@ export default function AgentView(p: Props) {
                   ? '这一轮还在进行。发出去会在下一步之前插进当前任务。停止会打断它，并清掉还没插进去的消息。'
                   : 'Enter 发送 · Shift+Enter 换行'}
           </span>
-          <ContextMeter
-            messages={rawMessages}
-            streaming={p.streaming}
-            usage={p.tokenUsage}
-            provider={p.agent.llm?.provider || p.connection?.provider || ''}
-            contextWindow={p.agent.llm?.contextWindow}
-          />
         </div>
       </div>
 
@@ -1149,7 +1152,7 @@ function WorkDirChip({
             className="fade-up"
             style={{
               position: 'absolute',
-              bottom: 'calc(100% + 6px)',
+              top: 'calc(100% + 6px)',
               right: 0,
               width: 320,
               zIndex: 901,
@@ -1311,7 +1314,7 @@ function RuntimeChip({ agent }: { agent: Agent }) {
             className="fade-up"
             style={{
               position: 'absolute',
-              bottom: 'calc(100% + 6px)',
+              top: 'calc(100% + 6px)',
               right: 0,
               width: 320,
               zIndex: 901,
@@ -2100,30 +2103,51 @@ function ContextMeter({
   streaming,
   usage,
   provider,
+  model,
   contextWindow,
 }: {
   messages: { content?: string }[]
   streaming?: string
   usage?: { in: number; out: number; lastIn?: number }
   provider: string
+  model?: string
   contextWindow?: number
 }) {
-  const meter = contextMeter({ messages, streaming, usage, provider, contextWindow })
+  const base = useMemo(
+    () => contextMeter({ messages, streaming: '', usage, provider, model, contextWindow }),
+    [messages, usage, provider, model, contextWindow],
+  )
+  const meter = useMemo(
+    () => (base.estimated && streaming ? { ...base, used: base.used + estimateTokens(streaming) } : base),
+    [base, streaming],
+  )
   const ratio = meter.limit > 0 ? meter.used / meter.limit : 0
-  const hot = ratio >= 0.85
+  const level = ratio >= 1 ? 'critical' : ratio >= 0.85 ? 'warning' : ratio >= 0.7 ? 'watch' : 'normal'
+  const percent = Math.max(0, Math.round(ratio * 100))
+  const value = `上下文 ${meter.estimated ? '约 ' : ''}${formatTokens(meter.used)} / ${formatTokens(meter.limit)}`
   return (
-    <span
+    <div
+      className={`c-context-meter c-context-meter--${level}`}
+      data-level={level}
+      role="meter"
+      aria-label="上下文占用"
+      aria-valuemin={0}
+      aria-valuemax={meter.limit}
+      aria-valuenow={Math.min(meter.used, meter.limit)}
+      aria-valuetext={`${value}，${percent}%`}
       title={
         meter.estimated
           ? '模型还没返回用量，这是按文本粗估的上下文。消耗会在接口带回 token 后出现。'
-          : '上下文是最近一次请求装进窗口的量。消耗是累计输入加输出。'
+          : '上下文是最近一次请求装进窗口的量。消耗是累计输入加输出。85% 起提示接近窗口上限。'
       }
-      style={{ color: hot ? 'var(--warning)' : 'var(--text-tertiary)', whiteSpace: 'nowrap' }}
     >
-      上下文 {meter.estimated ? '约 ' : ''}
-      {formatTokens(meter.used)} / {formatTokens(meter.limit)}
-      {meter.spent > 0 ? ` · 消耗 ${formatTokens(meter.spent)}` : ''}
-    </span>
+      <span className="c-context-meter__value">{value}</span>
+      {meter.spent > 0 && <span className="c-context-meter__spent">消耗 {formatTokens(meter.spent)}</span>}
+      <span className="c-context-meter__track" aria-hidden>
+        <span className="c-context-meter__fill" style={{ transform: `scaleX(${Math.min(1, Math.max(0, ratio))})` }} />
+      </span>
+      <span className="c-context-meter__percent mono">{percent}%</span>
+    </div>
   )
 }
 

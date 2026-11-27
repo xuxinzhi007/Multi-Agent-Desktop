@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1575,6 +1578,9 @@ func main() {
 		if h := gwHost.Load(); h != nil {
 			h.OnAgentEvent(event, data)
 		}
+		if h := cliIO.Load(); h != nil {
+			h.write(event, data)
+		}
 		// agent.message 旁路进记忆库；异步、去重、限流，不阻塞 emit。
 		if memBridge != nil {
 			memBridge.OnAgentEvent(event, data)
@@ -1782,65 +1788,65 @@ func main() {
 		planSvc.Start(context.Background(), 30*time.Second)
 	}
 
-	api.desk = browser.NewDesk()
-	api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
-	browser.SetDesk(api.desk)
+	headless, cliAgent := headlessFlags(os.Args[1:])
+	if !headless {
+		api.desk = browser.NewDesk()
+		api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
+		browser.SetDesk(api.desk)
+	}
+
+	if headless {
+		hio := &headlessIO{out: os.Stdout, in: bufio.NewReader(os.Stdin)}
+		if mgr != nil {
+			hio.center = mgr.Approvals()
+		}
+		cliIO.Store(hio)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := runHeadless(ctx, hio, mgr, cliAgent)
+		stop()
+		shutdownRuntime(api, mgr, gwHost.Load())
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	mygo.Bind(api)
 
 	mygo.App.OnQuit(func() {
-		if api.bot != nil {
-			api.bot.Sync(nil)
-		}
-		// 先停调度心跳，再排空记忆写入并关库，再关网关与会话内核。均幂等。
-		if planSvc != nil {
-			planSvc.Stop()
-		}
-		if memBridge != nil {
-			memBridge.Close()
-		}
-		if memStore != nil {
-			_ = memStore.Close()
-		}
-		// 先关网关（停止接收外部入站），再停会话内核。Close 幂等。
-		if h := gwHost.Load(); h != nil {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = h.Close(closeCtx)
-			cancel()
-		}
-		if mgr != nil {
-			// MCP 子进程必须先杀：它们不是应用自己的 goroutine，留着会变孤儿进程。
-			if mcps := mgr.MCP(); mcps != nil {
-				mcps.Close()
-			}
-			mgr.Shutdown()
-		}
+		shutdownRuntime(api, mgr, gwHost.Load())
 	})
 
 	// 不在启动时申请通知授权。系统通知会弹出「通知」权限，
 	// 而阻塞和报错已经在界面里可见。
 
 	mygo.App.WhenReady(func() {
-		win = mygo.NewWindow(mygo.WindowOptions{
-			Title:           "Multi-Agent Desktop",
-			Width:           1200,
-			Height:          800,
-			MinWidth:        800,
-			MinHeight:       600,
-			BackgroundColor: "#0a0c10",
-			StateKey:        "main",
-			URL:             "/",
-		})
-		api.win = win
-
-		// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
-		// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。
-		denyPagePermissions(win)
+		win = continueDesktop(false, api)
 	})
 
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func openDesktopWindow(api *API) *mygo.Window {
+	w := mygo.NewWindow(mygo.WindowOptions{
+		Title:           "Multi-Agent Desktop",
+		Width:           1200,
+		Height:          800,
+		MinWidth:        800,
+		MinHeight:       600,
+		BackgroundColor: "#0a0c10",
+		StateKey:        "main",
+		URL:             "/",
+	})
+	if api != nil {
+		api.win = w
+	}
+	// 页面用不到摄像头、麦克风和定位。不挂这个回调时，
+	// WebView 对应用自己的页面默认放行，安装后就会弹这些权限。
+	denyPagePermissions(w)
+	return w
 }
 
 func denyPagePermissions(w *mygo.Window) {

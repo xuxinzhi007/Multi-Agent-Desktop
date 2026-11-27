@@ -45,8 +45,9 @@ export function contextMeter(input: {
   usage?: TokenUsage
   provider?: string
   contextWindow?: number
+  model?: string
 }): { used: number; limit: number; spent: number; estimated: boolean } {
-  const limit = contextLimit(input.provider || '', input.contextWindow)
+  const limit = contextLimit(input.provider || '', input.contextWindow, input.model)
   const lastIn = input.usage?.lastIn ?? 0
   const estimated = lastIn <= 0
   let used = lastIn
