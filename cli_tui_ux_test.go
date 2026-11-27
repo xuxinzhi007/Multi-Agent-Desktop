@@ -262,6 +262,7 @@ func TestViewHeightMatchesTerminal(t *testing.T) {
 	m.width, m.height = 80, 24
 	m.input = m.input.SetValue("/")
 	m.suggest = m.suggest.Update("/")
+	m.layout()
 	if !m.suggest.Visible() {
 		t.Fatal("打 / 之后补全菜单应当展开")
 	}
@@ -464,5 +465,39 @@ func TestCLICopyExtractsCodeBlock(t *testing.T) {
 	}
 	if strings.TrimSpace(copied) != "fmt.Println(42)" {
 		t.Fatalf("复制内容 = %q", copied)
+	}
+}
+
+func TestCLIViewLargeHistoryUnder2ms(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	dir := testWorkDir(t)
+	a := mgr.Create("agent-1600", "前端工程师", "前端开发")
+	_ = mgr.SetAgentWorkDir(a.ID, dir)
+
+	// 注入 1600 条带 Markdown 代码块与列表的长消息，模拟真实重度会话
+	mdReply := "## 排查结论\n\n- 慢 SQL 出现在 `tb_collection`\n- 需要补充索引 `idx_cor_job_id`\n\n```go\nfunc query() {\n\treturn\n}\n```"
+	for i := 0; i < 800; i++ {
+		a.Messages = append(a.Messages,
+			llm.Message{Role: "user", Content: "请继续分析前端与 SQL 问题"},
+			llm.Message{Role: "assistant", Content: mdReply},
+		)
+	}
+
+	m := newCLIModel(context.Background(), mgr, a.ID, dir, false)
+	m.width, m.height = 120, 36
+	m.layout()
+	_ = m.View() // 预热首帧缓存
+
+	start := time.Now()
+	const frames = 20
+	for i := 0; i < frames; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+		_ = m.View()
+	}
+	perFrame := time.Since(start) / frames
+	t.Logf("1600-msg session per-keystroke (Update + View) latency: %v", perFrame)
+	if perFrame > 2*time.Millisecond {
+		t.Fatalf("per-frame latency %v > 2ms budget on 1600-message session", perFrame)
 	}
 }

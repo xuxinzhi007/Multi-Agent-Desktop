@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // matchGlob 判断斜杠分隔的相对路径 rel 是否命中 glob 模式。
@@ -57,17 +58,17 @@ func matchSegList(pat, rel []string) bool {
 	return matchSegList(pat[1:], rel[1:])
 }
 
-// segReCache 缓存段级 glob 编译结果。单次工具调用里同一模式会对成千上万个
-// 文件名重复匹配，缓存可以避免反复编译正则。
-var segReCache = map[string]*regexp.Regexp{}
+// segReCache 缓存段级 glob 编译结果。单次或多轮并发工具调用里同一模式会对成千上万个
+// 文件名重复匹配，sync.Map 保证多核 worker 并发读取无数据竞争。
+var segReCache sync.Map
 
 // matchSegment 在单段（不含分隔符）内比较 glob。
 func matchSegment(pattern, name string) bool {
-	re, ok := segReCache[pattern]
-	if !ok {
-		re = compileSegmentGlob(pattern)
-		segReCache[pattern] = re
+	if v, ok := segReCache.Load(pattern); ok {
+		return v.(*regexp.Regexp).MatchString(name)
 	}
+	re := compileSegmentGlob(pattern)
+	segReCache.Store(pattern, re)
 	return re.MatchString(name)
 }
 

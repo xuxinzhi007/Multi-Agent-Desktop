@@ -1821,7 +1821,7 @@ func main() {
 	}
 
 	if cli.Headless {
-		hio := &headlessIO{out: os.Stdout, in: bufio.NewReader(os.Stdin)}
+		hio := &headlessIO{out: os.Stdout, errOut: os.Stderr, in: bufio.NewReader(os.Stdin)}
 		if mgr != nil {
 			hio.center = mgr.Approvals()
 		}

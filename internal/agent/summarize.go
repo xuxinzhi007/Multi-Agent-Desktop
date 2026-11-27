@@ -19,6 +19,7 @@ func compactSummarizer(cfg llm.Config) func([]llm.Message, string, int) string {
 	if cfg.Provider == "" || cfg.Model == "" {
 		return nil
 	}
+	cfg.Thinking = "off"
 	model := llm.NewChatModel(cfg)
 	return func(dropped []llm.Message, previous string, budget int) string {
 		if len(dropped) == 0 {

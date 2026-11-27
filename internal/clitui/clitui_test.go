@@ -148,3 +148,36 @@ func TestOverlaysExactDimensions(t *testing.T) {
 		t.Fatalf("modal page 2 missing FAIL:\n%s", v2)
 	}
 }
+
+func TestEditorFiltersSGRMouseLeak(t *testing.T) {
+	ed := NewEditor(70, DefaultTheme())
+	// 模拟整包到达的 SGR 鼠标滚轮残留序列
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[<65;22;55M[<64;22;55M")})
+	if ed.Value() != "" {
+		t.Fatalf("SGR mouse sequence leaked into editor: %q", ed.Value())
+	}
+
+	// 模拟分字节拆包到达的序列与正常输入混杂
+	for _, r := range "你好[<65;22;55M世界" {
+		ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if ed.Value() != "你好世界" {
+		t.Fatalf("expected clean text after split SGR scrub, got %q", ed.Value())
+	}
+}
+
+func TestVScrollCachesDisplayLines(t *testing.T) {
+	items := make([]string, 300)
+	for i := range items {
+		items[i] = "第一行文本\n第二行带 `code` 样式\n第三行"
+	}
+	vs := NewVScroll(100, 24).SetItems(items)
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		_ = vs.View()
+	}
+	elapsed := time.Since(start)
+	if elapsed > 40*time.Millisecond {
+		t.Fatalf("50 VScroll.View frames took %v, expected cached fast path", elapsed)
+	}
+}

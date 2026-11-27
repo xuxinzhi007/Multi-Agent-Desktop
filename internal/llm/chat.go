@@ -339,14 +339,15 @@ func (c *ChatModel) postChat(ctx context.Context, msgs []Message, tools []tool.S
 }
 
 type toolAcc struct {
-	id   string
-	name string
-	args string
+	id     string
+	name   string
+	args   string
+	hinted bool
 }
 
-func foldToolDelta(acc []toolAcc, index int, id, name, args string) ([]toolAcc, error) {
+func foldToolDelta(acc []toolAcc, index int, id, name, args string) ([]toolAcc, string, error) {
 	if index < 0 || index > 32 {
-		return nil, fmt.Errorf("llm: tool index %d out of range", index)
+		return nil, "", fmt.Errorf("llm: tool index %d out of range", index)
 	}
 	for len(acc) <= index {
 		acc = append(acc, toolAcc{})
@@ -355,7 +356,12 @@ func foldToolDelta(acc []toolAcc, index int, id, name, args string) ([]toolAcc, 
 	slot.id += id
 	slot.name += name
 	slot.args += args
-	return acc, nil
+	var freshName string
+	if !slot.hinted && strings.TrimSpace(slot.name) != "" && (args != "" || name != "") {
+		slot.hinted = true
+		freshName = strings.TrimSpace(slot.name)
+	}
+	return acc, freshName, nil
 }
 
 func callsFromAcc(acc []toolAcc) ([]tool.Call, error) {
@@ -444,9 +450,13 @@ func readToolStream(ctx context.Context, r io.Reader, onDelta func(Delta)) (Turn
 		}
 		for _, tc := range d.ToolCalls {
 			var err error
-			acc, err = foldToolDelta(acc, tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+			var freshName string
+			acc, freshName, err = foldToolDelta(acc, tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
 			if err != nil {
 				return Turn{}, err
+			}
+			if freshName != "" && turn.Text == "" && turn.Reasoning == "" {
+				onDelta(Delta{Reasoning: "▸ 准备调用 " + freshName + "…\n"})
 			}
 		}
 	}

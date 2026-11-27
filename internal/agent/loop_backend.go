@@ -269,10 +269,21 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 		Budget:   loop.DefaultBudget(),
 	}
 	if channelID == "" {
-		if prev, err := store.Load(context.Background(), runID); err == nil && resumable(prev) && messagesExtend(history, prev.Messages) {
-			st = prev
+		if prev, err := store.Load(context.Background(), runID); err == nil {
+			if resumable(prev) && messagesExtend(history, prev.Messages) {
+				st = prev
+			} else if strings.TrimSpace(prev.Summary) != "" && prev.SummaryAtIter > 0 {
+				// 已完成的旧运行虽然不复跑预算与迭代号，但必须继承压缩摘要与被丢弃水位；
+				// 否则每次用户发新请求都会因为 Summary 清零而同步阻塞重调一次大模型摘要（15~25s）。
+				// SummaryAtIter 置为 -prev.Iteration（≤0 会被视作从未摘要，所以用 1 并随跨轮自然受 summaryDropThreshold 约束）。
+				st.Summary = prev.Summary
+				st.SummaryAtIter = 1
+				st.SummaryDroppedTokens = prev.SummaryDroppedTokens
+			}
 		}
 	}
+
+	cfg.SessionKey = runID
 
 	// 插话通知通道只给私有 loop 回合：群回合 Steer 本就返回 nil，不挂推送。
 	var steerCh chan struct{}
@@ -568,7 +579,7 @@ func loopSystemPromptStatic(who identity) string {
 		// 工具怎么用写在工具自己的 Description 里，这里只留跨工具的规则。
 		// 两边都写一遍等于每轮让模型读两遍同一件事，白占上下文预算。
 		"规则：",
-		"1. 先读再改。改文件前先 read_file 看清现状。",
+		"1. 先读再改。改文件前先 read_file 看清现状；定位代码时优先在同一轮并发调用多个只读检索工具（repo_map / glob / grep / read_file），不要逐个串行试探。",
 		"2. edit_file 的 oldText 必须与文件完全一致（含缩进），且只能出现一次。",
 		"3. 工具失败时先读错误再决定改参数还是换路，不要原样重试。",
 		"4. 声称任务完成前必须调用 verify；只有 verify 返回通过（status ok）才算完成。不要用 bash 跑一次编译或类型检查命令代替 verify。",

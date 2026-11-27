@@ -103,11 +103,14 @@ func (c cliArgs) workDir() string {
 }
 
 type headlessIO struct {
-	out    io.Writer
-	in     *bufio.Reader
-	center *approval.Center
-	send   func(event string, data any)
-	mu     sync.Mutex
+	out          io.Writer
+	errOut       io.Writer
+	in           *bufio.Reader
+	center       *approval.Center
+	send         func(event string, data any)
+	mu           sync.Mutex
+	sawDelta     bool
+	sawReasoning bool
 }
 
 func (h *headlessIO) write(event string, data any) {
@@ -119,17 +122,74 @@ func (h *headlessIO) write(event string, data any) {
 		return
 	}
 	switch event {
+	case "agent.reasoning":
+		if v, ok := toAgentReasoning(data); ok && v.Reasoning != "" {
+			h.mu.Lock()
+			if strings.HasPrefix(v.Reasoning, "▸ ") {
+				if h.errOut != nil {
+					fmt.Fprintf(h.errOut, "%s", v.Reasoning)
+				}
+			} else if !h.sawReasoning {
+				h.sawReasoning = true
+				if h.errOut != nil {
+					fmt.Fprintf(h.errOut, "▸ 思考中…\n")
+				}
+			}
+			h.mu.Unlock()
+		}
+	case "agent.tool":
+		if v, ok := toAgentTool(data); ok {
+			h.mu.Lock()
+			if h.errOut != nil {
+				if v.Phase == "start" {
+					label := strings.TrimSpace(v.Content)
+					if label == "" {
+						label = v.Tool
+					}
+					fmt.Fprintf(h.errOut, "▸ %s\n", label)
+				} else if v.Status == "error" || v.Status == "timeout" {
+					fmt.Fprintf(h.errOut, "✗ %s (%s)\n", v.Tool, v.Status)
+				}
+			}
+			h.mu.Unlock()
+		}
 	case "agent.delta":
 		if v, ok := toAgentDelta(data); ok && v.Delta != "" {
-			h.printf("%s", v.Delta)
+			h.mu.Lock()
+			h.sawDelta = true
+			if h.out != nil {
+				fmt.Fprintf(h.out, "%s", v.Delta)
+			}
+			h.mu.Unlock()
 		}
 	case "agent.message":
 		if v, ok := toAgentMessage(data); ok && v.Message.Role == "assistant" && v.Message.Content != "" {
-			h.printf("\n%s\n", v.Message.Content)
+			h.mu.Lock()
+			already := h.sawDelta
+			h.sawDelta = false
+			h.sawReasoning = false
+			if h.out != nil {
+				if already {
+					fmt.Fprintf(h.out, "\n")
+				} else {
+					fmt.Fprintf(h.out, "%s\n", v.Message.Content)
+				}
+			}
+			h.mu.Unlock()
 		}
 	case "agent.error":
 		if v, ok := toAgentError(data); ok && v.Error != "" {
-			h.printf("\n错误：%s\n", v.Error)
+			h.mu.Lock()
+			h.sawDelta = false
+			h.sawReasoning = false
+			target := h.errOut
+			if target == nil {
+				target = h.out
+			}
+			if target != nil {
+				fmt.Fprintf(target, "\n错误：%s\n", v.Error)
+			}
+			h.mu.Unlock()
 		}
 	case "tool.approval":
 		h.decide(data)
@@ -233,6 +293,15 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 	}
 
 	a := mgr.CreateInheriting("", "", "")
+	if cur := a.EffectiveLLM(mgr); cur.Provider == "" || (cur.Model == "" && cur.Provider != llm.DoubaoCLIProvider && cur.Provider != "qoder") {
+		for _, p := range mgr.Providers() {
+			p = llm.ApplyDefaults(p)
+			if p.Provider != "" && p.Model != "" && (llm.IsLocalProvider(p.Provider) || p.APIKey != "") {
+				_ = mgr.SetAgentLLM(a.ID, p)
+				break
+			}
+		}
+	}
 	if cwd != "" {
 		if err := mgr.SetAgentWorkDir(a.ID, cwd); err != nil {
 			return "", err

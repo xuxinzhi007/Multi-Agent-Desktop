@@ -11,20 +11,26 @@ import (
 // 依赖产物、版本控制元数据和虚拟环境里的文件既不该被 grep 翻出来，
 // 也不该进 glob 结果 —— 它们要么体积巨大，要么内容与任务无关。
 var skipDirs = map[string]bool{
-	".git":         true,
-	".hg":          true,
-	".svn":         true,
-	"node_modules": true,
-	".venv":        true,
-	"venv":         true,
-	"dist":         true,
-	"build":        true,
-	"__pycache__":  true,
-	".next":        true,
-	".idea":        true,
-	".vscode":      true,
-	"target":       true,
+	".git":           true,
+	".hg":            true,
+	".svn":           true,
+	"node_modules":   true,
+	".venv":          true,
+	"venv":           true,
+	"dist":           true,
+	"build":          true,
+	"__pycache__":    true,
+	".next":          true,
+	".idea":          true,
+	".vscode":        true,
+	"target":         true,
+	"vendor":         true,
+	".mad-worktrees": true,
+	".mygo":          true,
+	"coverage":       true,
 }
+
+const maxSearchFileBytes = 2 << 20 // 2 MiB，与 ripgrep 快路径 --max-filesize 2M 对齐
 
 // isSkippedDir 报告目录名是否属于应跳过的集合。
 func isSkippedDir(name string) bool {

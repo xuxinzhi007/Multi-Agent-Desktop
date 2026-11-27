@@ -12,6 +12,7 @@ const wheelStep = 3
 
 type VScroll struct {
 	items        []string
+	lines        []string
 	width        int
 	height       int
 	offset       int
@@ -38,11 +39,48 @@ func (m VScroll) SetSize(width, height int) VScroll {
 
 func (m VScroll) SetItems(items []string) VScroll {
 	m.items = items
+	m.lines = expandItems(items)
 	if m.followBottom {
 		m.offset = m.maxOffset()
 	}
 	m.clamp()
 	return m
+}
+
+// ReplaceItem 局部替换第 idx 个渲染块并增量刷新行表，流式追加时避免全量重拼前序历史块。
+func (m VScroll) ReplaceItem(idx int, rendered string) VScroll {
+	if idx < 0 || idx >= len(m.items) {
+		return m
+	}
+	if m.items[idx] == rendered {
+		return m
+	}
+	m.items[idx] = rendered
+	m.lines = expandItems(m.items)
+	if m.followBottom {
+		m.offset = m.maxOffset()
+	}
+	m.clamp()
+	return m
+}
+
+func (m VScroll) AppendItem(rendered string) VScroll {
+	m.items = append(m.items, rendered)
+	if strings.TrimSpace(xansi.Strip(rendered)) != "" || rendered != "" {
+		if len(m.lines) > 0 {
+			m.lines = append(m.lines, "")
+		}
+		m.lines = append(m.lines, strings.Split(strings.TrimRight(rendered, "\n"), "\n")...)
+	}
+	if m.followBottom {
+		m.offset = m.maxOffset()
+	}
+	m.clamp()
+	return m
+}
+
+func (m VScroll) ItemCount() int {
+	return len(m.items)
 }
 
 func (m VScroll) GotoBottom() VScroll {
@@ -62,8 +100,7 @@ func (m VScroll) AtBottom() bool {
 }
 
 func (m VScroll) ScrollInfo() (offset, visible, total int) {
-	lines := m.displayLines()
-	total = len(lines)
+	total = len(m.lines)
 	visible = m.height
 	offset = m.offset
 	if m.followBottom {
@@ -115,7 +152,7 @@ func (m VScroll) View() string {
 	if m.height <= 0 || m.width <= 0 {
 		return ""
 	}
-	lines := m.displayLines()
+	lines := m.lines
 	offset := m.offset
 	if m.followBottom {
 		offset = max(0, len(lines)-m.height)
@@ -129,6 +166,7 @@ func (m VScroll) View() string {
 		vis = lines[offset:end]
 	}
 	var b strings.Builder
+	b.Grow(m.height * (m.width + 16))
 	for i := 0; i < m.height; i++ {
 		if i > 0 {
 			b.WriteByte('\n')
@@ -146,13 +184,13 @@ func (m VScroll) PlainText() string {
 	return strings.Join(m.items, "\n\n")
 }
 
-func (m VScroll) displayLines() []string {
-	if len(m.items) == 0 {
+func expandItems(items []string) []string {
+	if len(items) == 0 {
 		return nil
 	}
-	var lines []string
-	for i, it := range m.items {
-		if strings.TrimSpace(xansi.Strip(it)) == "" && it == "" {
+	lines := make([]string, 0, len(items)*3)
+	for i, it := range items {
+		if it == "" {
 			continue
 		}
 		if len(lines) > 0 && i > 0 {
@@ -164,7 +202,7 @@ func (m VScroll) displayLines() []string {
 }
 
 func (m VScroll) maxOffset() int {
-	v := len(m.displayLines()) - m.height
+	v := len(m.lines) - m.height
 	if v < 0 {
 		return 0
 	}

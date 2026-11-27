@@ -9,6 +9,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -176,7 +177,7 @@ func qoderTurn(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 		}
 		turn.Text += d.content
 		turn.Reasoning += d.reasoning
-		acc = qoderMergeTools(acc, d.tools)
+		acc, _ = qoderMergeTools(acc, d.tools)
 		if d.usage.Source != "" {
 			lastUsage = d.usage
 		}
@@ -230,7 +231,13 @@ func qoderTurnStream(ctx context.Context, client *http.Client, cfg Config, msgs 
 		}
 		turn.Text += d.content
 		turn.Reasoning += d.reasoning
-		acc = qoderMergeTools(acc, d.tools)
+		var freshNames []string
+		acc, freshNames = qoderMergeTools(acc, d.tools)
+		if turn.Text == "" && turn.Reasoning == "" {
+			for _, fn := range freshNames {
+				onDelta(Delta{Reasoning: "▸ 准备调用 " + fn + "…\n"})
+			}
+		}
 		if d.usage.Source != "" {
 			lastUsage = d.usage
 		}
@@ -284,12 +291,14 @@ type qoderToolDelta struct {
 }
 
 type qoderToolAcc struct {
-	id   string
-	name string
-	args string
+	id     string
+	name   string
+	args   string
+	hinted bool
 }
 
-func qoderMergeTools(acc []qoderToolAcc, deltas []qoderToolDelta) []qoderToolAcc {
+func qoderMergeTools(acc []qoderToolAcc, deltas []qoderToolDelta) ([]qoderToolAcc, []string) {
+	var fresh []string
 	for _, d := range deltas {
 		for len(acc) <= d.index {
 			acc = append(acc, qoderToolAcc{})
@@ -299,11 +308,27 @@ func qoderMergeTools(acc []qoderToolAcc, deltas []qoderToolDelta) []qoderToolAcc
 			slot.id = d.id
 		}
 		if d.name != "" {
-			slot.name = d.name
+			slot.name += d.name
 		}
 		slot.args += d.args
+		if !slot.hinted && strings.TrimSpace(slot.name) != "" {
+			slot.hinted = true
+			fresh = append(fresh, strings.TrimSpace(slot.name))
+		}
 	}
-	return acc
+	return acc, fresh
+}
+
+func qoderSessionUUID(sessionKey string) string {
+	k := strings.TrimSpace(sessionKey)
+	if k == "" {
+		return qoderUUID()
+	}
+	sum := sha256.Sum256([]byte("mad-qoder-session:" + k))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Message, tools []tool.Spec) (*http.Response, error) {
@@ -313,7 +338,7 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 	}
 	model := qoderModelByID(cfg.Model)
 	thinking := ThinkingEnabled(cfg)
-	body, err := qoderRequestBody(model, thinking, wireEffort(cfg), msgs, tools)
+	body, err := qoderRequestBodyWithSession(model, thinking, wireEffort(cfg), cfg.SessionKey, msgs, tools)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +385,10 @@ func qoderPost(ctx context.Context, client *http.Client, cfg Config, msgs []Mess
 }
 
 func qoderRequestBody(model qoderModel, thinking bool, effort string, msgs []Message, tools []tool.Spec) ([]byte, error) {
+	return qoderRequestBodyWithSession(model, thinking, effort, "", msgs, tools)
+}
+
+func qoderRequestBodyWithSession(model qoderModel, thinking bool, effort, sessionKey string, msgs []Message, tools []tool.Spec) ([]byte, error) {
 	wire := make([]map[string]any, 0, len(msgs))
 	lastUser := ""
 	var imageURLs []string
@@ -425,7 +454,7 @@ func qoderRequestBody(model qoderModel, thinking bool, effort string, msgs []Mes
 		"request_id":       qoderUUID(),
 		"request_set_id":   qoderUUID(),
 		"chat_record_id":   qoderUUID(),
-		"session_id":       qoderUUID(),
+		"session_id":       qoderSessionUUID(sessionKey),
 		"stream":           true,
 		"chat_task":        "FREE_INPUT",
 		"is_reply":         true,

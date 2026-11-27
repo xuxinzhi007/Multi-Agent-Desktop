@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 type SubmitMsg struct{}
@@ -169,13 +169,18 @@ func (m Editor) handleKey(msg tea.KeyMsg) (Editor, tea.Cmd) {
 		m.buf.DeleteWordBack()
 		return m, nil
 	case tea.KeyRunes:
-		for _, r := range msg.Runes {
+		cleaned := stripSGRMouseFragments(string(msg.Runes))
+		if cleaned == "" {
+			return m, nil
+		}
+		for _, r := range cleaned {
 			if r == '\n' {
 				m.buf.InsertNewline()
-			} else {
+			} else if r >= 0x20 {
 				m.buf.InsertRune(r)
 			}
 		}
+		m.scrubTrailingSGRMouse()
 		return m, nil
 	case tea.KeySpace:
 		m.buf.InsertRune(' ')
@@ -375,7 +380,7 @@ func wrapLineSegments(line string, width int, bufLine int, startCol int) []displ
 	curW := 0
 	segStart := startCol
 	for i, r := range runes {
-		rw := lipgloss.Width(string(r))
+		rw := runewidth.RuneWidth(r)
 		if curW > 0 && curW+rw > width {
 			res = append(res, displayLine{
 				text:     string(cur),
@@ -403,4 +408,69 @@ func wrapLineSegments(line string, width int, bufLine int, startCol int) []displ
 		res = []displayLine{{text: "", bufLine: bufLine, startCol: startCol, endCol: startCol}}
 	}
 	return res
+}
+
+// stripSGRMouseFragments 剔除终端鼠标滚轮/坐标泄漏出的 SGR 残片（如 `[<65;22;55M` 或 `\x1b[<64;22;55m`）。
+func stripSGRMouseFragments(s string) string {
+	if !strings.Contains(s, "[<") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		start := i
+		if s[i] == 0x1b && i+2 < len(s) && s[i+1] == '[' && s[i+2] == '<' {
+			if end, ok := scanSGRTail(s, i+3); ok {
+				i = end
+				continue
+			}
+		}
+		if s[i] == '[' && i+1 < len(s) && s[i+1] == '<' {
+			if end, ok := scanSGRTail(s, i+2); ok {
+				i = end
+				continue
+			}
+		}
+		_ = start
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+func scanSGRTail(s string, idx int) (int, bool) {
+	j := idx
+	semi := 0
+	digits := 0
+	for j < len(s) {
+		c := s[j]
+		if c >= '0' && c <= '9' {
+			digits++
+			j++
+			continue
+		}
+		if c == ';' {
+			semi++
+			j++
+			continue
+		}
+		if (c == 'M' || c == 'm') && semi == 2 && digits >= 3 {
+			return j + 1, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// scrubTrailingSGRMouse 处理逐字节拆包进入 buffer 的 `[<65;22;55M` 残留尾巴。
+func (m *Editor) scrubTrailingSGRMouse() {
+	val := m.buf.Value()
+	if !strings.Contains(val, "[<") {
+		return
+	}
+	cleaned := stripSGRMouseFragments(val)
+	if cleaned != val {
+		m.buf.SetValue(cleaned)
+		m.buf.MoveEndAll()
+	}
 }

@@ -186,8 +186,11 @@ type Manager struct {
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
-	saveMu   sync.Mutex
-	assistMu sync.Mutex
+	saveMu      sync.Mutex
+	saveStateMu sync.Mutex
+	saveRunning bool
+	saveDirty   bool
+	assistMu    sync.Mutex
 	// saveWG 跟踪异步 Save，测试可用 waitSaves 等待落盘结束。
 	saveWG sync.WaitGroup
 	// workerWG 跟踪每个 agent 的 workerLoop 协程；WaitWorkers 供退出/测试排干。
@@ -402,20 +405,39 @@ func (m *Manager) saveNow() error {
 		}
 	}
 
-	buf, err := json.MarshalIndent(data, "", "  ")
+	buf, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(store, buf)
 }
 
-// goSave 异步落盘，并登记到 saveWG 便于测试同步等待。
-// Add 在锁外调用，避免与 Wait 竞争。
+// goSave 异步落盘，对高频连续触发做合并去抖，并登记到 saveWG 便于测试同步等待。
 func (m *Manager) goSave() {
+	m.saveStateMu.Lock()
+	if m.saveRunning {
+		m.saveDirty = true
+		m.saveStateMu.Unlock()
+		return
+	}
+	m.saveRunning = true
+	m.saveDirty = false
 	m.saveWG.Add(1)
+	m.saveStateMu.Unlock()
+
 	go func() {
 		defer m.saveWG.Done()
-		_ = m.saveNow()
+		for {
+			_ = m.saveNow()
+			m.saveStateMu.Lock()
+			if !m.saveDirty {
+				m.saveRunning = false
+				m.saveStateMu.Unlock()
+				return
+			}
+			m.saveDirty = false
+			m.saveStateMu.Unlock()
+		}
 	}()
 }
 

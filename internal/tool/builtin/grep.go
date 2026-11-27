@@ -1,22 +1,29 @@
 package builtin
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"multi-agent-desktop/internal/tool"
 )
 
 // Grep 递归搜索文件内容。
 //
-// 刻意不在 Windows 上 shell out 到 rg/grep/git：这些二进制在用户机器上
-// 不保证存在，命令行转义还会引入注入面。filepath.WalkDir + regexp 足够。
+// 本机存在成熟 ripgrep (`rg`) 时直接走 `rg --json` 多核 SIMD 快路径；
+// 不存在时退回有界并发 worker 池 + 字节级预筛流式扫描（遵守 2MB 上限与忽略目录）。
 type Grep struct {
 	WorkDir   string
 	ExtraDirs []string
@@ -35,10 +42,10 @@ func (*Grep) Writes() bool { return false }
 func (*Grep) ConcurrencySafe() bool { return true }
 
 func (*Grep) Description() string {
-	return "Search file contents recursively across all declared workspace roots. Output lines as path:line: text. " +
+	return "Fast recursive content search (ripgrep-accelerated) across all declared workspace roots. Output lines as path:line: text. " +
 		"When multiple roots are configured, results are prefixed by their root path so you can tell which root they came from. " +
 		"Supports include/exclude globs, case-insensitive match, regexp or literal substring. " +
-		"Skips .git/node_modules/.venv/dist/build and binary files."
+		"Respects .gitignore and skips .git/node_modules/.venv/vendor/.mad-worktrees/dist/build, binary files, and files > 2MB."
 }
 
 func (*Grep) Schema() json.RawMessage {
@@ -68,10 +75,12 @@ type grepInput struct {
 	MaxResults      int             `json:"maxResults"`
 }
 
-// grepMatch 是按行判定匹配的闭包。正则与字面量两条路径共用一套遍历流程。
-type grepMatch func(line string) bool
+type grepMatcher struct {
+	matchLine func(line []byte) bool
+	prefilter func(data []byte) bool
+}
 
-func newGrepMatcher(in grepInput) (grepMatch, error) {
+func newGrepMatcher(in grepInput) (grepMatcher, error) {
 	if in.Regex {
 		expr := in.Pattern
 		if in.CaseInsensitive && !strings.HasPrefix(expr, "(?i)") {
@@ -79,16 +88,76 @@ func newGrepMatcher(in grepInput) (grepMatch, error) {
 		}
 		re, err := regexp.Compile(expr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid regular expression: %v", err)
+			return grepMatcher{}, fmt.Errorf("invalid regular expression: %v", err)
 		}
-		return re.MatchString, nil
+		return grepMatcher{
+			matchLine: re.Match,
+			prefilter: re.Match,
+		}, nil
 	}
-	needle := in.Pattern
+	needle := []byte(in.Pattern)
 	if in.CaseInsensitive {
-		low := strings.ToLower(needle)
-		return func(line string) bool { return strings.Contains(strings.ToLower(line), low) }, nil
+		low := bytes.ToLower(needle)
+		isASCII := true
+		for _, b := range needle {
+			if b >= 0x80 {
+				isASCII = false
+				break
+			}
+		}
+		if isASCII {
+			return grepMatcher{
+				matchLine: func(line []byte) bool { return containsFoldASCII(line, low) },
+				prefilter: func(data []byte) bool { return containsFoldASCII(data, low) },
+			}, nil
+		}
+		lowStr := strings.ToLower(in.Pattern)
+		return grepMatcher{
+			matchLine: func(line []byte) bool { return strings.Contains(strings.ToLower(string(line)), lowStr) },
+			prefilter: func(data []byte) bool { return strings.Contains(strings.ToLower(string(data)), lowStr) },
+		}, nil
 	}
-	return func(line string) bool { return strings.Contains(line, needle) }, nil
+	return grepMatcher{
+		matchLine: func(line []byte) bool { return bytes.Contains(line, needle) },
+		prefilter: func(data []byte) bool { return bytes.Contains(data, needle) },
+	}, nil
+}
+
+func containsFoldASCII(haystack, lowerNeedle []byte) bool {
+	n := len(lowerNeedle)
+	if n == 0 {
+		return true
+	}
+	if len(haystack) < n {
+		return false
+	}
+	c0 := lowerNeedle[0]
+	u0 := c0
+	if c0 >= 'a' && c0 <= 'z' {
+		u0 = c0 - ('a' - 'A')
+	}
+	limit := len(haystack) - n
+	for i := 0; i <= limit; i++ {
+		b := haystack[i]
+		if b != c0 && b != u0 {
+			continue
+		}
+		ok := true
+		for j := 1; j < n; j++ {
+			hb := haystack[i+j]
+			if hb >= 'A' && hb <= 'Z' {
+				hb += 'a' - 'A'
+			}
+			if hb != lowerNeedle[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
@@ -102,7 +171,7 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 		return res
 	}
 
-	match, err := newGrepMatcher(in)
+	matcher, err := newGrepMatcher(in)
 	if err != nil {
 		res := tool.Fail("%v", err)
 		res.Meta.BadArgs = true
@@ -143,7 +212,6 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 		}
 		targets = append(targets, grepTarget{root: abs, abs: abs, singleFile: !info.IsDir()})
 	} else {
-		// 没给路径：遍历全部已声明根。
 		for _, root := range roots {
 			targets = append(targets, grepTarget{root: root, abs: root})
 		}
@@ -153,45 +221,40 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	truncated := false
 
 	for _, t := range targets {
+		if len(hits) >= limit {
+			truncated = true
+			break
+		}
+		rem := limit - len(hits)
 		if t.singleFile {
-			// 单文件调用：直接搜这一个文件，label 用根前缀写法。
 			label := searchLabel(t.root, t.abs, multi)
-			fileHits, more := grepFile(t.abs, label, match, includes, excludes, limit-len(hits))
+			fileHits, more := grepFileBytes(t.abs, label, matcher, includes, excludes, rem)
 			hits = append(hits, fileHits...)
 			if more || len(hits) >= limit {
 				truncated = true
 			}
 			continue
 		}
-		walkErr := filepath.WalkDir(t.abs, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil // 跳过读不到的文件，不因单个坏文件中断整轮搜索
-			}
-			if d.IsDir() {
-				if isSkippedDir(d.Name()) && p != t.abs {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if len(hits) >= limit {
-				truncated = true
-				return fs.SkipAll
-			}
-			rel := relSlash(t.root, p)
-			if !matchInclude(includes, rel) || matchExclude(excludes, rel) {
-				return nil
-			}
-			label := searchLabel(t.root, p, multi)
-			fileHits, more := grepFile(p, label, match, nil, nil, limit-len(hits))
-			hits = append(hits, fileHits...)
-			if more || len(hits) >= limit {
+		if rgHits, rgMore, ok := rgGrepDir(ctx, t.root, t.abs, multi, in, includes, excludes, rem); ok {
+			hits = append(hits, rgHits...)
+			if rgMore || len(hits) >= limit {
 				truncated = true
 			}
-			return nil
-		})
+			continue
+		}
+		fbHits, fbMore, walkErr := fallbackParallelGrep(ctx, t.root, t.abs, multi, matcher, includes, excludes, rem)
 		if walkErr != nil {
 			return tool.Fail("search failed: %v", walkErr)
 		}
+		hits = append(hits, fbHits...)
+		if fbMore || len(hits) >= limit {
+			truncated = true
+		}
+	}
+
+	if len(hits) > limit {
+		hits = hits[:limit]
+		truncated = true
 	}
 
 	if len(hits) == 0 {
@@ -205,34 +268,209 @@ func (g *Grep) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	return tool.OK(out)
 }
 
-// grepFile 搜索单个文件，返回命中行以及是否在限额处被截断。
-func grepFile(abs, rel string, match grepMatch, includes, excludes []string, limit int) ([]string, bool) {
+func fallbackParallelGrep(ctx context.Context, root, target string, multi bool, matcher grepMatcher, includes, excludes []string, limit int) ([]string, bool, error) {
+	type fileTask struct {
+		abs   string
+		label string
+	}
+	type fileOut struct {
+		label string
+		hits  []string
+		more  bool
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 8 {
+		workers = 8
+	}
+
+	tasks := make(chan fileTask, workers*8)
+	results := make(chan fileOut, workers*4)
+	var totalHits atomic.Int64
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				if ctx.Err() != nil || int(totalHits.Load()) >= limit {
+					continue
+				}
+				rem := limit - int(totalHits.Load())
+				if rem <= 0 {
+					continue
+				}
+				h, more := grepFileBytes(task.abs, task.label, matcher, nil, nil, rem)
+				if len(h) > 0 || more {
+					totalHits.Add(int64(len(h)))
+					results <- fileOut{label: task.label, hits: h, more: more}
+				}
+			}
+		}()
+	}
+
+	var walkErr error
+	go func() {
+		defer close(tasks)
+		ignorePatterns := readRootGitignore(target)
+		walkErr = filepath.WalkDir(target, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if ctx.Err() != nil || int(totalHits.Load()) >= limit {
+				return fs.SkipAll
+			}
+			if d.IsDir() {
+				if p != target && (isSkippedDir(d.Name()) || matchGitignoreDir(ignorePatterns, relSlash(target, p))) {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			rel := relSlash(root, p)
+			if matchGitignoreFile(ignorePatterns, relSlash(target, p)) {
+				return nil
+			}
+			if !matchInclude(includes, rel) || matchExclude(excludes, rel) {
+				return nil
+			}
+			tasks <- fileTask{abs: p, label: searchLabel(root, p, multi)}
+			return nil
+		})
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var outs []fileOut
+	truncated := false
+	for r := range results {
+		outs = append(outs, r)
+		if r.more {
+			truncated = true
+		}
+	}
+	sort.Slice(outs, func(i, j int) bool { return outs[i].label < outs[j].label })
+
+	var hits []string
+	for _, o := range outs {
+		for _, h := range o.hits {
+			if len(hits) >= limit {
+				truncated = true
+				return hits, true, walkErr
+			}
+			hits = append(hits, h)
+		}
+	}
+	if int(totalHits.Load()) > limit {
+		truncated = true
+	}
+	return hits, truncated, walkErr
+}
+
+// grepFileBytes 对单个文件做 2MB 上限校验、512B 二进制快速检测与整块字节级预过滤，
+// 仅在文件确实包含目标模式时才按行切分格式化，避免无命中文件的字符串分配。
+func grepFileBytes(abs, rel string, matcher grepMatcher, includes, excludes []string, limit int) ([]string, bool) {
+	if limit <= 0 {
+		return nil, false
+	}
 	if !matchInclude(includes, rel) || matchExclude(excludes, rel) {
 		return nil, false
 	}
-	text, binary, err := readText(abs)
-	if err != nil || binary {
+	f, err := os.Open(abs)
+	if err != nil {
 		return nil, false
 	}
-	lines := strings.Split(text, "\n")
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 || st.Size() > maxSearchFileBytes {
+		return nil, false
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxSearchFileBytes+1))
+	if err != nil || int64(len(data)) > maxSearchFileBytes || looksBinary(data) {
+		return nil, false
+	}
+	if matcher.prefilter != nil && !matcher.prefilter(data) {
+		return nil, false
+	}
+
 	var hits []string
 	truncated := false
-	for i, line := range lines {
-		if match(line) {
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 16*1024), maxSearchFileBytes+1024)
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		rawLine := sc.Bytes()
+		if matcher.matchLine(rawLine) {
 			if len(hits) >= limit {
 				truncated = true
 				break
 			}
-			hits = append(hits, formatGrepLine(rel, i+1, line))
+			hits = append(hits, formatGrepLine(rel, lineNo, string(rawLine)))
 		}
 	}
 	return hits, truncated
 }
 
+func readRootGitignore(dir string) []string {
+	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, "!") {
+			continue
+		}
+		out = append(out, filepath.ToSlash(ln))
+	}
+	return out
+}
+
+func matchGitignoreDir(patterns []string, rel string) bool {
+	base := filepath.Base(rel)
+	for _, p := range patterns {
+		clean := strings.TrimSuffix(strings.TrimPrefix(p, "/"), "/")
+		if clean == "" {
+			continue
+		}
+		if clean == base || clean == rel || matchGlob(clean, rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchGitignoreFile(patterns []string, rel string) bool {
+	for _, p := range patterns {
+		if strings.HasSuffix(p, "/") {
+			continue
+		}
+		clean := strings.TrimPrefix(p, "/")
+		if clean != "" && matchGlob(clean, rel) {
+			return true
+		}
+	}
+	return false
+}
+
 // formatGrepLine 输出 path:line: text；超长行先截断，避免一行日志撑爆上下文。
 func formatGrepLine(rel string, lineNo int, line string) string {
+	line = strings.TrimRight(line, "\r")
 	if len(line) > maxGrepLineChars {
 		line = line[:maxGrepLineChars] + " …"
 	}
-	return fmt.Sprintf("%s:%d: %s", rel, lineNo, strings.TrimRight(line, "\r"))
+	return fmt.Sprintf("%s:%d: %s", rel, lineNo, line)
 }

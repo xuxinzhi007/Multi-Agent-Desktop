@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 type Theme struct {
@@ -380,7 +381,7 @@ func WrapPlain(s string, width int) []string {
 	var cur []rune
 	curW := 0
 	for _, r := range s {
-		rw := lipgloss.Width(string(r))
+		rw := runewidth.RuneWidth(r)
 		if curW > 0 && curW+rw > width {
 			out = append(out, string(cur))
 			cur = []rune{r}
@@ -435,7 +436,7 @@ func RenderDiffBlock(diff string, width, maxLines int, th Theme) string {
 }
 
 func FitWidth(s string, maxCols int) string {
-	if maxCols <= 0 || lipgloss.Width(s) <= maxCols {
+	if maxCols <= 0 || runewidth.StringWidth(s) <= maxCols {
 		return s
 	}
 	if maxCols <= 3 {
@@ -444,7 +445,7 @@ func FitWidth(s string, maxCols int) string {
 	var b strings.Builder
 	used := 0
 	for _, r := range s {
-		w := lipgloss.Width(string(r))
+		w := runewidth.RuneWidth(r)
 		if used+w > maxCols-1 {
 			break
 		}

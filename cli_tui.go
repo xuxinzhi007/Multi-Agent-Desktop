@@ -83,45 +83,50 @@ const (
 )
 
 type transcriptCell struct {
-	kind     cellKind
-	role     string
-	raw      string
-	callID   string
-	tool     string
-	title    string
-	path     string
-	status   string
-	diff     string
-	duration time.Duration
-	started  time.Time
-	done     bool
+	kind       cellKind
+	role       string
+	raw        string
+	callID     string
+	tool       string
+	title      string
+	path       string
+	status     string
+	diff       string
+	duration   time.Duration
+	started    time.Time
+	done       bool
+	cacheWidth int
+	cachedView string
 }
+
+const maxInitialTranscriptMsgs = 120
 
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type cliModel struct {
-	mgr       *agent.Manager
-	agentID   string
-	ctx       context.Context
-	theme     clitui.Theme
-	vp        clitui.VScroll
-	input     clitui.Editor
-	suggest   clitui.Suggest
-	approvals clitui.ApprovalBar
-	toolModal clitui.ToolModal
-	cmds      []slashCmd
-	cells     []transcriptCell
-	tools     []clitui.ToolRecord
-	liveIdx   int
-	thinkIdx  int
-	width     int
-	height    int
-	busy      bool
-	spin      int
-	tokensIn  int
-	tokensOut int
-	cwd       string
-	lastErr   string
+	mgr         *agent.Manager
+	agentID     string
+	ctx         context.Context
+	theme       clitui.Theme
+	vp          clitui.VScroll
+	input       clitui.Editor
+	suggest     clitui.Suggest
+	approvals   clitui.ApprovalBar
+	toolModal   clitui.ToolModal
+	cmds        []slashCmd
+	cells       []transcriptCell
+	tools       []clitui.ToolRecord
+	liveIdx     int
+	thinkIdx    int
+	width       int
+	height      int
+	lastRenderW int
+	busy        bool
+	spin        int
+	tokensIn    int
+	tokensOut   int
+	cwd         string
+	lastErr     string
 }
 
 func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) *cliModel {
@@ -191,18 +196,37 @@ func (m *cliModel) syncAgentState(a *agent.Agent, banner bool) {
 		}
 		m.pushSystem(head + "\n输入消息开始，/ 查看指令，Ctrl+O 查看工具与改动详情。")
 	}
+	var visible []struct {
+		role string
+		text string
+	}
 	for _, msg := range sn.Messages {
 		text := strings.TrimSpace(msg.Content)
-		if text == "" {
+		if text == "" || (msg.Role != "user" && msg.Role != "assistant") {
 			continue
 		}
-		switch msg.Role {
+		visible = append(visible, struct {
+			role string
+			text string
+		}{role: msg.Role, text: msg.Content})
+	}
+	if omitted := len(visible) - maxInitialTranscriptMsgs; omitted > 0 {
+		m.cells = append(m.cells, transcriptCell{
+			kind: cellSystem,
+			raw:  fmt.Sprintf("已省略更早的 %d 条可见消息以保证终端流畅（会话完整上下文仍保留在磁盘中）", omitted),
+			done: true,
+		})
+		visible = visible[omitted:]
+	}
+	for _, msg := range visible {
+		switch msg.role {
 		case "user":
-			m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: msg.Content})
+			m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: msg.text, done: true})
 		case "assistant":
-			m.cells = append(m.cells, transcriptCell{kind: cellAssistant, role: sn.Name, raw: msg.Content, done: true})
+			m.cells = append(m.cells, transcriptCell{kind: cellAssistant, role: sn.Name, raw: msg.text, done: true})
 		}
 	}
+	m.rebuildViewport(true)
 }
 
 func (m *cliModel) Init() tea.Cmd {
@@ -343,14 +367,43 @@ func (m *cliModel) renderCell(c transcriptCell) string {
 	return c.raw
 }
 
+func (m *cliModel) renderCellCached(idx int) string {
+	c := &m.cells[idx]
+	if c.done && c.cacheWidth == m.width && c.cachedView != "" {
+		return c.cachedView
+	}
+	out := m.renderCell(*c)
+	if c.done {
+		c.cacheWidth = m.width
+		c.cachedView = out
+	} else {
+		c.cacheWidth = 0
+		c.cachedView = ""
+	}
+	return out
+}
+
 func (m *cliModel) rebuildViewport(scrollBottom bool) {
 	rendered := make([]string, 0, len(m.cells))
-	for _, c := range m.cells {
-		rendered = append(rendered, m.renderCell(c))
+	for i := range m.cells {
+		rendered = append(rendered, m.renderCellCached(i))
 	}
+	m.lastRenderW = m.width
 	m.vp = m.vp.SetItems(rendered)
 	if scrollBottom {
 		m.vp = m.vp.GotoBottom()
+	}
+}
+
+func (m *cliModel) refreshActiveCells() {
+	if m.lastRenderW != m.width || m.vp.ItemCount() != len(m.cells) {
+		m.rebuildViewport(false)
+		return
+	}
+	for i := range m.cells {
+		if !m.cells[i].done {
+			m.vp = m.vp.ReplaceItem(i, m.renderCellCached(i))
+		}
 	}
 }
 
@@ -382,8 +435,10 @@ func (m *cliModel) layout() {
 		overlayH = max(0, maxBottom-inputH)
 	}
 	vpH := max(1, m.height-statusH-inputH-overlayH)
+	if m.lastRenderW != m.width || m.vp.ItemCount() != len(m.cells) {
+		m.rebuildViewport(false)
+	}
 	m.vp = m.vp.SetSize(m.width, vpH)
-	m.rebuildViewport(false)
 }
 
 func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -396,7 +451,7 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cliTickMsg:
 		if m.busy {
 			m.spin++
-			m.rebuildViewport(false)
+			m.refreshActiveCells()
 		}
 		return m, cliTick()
 	case cliMsg:
@@ -431,9 +486,13 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *cliModel) finishLiveCells() {
 	if m.thinkIdx >= 0 && m.thinkIdx < len(m.cells) {
 		m.cells[m.thinkIdx].done = true
+		m.cells[m.thinkIdx].cacheWidth = 0
+		m.cells[m.thinkIdx].cachedView = ""
 	}
 	if m.liveIdx >= 0 && m.liveIdx < len(m.cells) {
 		m.cells[m.liveIdx].done = true
+		m.cells[m.liveIdx].cacheWidth = 0
+		m.cells[m.liveIdx].cachedView = ""
 	}
 	m.thinkIdx = -1
 	m.liveIdx = -1
@@ -966,9 +1025,11 @@ func (m *cliModel) onEvent(msg cliMsg) {
 		if m.thinkIdx < 0 || m.thinkIdx >= len(m.cells) {
 			m.thinkIdx = len(m.cells)
 			m.cells = append(m.cells, transcriptCell{kind: cellThink})
+			m.vp = m.vp.AppendItem(m.renderCellCached(m.thinkIdx)).GotoBottom()
+			return
 		}
 		m.cells[m.thinkIdx].raw += v.Reasoning
-		m.rebuildViewport(true)
+		m.vp = m.vp.ReplaceItem(m.thinkIdx, m.renderCellCached(m.thinkIdx)).GotoBottom()
 
 	case "agent.delta":
 		v, ok := toAgentDelta(msg.data)
@@ -977,6 +1038,9 @@ func (m *cliModel) onEvent(msg cliMsg) {
 		}
 		if m.thinkIdx >= 0 && m.thinkIdx < len(m.cells) {
 			m.cells[m.thinkIdx].done = true
+			m.cells[m.thinkIdx].cacheWidth = 0
+			m.cells[m.thinkIdx].cachedView = ""
+			m.vp = m.vp.ReplaceItem(m.thinkIdx, m.renderCellCached(m.thinkIdx))
 			m.thinkIdx = -1
 		}
 		if m.liveIdx < 0 || m.liveIdx >= len(m.cells) {
@@ -985,9 +1049,10 @@ func (m *cliModel) onEvent(msg cliMsg) {
 				kind: cellAssistant,
 				role: m.currentAgentName(),
 			})
+			m.vp = m.vp.AppendItem(m.renderCellCached(m.liveIdx)).GotoBottom()
 		}
 		m.cells[m.liveIdx].raw += v.Delta
-		m.rebuildViewport(true)
+		m.vp = m.vp.ReplaceItem(m.liveIdx, m.renderCellCached(m.liveIdx)).GotoBottom()
 
 	case "agent.message":
 		v, ok := toAgentMessage(msg.data)
@@ -1003,6 +1068,8 @@ func (m *cliModel) onEvent(msg cliMsg) {
 				m.cells[m.liveIdx].raw = v.Message.Content
 			}
 			m.cells[m.liveIdx].done = true
+			m.cells[m.liveIdx].cacheWidth = 0
+			m.cells[m.liveIdx].cachedView = ""
 			m.liveIdx = -1
 			m.rebuildViewport(true)
 			return
@@ -1196,7 +1263,6 @@ func (m *cliModel) upsertToolRecord(key string, v AgentToolEvent, input, output 
 }
 
 func (m *cliModel) View() string {
-	m.layout()
 	status := m.theme.StatusBg.Render(m.statusLine())
 	if m.toolModal.Open() {
 		modalH := max(1, m.height-1)
@@ -1315,7 +1381,7 @@ func runTermUI(ctx context.Context, h *headlessIO, mgr *agent.Manager, agentID, 
 	}
 	redirectCLILog()
 	m := newCLIModel(ctx, mgr, agentID, cwd, resume, wantModel...)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	h.send = func(event string, data any) {
 		go p.Send(cliMsg{event: event, data: data})
 	}

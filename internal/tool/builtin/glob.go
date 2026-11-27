@@ -108,25 +108,40 @@ func (g *Glob) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	truncated := false
 
 	for _, t := range targets {
+		if len(matches) >= limit {
+			truncated = true
+			break
+		}
+		rem := limit - len(matches)
 		if t.singleFile {
 			// 给了单个文件就直接判断它是否命中，避免 WalkDir 把文件当目录报错。
 			if matchGlob(pattern, filepath.ToSlash(filepath.Base(t.abs))) {
-				if len(matches) >= limit {
-					truncated = true
-					continue
-				}
 				matches = append(matches, searchLabel(t.root, t.abs, multi))
 			}
 			continue
 		}
+		if rgFiles, rgMore, ok := rgListFiles(ctx, t.root, t.abs, pattern, multi, rem); ok {
+			matches = append(matches, rgFiles...)
+			if rgMore || len(matches) >= limit {
+				truncated = true
+			}
+			continue
+		}
+		ignorePatterns := readRootGitignore(t.abs)
 		walkErr := filepath.WalkDir(t.abs, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
+			if ctx.Err() != nil {
+				return fs.SkipAll
+			}
 			if d.IsDir() {
-				if isSkippedDir(d.Name()) && p != t.abs {
+				if p != t.abs && (isSkippedDir(d.Name()) || matchGitignoreDir(ignorePatterns, relSlash(t.abs, p))) {
 					return fs.SkipDir
 				}
+				return nil
+			}
+			if matchGitignoreFile(ignorePatterns, relSlash(t.abs, p)) {
 				return nil
 			}
 			rel := relSlash(t.root, p)

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"multi-agent-desktop/internal/tool"
 )
@@ -192,4 +193,100 @@ func TestGlobLimitAndNoMatch(t *testing.T) {
 	if res.Content != "(no matches)" {
 		t.Fatalf("no-match should report empty: %q", res.Content)
 	}
+}
+
+func TestGrepRipgrepAndFallbackParity(t *testing.T) {
+	dir := tmpDir(t)
+	writeFile(t, dir, ".gitignore", "ignored_dir/\n*.secret\n")
+	writeFile(t, dir, "src/alpha.go", "package src\nconst FastNeedle = 42\n")
+	writeFile(t, dir, "src/beta.go", "package src\n// fastneedle lower\n")
+	writeFile(t, dir, "ignored_dir/leak.go", "FastNeedle\n")
+	writeFile(t, dir, "top.secret", "FastNeedle\n")
+
+	g := &Grep{WorkDir: dir}
+	resRG := invoke(t, g, `{"pattern":"fastneedle","caseInsensitive":true}`)
+	if resRG.Status != tool.StatusOK {
+		t.Fatalf("rg path failed: %s", resRG.Content)
+	}
+
+	prev := testDisableRG
+	testDisableRG = true
+	defer func() { testDisableRG = prev }()
+
+	resFB := invoke(t, g, `{"pattern":"fastneedle","caseInsensitive":true}`)
+	if resFB.Status != tool.StatusOK {
+		t.Fatalf("fallback path failed: %s", resFB.Content)
+	}
+
+	for _, label := range []string{"rg", "fallback"} {
+		content := resRG.Content
+		if label == "fallback" {
+			content = resFB.Content
+		}
+		if !strings.Contains(content, "src/alpha.go:2: const FastNeedle = 42") {
+			t.Fatalf("%s missing alpha hit: %q", label, content)
+		}
+		if !strings.Contains(content, "src/beta.go:2: // fastneedle lower") {
+			t.Fatalf("%s missing beta hit: %q", label, content)
+		}
+		if strings.Contains(content, "ignored_dir") || strings.Contains(content, "top.secret") {
+			t.Fatalf("%s leaked gitignored file: %q", label, content)
+		}
+	}
+}
+
+func TestGrepSkipsWorktreesVendorAndOversize(t *testing.T) {
+	dir := tmpDir(t)
+	writeFile(t, dir, "keep.go", "target_token\n")
+	writeFile(t, dir, ".mad-worktrees/wt1/dup.go", "target_token\n")
+	writeFile(t, dir, "vendor/pkg/dep.go", "target_token\n")
+	writeFile(t, dir, "big.log", strings.Repeat("a", (2<<20)+128)+"\ntarget_token\n")
+
+	for _, disableRG := range []bool{false, true} {
+		prev := testDisableRG
+		testDisableRG = disableRG
+		g := &Grep{WorkDir: dir}
+		res := invoke(t, g, `{"pattern":"target_token"}`)
+		testDisableRG = prev
+		if !strings.Contains(res.Content, "keep.go:1: target_token") {
+			t.Fatalf("disableRG=%v missing keep.go: %q", disableRG, res.Content)
+		}
+		if strings.Contains(res.Content, ".mad-worktrees") || strings.Contains(res.Content, "vendor") || strings.Contains(res.Content, "big.log") {
+			t.Fatalf("disableRG=%v should skip worktrees/vendor/oversize: %q", disableRG, res.Content)
+		}
+	}
+}
+
+func TestGlobRipgrepFilesAndFallback(t *testing.T) {
+	dir := tmpDir(t)
+	writeFile(t, dir, ".gitignore", "gen_out/\n")
+	writeFile(t, dir, "cmd/main.go", "package main\n")
+	writeFile(t, dir, ".mad-worktrees/w1/main.go", "package main\n")
+	writeFile(t, dir, "gen_out/gen.go", "package gen\n")
+
+	for _, disableRG := range []bool{false, true} {
+		prev := testDisableRG
+		testDisableRG = disableRG
+		g := &Glob{WorkDir: dir}
+		res := invoke(t, g, `{"pattern":"**/*.go"}`)
+		testDisableRG = prev
+		if strings.TrimSpace(res.Content) != "cmd/main.go" {
+			t.Fatalf("disableRG=%v glob = %q, want cmd/main.go", disableRG, res.Content)
+		}
+	}
+}
+
+func TestGrepRepoLatencyBenchmark(t *testing.T) {
+	repoRoot, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &Grep{WorkDir: repoRoot}
+	start := time.Now()
+	res := invoke(t, g, `{"pattern":"compactSummarizer"}`)
+	elapsed := time.Since(start)
+	if res.Status != tool.StatusOK || !strings.Contains(res.Content, "summarize.go") {
+		t.Fatalf("repo grep failed: %s", res.Content)
+	}
+	t.Logf("repo grep (rg=%v) completed in %v", findRipgrep() != "", elapsed)
 }

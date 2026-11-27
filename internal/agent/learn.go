@@ -33,6 +33,7 @@ func studyHistory(m *Manager, a *Agent) {
 	if cfg.Provider == "" || cfg.Model == "" {
 		return
 	}
+	cfg.Thinking = "off"
 	studyWith(m, a, name, llm.NewChatModel(cfg))
 }
 

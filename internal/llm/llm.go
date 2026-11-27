@@ -76,6 +76,8 @@ type Config struct {
 	Thinking string `json:"thinking,omitempty"`
 	// ContextWindow 是这次请求能用的上下文长度。0 表示按 provider 的默认窗口。
 	ContextWindow int `json:"contextWindow,omitempty"`
+	// SessionKey 是当轮所属会话标识（不落盘），供支持服务端会话前缀缓存的 provider 生成稳定 session_id。
+	SessionKey string `json:"-"`
 }
 
 var ErrNotConfigured = errors.New("llm: provider not configured")

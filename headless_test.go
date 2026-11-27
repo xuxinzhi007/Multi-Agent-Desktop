@@ -100,3 +100,45 @@ func TestHeadlessPromptPrintsDelta(t *testing.T) {
 		t.Fatalf("stdout = %q", buf.String())
 	}
 }
+
+func TestHeadlessNonTTYProgress(t *testing.T) {
+	var outBuf, errBuf bytes.Buffer
+	h := &headlessIO{out: &outBuf, errOut: &errBuf}
+
+	h.write("agent.reasoning", map[string]any{"id": "a1", "reasoning": "先分析目录"})
+	h.write("agent.reasoning", map[string]any{"id": "a1", "reasoning": "再看入口"})
+	h.write("agent.reasoning", map[string]any{"id": "a1", "reasoning": "▸ 准备调用 grep…\n"})
+	h.write("agent.tool", map[string]any{"id": "a1", "tool": "grep", "phase": "start", "content": "grep main.go"})
+	h.write("agent.delta", map[string]any{"id": "a1", "delta": "最终结论"})
+	h.write("agent.message", map[string]any{"id": "a1", "message": llm.Message{Role: "assistant", Content: "最终结论"}})
+
+	if strings.TrimSpace(outBuf.String()) != "最终结论" {
+		t.Fatalf("stdout should stay clean without duplicate final message, got %q", outBuf.String())
+	}
+	stderr := errBuf.String()
+	if !strings.Contains(stderr, "▸ 思考中…") || !strings.Contains(stderr, "▸ 准备调用 grep…") || !strings.Contains(stderr, "▸ grep main.go") {
+		t.Fatalf("stderr missing live progress indicators: %q", stderr)
+	}
+}
+
+func TestEnsureCLIAgentFallbackModel(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "deepseek", APIKey: "sk-x", Model: ""}, func(string, any) {})
+	t.Cleanup(func() { mgr.Shutdown() })
+	mgr.SetProviders([]llm.Config{
+		{Provider: "deepseek", APIKey: "sk-x", Model: ""},
+		{Provider: "qoder", APIKey: "jt-token", Model: ""},
+	})
+
+	id, err := ensureCLIAgent(mgr, "", t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("ensureCLIAgent: %v", err)
+	}
+	a, ok := mgr.Get(id)
+	if !ok {
+		t.Fatalf("missing agent %s", id)
+	}
+	eff := a.EffectiveLLM(mgr)
+	if eff.Provider != "qoder" || eff.Model == "" {
+		t.Fatalf("expected fallback to ready qoder provider with default model, got %+v", eff)
+	}
+}

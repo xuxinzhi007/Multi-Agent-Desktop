@@ -21,6 +21,7 @@ func distillKnowledge(m *Manager, agentID string, cfg llm.Config, messages []llm
 	if kb == nil {
 		return
 	}
+	cfg.Thinking = "off"
 	title, body, tags, saved := distillKnowledgeWith(kb, m.Emit, llm.NewChatModel(cfg), messages, answer, func(id string) {
 		_ = m.AttachNote(agentID, id)
 	})
