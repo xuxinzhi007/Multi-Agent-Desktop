@@ -5,8 +5,11 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -354,8 +357,10 @@ func (s *API) syncFeishu() {
 			b.UserAccess = access
 			b.UserRefresh = refresh
 			b.UserExpire = expire
-			if _, err := s.settings.SaveFeishuBot(b); err != nil {
+			if saved, err := s.settings.SaveFeishuBot(b); err != nil {
 				log.Printf("feishu user token: 保存失败 %v", err)
+			} else {
+				syncFeishuMCPStore([]config.FeishuBot{saved})
 			}
 			return
 		}
@@ -524,6 +529,7 @@ func (s *API) FinishFeishuUserAuth(ctx context.Context, id string) (FeishuView, 
 	if err != nil {
 		return FeishuView{}, err
 	}
+	syncFeishuMCPStore([]config.FeishuBot{saved})
 	s.authMu.Lock()
 	delete(s.auths, id)
 	s.authMu.Unlock()
@@ -614,4 +620,143 @@ func (s *API) FeishuMedia(messageID, key string) (string, error) {
 	s.media[cacheKey] = mediaBlob{url: url, at: time.Now()}
 	s.mediaMu.Unlock()
 	return url, nil
+}
+
+func feishuMCPStorePath() string {
+	if custom := strings.TrimSpace(os.Getenv("FEISHU_TOKEN_STORE")); custom != "" {
+		if strings.HasPrefix(custom, "~/") {
+			return filepath.Join(mustHome(), custom[2:])
+		}
+		return custom
+	}
+	return filepath.Join(mustHome(), ".feishu-mcp", "credentials.json")
+}
+
+func syncFeishuMCPStore(bots []config.FeishuBot) {
+	if len(bots) == 0 {
+		return
+	}
+	storePath := feishuMCPStorePath()
+	store := struct {
+		Version  int                       `json:"version"`
+		Accounts map[string]map[string]any `json:"accounts"`
+	}{
+		Version:  1,
+		Accounts: map[string]map[string]any{},
+	}
+	if raw, err := os.ReadFile(storePath); err == nil {
+		_ = json.Unmarshal(raw, &store)
+		if store.Accounts == nil {
+			store.Accounts = map[string]map[string]any{}
+		}
+		if store.Version == 0 {
+			store.Version = 1
+		}
+	}
+	changed := false
+	for _, b := range bots {
+		appID := strings.TrimSpace(b.AppID)
+		access := strings.TrimSpace(b.UserAccess)
+		if appID == "" || access == "" {
+			continue
+		}
+		prev := store.Accounts[appID]
+		if prev != nil {
+			prevExp, _ := prev["expires_at"].(float64)
+			if int64(prevExp) > b.UserExpire && strings.TrimSpace(fmt.Sprint(prev["access_token"])) != "" {
+				continue
+			}
+		}
+		acc := map[string]any{
+			"open_id":       b.OwnerOpenID,
+			"access_token":  access,
+			"refresh_token": b.UserRefresh,
+			"expires_at":    float64(b.UserExpire),
+			"obtained_at":   float64(time.Now().Unix()),
+		}
+		if prev != nil {
+			if n, ok := prev["name"].(string); ok && n != "" {
+				acc["name"] = n
+			}
+			if sc, ok := prev["scope"].(string); ok && sc != "" {
+				acc["scope"] = sc
+			}
+		}
+		store.Accounts[appID] = acc
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	dir := filepath.Dir(storePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	out, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := storePath + ".tmp"
+	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, storePath)
+}
+
+func hydrateFeishuCredsBeforeMCP(ctx context.Context, settings *config.Store) {
+	if settings == nil {
+		return
+	}
+	bots := settings.Get().FeishuBots
+	if len(bots) == 0 {
+		return
+	}
+	storePath := feishuMCPStorePath()
+	var mcpStore struct {
+		Accounts map[string]struct {
+			OpenID       string  `json:"open_id"`
+			AccessToken  string  `json:"access_token"`
+			RefreshToken string  `json:"refresh_token"`
+			ExpiresAt    float64 `json:"expires_at"`
+		} `json:"accounts"`
+	}
+	if raw, err := os.ReadFile(storePath); err == nil {
+		_ = json.Unmarshal(raw, &mcpStore)
+	}
+	now := time.Now().Unix()
+	updated := make([]config.FeishuBot, 0, len(bots))
+	for _, b := range bots {
+		appID := strings.TrimSpace(b.AppID)
+		if appID == "" {
+			continue
+		}
+		if ext, ok := mcpStore.Accounts[appID]; ok && ext.AccessToken != "" && int64(ext.ExpiresAt) > b.UserExpire {
+			b.UserAccess = ext.AccessToken
+			if ext.RefreshToken != "" {
+				b.UserRefresh = ext.RefreshToken
+			}
+			b.UserExpire = int64(ext.ExpiresAt)
+			if b.OwnerOpenID == "" && ext.OpenID != "" {
+				b.OwnerOpenID = ext.OpenID
+			}
+			if saved, err := settings.SaveFeishuBot(b); err == nil {
+				b = saved
+			}
+		}
+		if b.UserAccess != "" && b.UserRefresh != "" && b.AppSecret != "" && (b.UserExpire <= 0 || b.UserExpire <= now+120) {
+			rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			access, refresh, exp, err := feishu.RefreshUserToken(rctx, appID, b.AppSecret, b.UserRefresh)
+			cancel()
+			if err == nil && access != "" {
+				b.UserAccess = access
+				b.UserRefresh = refresh
+				b.UserExpire = exp.Unix()
+				if saved, serr := settings.SaveFeishuBot(b); serr == nil {
+					b = saved
+				}
+			}
+		}
+		updated = append(updated, b)
+	}
+	syncFeishuMCPStore(updated)
 }

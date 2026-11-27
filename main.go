@@ -1723,10 +1723,15 @@ func main() {
 		mcpMgr := mcp.NewManager()
 		mgr.SetMCP(mcpMgr)
 		if len(effective.MCP.Servers) > 0 {
+			markDone := mcpMgr.BeginStart()
 			go func() {
+				defer markDone()
+				hydrateFeishuCredsBeforeMCP(context.Background(), settings)
 				mcpMgr.StartAll(context.Background(), toMCPServers(effective.MCP.Servers))
 				log.Printf("mcp 就绪：%s", mcpMgr.Describe())
 			}()
+		} else {
+			go hydrateFeishuCredsBeforeMCP(context.Background(), settings)
 		}
 		if err := channels.SetStore(filepath.Join(dataDir, "channels.json")); err != nil {
 			log.Printf("load channels: %v", err)

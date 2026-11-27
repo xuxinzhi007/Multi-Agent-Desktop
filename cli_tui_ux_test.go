@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/clitui"
+	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/tool"
 )
@@ -935,5 +937,79 @@ func TestBannerAnimationAdvancesAndSettles(t *testing.T) {
 	}
 	if !strings.Contains(v, "Ciallo～(∠・ω< )⌒★") {
 		t.Fatalf("定格后欢迎卡片应包含 Ciallo～(∠・ω< )⌒★ 颜文字：\n%s", v)
+	}
+}
+
+func TestMouseWheelScrollsOutputViewportNotInputHistory(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	dir := testWorkDir(t)
+	a := mgr.Create("agent-scroll", "测试", "测试")
+	_ = mgr.SetAgentWorkDir(a.ID, dir)
+	for i := 0; i < 40; i++ {
+		a.Messages = append(a.Messages,
+			llm.Message{Role: "user", Content: "问题"},
+			llm.Message{Role: "assistant", Content: "回复第一行\n回复第二行"},
+		)
+	}
+
+	m := newCLIModel(context.Background(), mgr, a.ID, dir, false)
+	m.width, m.height = 80, 16
+	m.layout()
+	m.input = m.input.PushHistory("历史第一条命令")
+
+	if !m.vp.AtBottom() {
+		t.Fatal("初始应贴底")
+	}
+	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	if m.vp.AtBottom() {
+		t.Fatal("鼠标滚轮上滚应滚动输出区（离开底部）")
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("鼠标滚轮不应翻动输入框历史，got %q", m.input.Value())
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.input.Value() != "历史第一条命令" {
+		t.Fatalf("输入框按 ↑ 应翻出历史命令，got %q", m.input.Value())
+	}
+}
+
+func TestSyncFeishuMCPStoreSharesUserCreds(t *testing.T) {
+	tmp := t.TempDir()
+	storeFile := filepath.Join(tmp, "credentials.json")
+	t.Setenv("FEISHU_TOKEN_STORE", storeFile)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	syncFeishuMCPStore([]config.FeishuBot{{
+		AppID:       "cli_test_app",
+		OwnerOpenID: "ou_owner_1",
+		UserAccess:  "u_access_tok",
+		UserRefresh: "u_refresh_tok",
+		UserExpire:  exp,
+	}})
+
+	raw, err := os.ReadFile(storeFile)
+	if err != nil {
+		t.Fatalf("读取同步后的 credentials.json 失败: %v", err)
+	}
+	var parsed struct {
+		Version  int `json:"version"`
+		Accounts map[string]struct {
+			OpenID       string  `json:"open_id"`
+			AccessToken  string  `json:"access_token"`
+			RefreshToken string  `json:"refresh_token"`
+			ExpiresAt    float64 `json:"expires_at"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("解析 credentials.json 失败: %v", err)
+	}
+	acc, ok := parsed.Accounts["cli_test_app"]
+	if !ok {
+		t.Fatalf("未写入 cli_test_app 账号: %s", string(raw))
+	}
+	if acc.AccessToken != "u_access_tok" || acc.RefreshToken != "u_refresh_tok" || acc.OpenID != "ou_owner_1" {
+		t.Fatalf("同步字段不匹配: %+v", acc)
 	}
 }

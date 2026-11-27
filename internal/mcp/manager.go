@@ -31,12 +31,55 @@ type Manager struct {
 	tools   []*Tool
 	status  map[string]*ServerStatus
 	total   time.Duration
+	readyCh chan struct{}
+	readyMu sync.Mutex
+	pending int
 }
 
 func NewManager() *Manager {
+	ch := make(chan struct{})
+	close(ch)
 	return &Manager{
 		clients: make(map[string]*Client),
 		status:  make(map[string]*ServerStatus),
+		readyCh: ch,
+	}
+}
+
+func (m *Manager) BeginStart() func() {
+	if m == nil {
+		return func() {}
+	}
+	m.readyMu.Lock()
+	if m.pending == 0 {
+		m.readyCh = make(chan struct{})
+	}
+	m.pending++
+	m.readyMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.readyMu.Lock()
+			m.pending--
+			if m.pending <= 0 {
+				m.pending = 0
+				close(m.readyCh)
+			}
+			m.readyMu.Unlock()
+		})
+	}
+}
+
+func (m *Manager) WaitReady(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.readyMu.Lock()
+	ch := m.readyCh
+	m.readyMu.Unlock()
+	select {
+	case <-ch:
+	case <-ctx.Done():
 	}
 }
 
@@ -47,6 +90,8 @@ func NewManager() *Manager {
 //
 // 这个方法会阻塞（首次 uv 可能要装依赖），调用方应当放在 goroutine 里。
 func (m *Manager) StartAll(ctx context.Context, cfgs []ServerConfig) {
+	done := m.BeginStart()
+	defer done()
 	for _, cfg := range cfgs {
 		if cfg.Name == "" {
 			log.Printf("mcp: 跳过未命名的 server（command=%s）", cfg.Command)

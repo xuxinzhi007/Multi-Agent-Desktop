@@ -423,6 +423,15 @@ func headlessTerminal(h *headlessIO) bool {
 	return isatty.IsTerminal(f.Fd())
 }
 
+func waitCLIMCP(ctx context.Context, mgr *agent.Manager) {
+	if mgr == nil || mgr.MCP() == nil {
+		return
+	}
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	mgr.MCP().WaitReady(wctx)
+}
+
 func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cliArgs) error {
 	cwd := args.workDir()
 	if mgr != nil && cwd != "" {
@@ -442,6 +451,7 @@ func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cl
 		if err := applyCLIModel(mgr, id, args.Model); err != nil {
 			return err
 		}
+		waitCLIMCP(ctx, mgr)
 		_, err = mgr.RunPrompt(ctx, id, args.Prompt)
 		return err
 	}
@@ -459,6 +469,7 @@ func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cl
 	if err := applyCLIModel(mgr, id, args.Model); err != nil {
 		return err
 	}
+	waitCLIMCP(ctx, mgr)
 	out := io.Writer(io.Discard)
 	if h != nil && h.out != nil {
 		out = h.out
@@ -479,6 +490,13 @@ func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cl
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
+		}
+		if line == "/" || line == "/help" {
+			fmt.Fprintln(out, slashHelp(cliSlashCommands()))
+			continue
+		}
+		if line == "/quit" || line == "/exit" {
+			return nil
 		}
 		if _, err := mgr.RunPrompt(ctx, id, line); err != nil {
 			fmt.Fprintf(out, "错误：%s\n", err.Error())

@@ -73,7 +73,7 @@ func slashHelp(cmds []slashCmd) string {
 		}
 		fmt.Fprintf(&b, "  %-24s %s\n", label, c.Hint)
 	}
-	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · ↑/↓ 历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
+	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · 鼠标滚轮/PgUp/PgDn 滚输出 · ↑/↓ 输入历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
 	return b.String()
 }
 
@@ -2688,7 +2688,7 @@ func runTermUI(ctx context.Context, h *headlessIO, mgr *agent.Manager, agentID, 
 	}
 	redirectCLILog()
 	m := newCLIModel(ctx, mgr, agentID, cwd, resume, wantModel...)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	send, stopForwarder := newOrderedEventForwarder(func(ev cliMsg) {
 		p.Send(ev)
 	})
