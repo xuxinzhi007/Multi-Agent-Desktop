@@ -12,7 +12,6 @@ import (
 	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/tool/builtin"
-	"multi-agent-desktop/internal/tool/web"
 	"multi-agent-desktop/internal/workdir"
 	"multi-agent-desktop/internal/worktree"
 )
@@ -496,7 +495,6 @@ func readOnlyRegistry(workDir string, extra []string) *tool.Registry {
 	reg.Register(&builtin.Grep{WorkDir: workDir, ExtraDirs: extra})
 	reg.Register(&builtin.Glob{WorkDir: workDir, ExtraDirs: extra})
 	reg.Register(&builtin.WebFetch{})
-	reg.Register(web.New())
 	return reg
 }
 

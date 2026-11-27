@@ -120,14 +120,6 @@ func (s *API) OpenPrivacy(kind string) error {
 	return mygo.Shell.OpenExternal(pane)
 }
 
-// OpenWorkbench 打开应用自己的浏览器。地址为空时只把窗口带到前面。
-func (s *API) OpenWorkbench(url string) (string, error) {
-	if s.desk == nil {
-		return "", fmt.Errorf("内置浏览器还没准备好")
-	}
-	return s.desk.Open(url)
-}
-
 // PrivacyStatus 读取屏幕录制、辅助功能和自动化是否已经允许。不弹授权框。
 func (s *API) PrivacyStatus() []PrivacyGrant {
 	st := privacy.Status()

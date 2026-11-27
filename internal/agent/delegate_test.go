@@ -427,7 +427,7 @@ func TestReadOnlyRegistryWithholdsWriteTools(t *testing.T) {
 		names[s.Name] = true
 	}
 
-	for _, want := range []string{"read_file", "grep", "glob", "web"} {
+	for _, want := range []string{"read_file", "grep", "glob", "web_fetch"} {
 		if !names[want] {
 			t.Fatalf("只读白名单应当包含 %s：%v", want, names)
 		}

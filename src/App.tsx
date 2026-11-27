@@ -240,9 +240,6 @@ export default function App() {
         onDelete={(id) => s.send('agent.delete', { id })}
         onCreateChannel={(name, members) => s.send('channel.create', { name, members })}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenBrowser={() => {
-          API.openWorkbench('').catch(() => {})
-        }}
         onBindFeishu={(chatId, agentId) => s.send('feishu.bind', { chatId, agentId })}
         createOpen={createOpen}
         onCreateOpenChange={setCreateOpen}

@@ -80,10 +80,10 @@ jobs:
             . \
             ./cmd/acp-probe \
             ./cmd/mad-gateway \
+            ./cmd/x2-logs-mcp \
             ./internal/agent \
             ./internal/approval \
             ./internal/audit \
-            ./internal/browser \
             ./internal/channel \
             ./internal/config \
             ./internal/diff \
@@ -104,9 +104,9 @@ jobs:
             ./internal/skill \
             ./internal/tool \
             ./internal/tool/builtin \
-            ./internal/tool/web \
             ./internal/workdir \
-            ./internal/worktree
+            ./internal/worktree \
+            ./internal/x2logs
 
       # ── 前端 ────────────────────────────────────────────────────────────
       # 本机实测：tsc --noEmit 约 0.7s、vite build 约 0.6s（依赖已装），耗时可控，纳入 CI。

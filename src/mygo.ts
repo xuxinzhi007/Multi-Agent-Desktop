@@ -1057,10 +1057,6 @@ export const API = {
   openPrivacy(kind: string): Promise<void> {
     return call("API.OpenPrivacy", kind);
   },
-  /** OpenWorkbench 打开应用自己的浏览器。地址为空时只把窗口带到前面。 */
-  openWorkbench(url: string): Promise<string> {
-    return call("API.OpenWorkbench", url);
-  },
   /**
    * PauseAll 暂停所有正在跑/排队的 agent：停止当前执行并清空队列。
    * 返回被暂停的数量，供前端 toast 使用。

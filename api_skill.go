@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 
-	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/workdir"
 )
 
@@ -90,7 +89,7 @@ func (s *API) AgentCapabilities(agentID string) []Capability {
 	add("write_file", "工具", "写文件，写前给 diff 并等审批", hasDir, "")
 	add("edit_file", "工具", "按片段改文件，写前给 diff", hasDir, "")
 	add("bash", "工具", "在工作目录执行命令，60 秒上限，危险命令前置拦截", hasDir, "")
-	add("web", "工具", "操作内置浏览器（WebKit 引擎，不是 Chrome）", browser.CurrentDesk() != nil, "内置浏览器还没打开")
+	add("web_fetch", "工具", "无头抓取 HTTP/HTTPS 网页正文与链接（无需浏览器窗口）", true, "")
 	add("list_agents", "工具", "看现在有哪些会话", true, "")
 	add("ask_agent", "工具", "把任务交给已有会话并等回复", hasModel, "这个会话还没有模型")
 	add("create_agent", "工具", "建子会话；名额满时复用空闲子会话", hasModel, "这个会话还没有模型")

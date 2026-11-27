@@ -24,7 +24,6 @@ type Props = {
   onDelete: (id: string) => void
   onCreateChannel: (name: string, members: string[]) => void
   onOpenSettings: () => void
-  onOpenBrowser: () => void
   onBindFeishu?: (chatId: string, agentId: string) => void
   /** 新建 Agent 弹窗开关由上层持有，空状态与侧栏共用同一个入口 */
   createOpen: boolean
@@ -504,14 +503,6 @@ export default function Sidebar(p: Props) {
         <button
           className="c-icon-btn"
           style={{ marginLeft: 'auto' }}
-          onClick={p.onOpenBrowser}
-          title="内置浏览器"
-          aria-label="内置浏览器"
-        >
-          ⌬
-        </button>
-        <button
-          className="c-icon-btn"
           onClick={p.onOpenSettings}
           title="设置"
           aria-label="设置"

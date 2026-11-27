@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -23,7 +24,6 @@ import (
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/audit"
-	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/channel"
 	"multi-agent-desktop/internal/config"
 	"multi-agent-desktop/internal/feishu"
@@ -33,9 +33,11 @@ import (
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/mcp"
 	"multi-agent-desktop/internal/memory"
+	"multi-agent-desktop/internal/plugin"
 	"multi-agent-desktop/internal/pty"
 	"multi-agent-desktop/internal/scheduler"
 	"multi-agent-desktop/internal/skill"
+	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/workdir"
 )
 
@@ -50,7 +52,6 @@ type API struct {
 	bot       *feishu.Hub
 	gw        *gwhost.Host
 	win       *mygo.Window
-	desk      *browser.Desk
 	imageDir  string
 	shellMu   sync.Mutex
 	shellBusy map[string]bool
@@ -1722,12 +1723,13 @@ func main() {
 		// 所以不能阻塞启动；失败只记进状态，不影响应用起不来。
 		mcpMgr := mcp.NewManager()
 		mgr.SetMCP(mcpMgr)
-		if len(effective.MCP.Servers) > 0 {
+		mcpServers := withBuiltinMCPServers(toMCPServers(effective.MCP.Servers))
+		if len(mcpServers) > 0 {
 			markDone := mcpMgr.BeginStart()
 			go func() {
 				defer markDone()
 				hydrateFeishuCredsBeforeMCP(context.Background(), settings)
-				mcpMgr.StartAll(context.Background(), toMCPServers(effective.MCP.Servers))
+				mcpMgr.StartAll(context.Background(), mcpServers)
 				log.Printf("mcp 就绪：%s", mcpMgr.Describe())
 			}()
 		} else {
@@ -1755,6 +1757,11 @@ func main() {
 		skillStore = sk
 		mgr.SetSkills(sk)
 	}
+	mgr.SetPluginTools(func(workDir, agentID string) []tool.Tool {
+		pm := plugin.NewManager()
+		_ = pm.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(workDir))
+		return pm.Tools(workDir, agentID)
+	})
 
 	api = &API{mgr: mgr, runner: runner, channels: channels, kb: kbStore, settings: settings, imageDir: img}
 	roster := &channelFeed{ch: channels, api: api}
@@ -1818,11 +1825,6 @@ func main() {
 	if cli.Help {
 		fmt.Print(cliUsage)
 		return
-	}
-	if !cli.Headless {
-		api.desk = browser.NewDesk()
-		api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
-		browser.SetDesk(api.desk)
 	}
 
 	if cli.Headless {
@@ -2136,4 +2138,38 @@ func toMCPServers(in []config.MCPServer) []mcp.ServerConfig {
 		})
 	}
 	return out
+}
+
+func resolveX2LogsMCPBinary() string {
+	candidates := []string{
+		filepath.Join(mustHome(), ".multi-agent-desktop", "bin", "x2-logs-mcp"),
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "x2-logs-mcp"))
+	}
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("x2-logs-mcp"); err == nil {
+		return p
+	}
+	return ""
+}
+
+func withBuiltinMCPServers(in []mcp.ServerConfig) []mcp.ServerConfig {
+	for _, s := range in {
+		if s.Name == "x2-logs" || s.Name == "x2-logs-mcp" || strings.HasSuffix(s.Command, "x2-logs-mcp") {
+			return in
+		}
+	}
+	if bin := resolveX2LogsMCPBinary(); bin != "" {
+		return append(in, mcp.ServerConfig{
+			Name:      "x2-logs",
+			Command:   bin,
+			TimeoutMS: 20000,
+		})
+	}
+	return in
 }

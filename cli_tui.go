@@ -25,6 +25,7 @@ import (
 	"multi-agent-desktop/internal/clitui"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/plugin"
+	"multi-agent-desktop/internal/x2logs"
 )
 
 var writeClipboard = clipboard.WriteAll
@@ -64,6 +65,7 @@ func cliSlashCommands() []slashCmd {
 		{Name: "/add-dir", Args: "[目录|-|clear]", Hint: "管理附加工作区根"},
 		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式"},
 		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态"},
+		{Name: "/logs", Args: "[status|auth <token>|查询条件]", Hint: "查询 ACK 服务日志或管理 devops.x2robot.com 凭证"},
 		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件"},
 		{Name: "/paste", Args: "[图片路径|clear]", Hint: "粘贴剪贴板截图或本地图片为视觉附件（同 Ctrl+V）"},
 		{Name: "/think", Hint: "展开或折叠思考过程全文（同 Ctrl+T）"},
@@ -1405,6 +1407,15 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 		m.pushSystem(m.cmdMode(arg))
 	case "/agents":
 		m.pushSystem(m.cmdAgents())
+	case "/logs":
+		out, prompt := m.cmdLogs(arg)
+		if out != "" {
+			m.pushSystem(out)
+		}
+		if prompt != "" {
+			m.layout()
+			return m.submit(prompt)
+		}
 	case "/plugins":
 		m.pushSystem(m.cmdPlugins(arg))
 	case "/paste":
@@ -2779,6 +2790,45 @@ func (m *cliModel) onSubtaskEvent(data any) {
 		m.phase = "analyzing"
 		m.rebuildViewport(true)
 	}
+}
+
+func (m *cliModel) cmdLogs(arg string) (string, string) {
+	store := x2logs.NewCredStore("")
+	trimmed := strings.TrimSpace(arg)
+	if trimmed == "" || trimmed == "status" {
+		info, baseURL, valid := store.Status()
+		var b strings.Builder
+		b.WriteString("ACK 服务日志（devops.x2robot.com）\n")
+		fmt.Fprintf(&b, "  平台地址  %s\n", baseURL)
+		fmt.Fprintf(&b, "  凭据路径  %s\n", store.Path())
+		if info.ExpiresAt == 0 && info.OpenID == "" {
+			b.WriteString("  鉴权状态  未配置（用 /logs auth <BearerToken> 设置）\n")
+		} else {
+			st := "✓ 有效"
+			if !valid {
+				st = "✗ 已过期"
+			}
+			rem := time.Until(time.Unix(info.ExpiresAt, 0)).Round(time.Minute)
+			fmt.Fprintf(&b, "  鉴权状态  %s · %s (%s) · 到期 %s（%s）\n",
+				st, info.Name, info.OpenID, time.Unix(info.ExpiresAt, 0).Format("2006-01-02 15:04"), rem)
+		}
+		b.WriteString("  快捷用法  /logs auth <BearerToken>  |  /logs data-service eps-xxx")
+		return b.String(), ""
+	}
+	if strings.HasPrefix(trimmed, "auth ") || trimmed == "auth" {
+		tok := strings.TrimSpace(strings.TrimPrefix(trimmed, "auth"))
+		if tok == "" {
+			return "用法：/logs auth <BearerToken>", ""
+		}
+		info, err := store.SaveToken(tok, "")
+		if err != nil {
+			return "保存日志凭证失败：" + err.Error(), ""
+		}
+		return fmt.Sprintf("✓ 已更新 ACK 日志凭证：%s (%s)，有效期至 %s",
+			info.Name, info.OpenID, time.Unix(info.ExpiresAt, 0).Format("2006-01-02 15:04:05")), ""
+	}
+	prompt := fmt.Sprintf("请使用 x2_query_logs 工具在 devops.x2robot.com 查询 ACK 服务日志并分析结果：%s（若未指明环境默认查 ns-cloud-prod）", trimmed)
+	return "", prompt
 }
 
 func (m *cliModel) cmdAgents() string {

@@ -10,13 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"multi-agent-desktop/internal/browser"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/loop"
 	"multi-agent-desktop/internal/memory"
 	"multi-agent-desktop/internal/tool"
 	"multi-agent-desktop/internal/tool/builtin"
-	"multi-agent-desktop/internal/tool/web"
 	"multi-agent-desktop/internal/workdir"
 
 	rt "multi-agent-desktop/internal/runtime"
@@ -201,9 +199,6 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	reg.Register(&saveNoteTool{m: m, agentID: a.ID})
 	reg.Register(&setProfileTool{m: m, id: a.ID})
 	reg.Register(&deleteAgentTool{m: m, id: a.ID})
-	if browser.CurrentDesk() != nil {
-		reg.Register(web.New())
-	}
 	if mem := m.Memory(); mem != nil {
 		reg.Register(memory.NewSearchTool(mem))
 	}
