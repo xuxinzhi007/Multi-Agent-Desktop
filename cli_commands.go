@@ -195,25 +195,14 @@ func (m *cliModel) cmdContext() string {
 	fmt.Fprintf(&b, "  已挂载能力  技能 %d 项（仅索引头，按需懒加载正文） · MCP 工具 %d 个 · 插件工具 %d 个\n",
 		st.SkillCount, st.MCPToolCount, st.PluginToolCnt)
 	if m.tokensIn+m.tokensOut > 0 {
-		fmt.Fprintf(&b, "  本会话实耗  输入 %s tok · 输出 %s tok",
+		fmt.Fprintf(&b, "  本会话实耗  输入 %s tok · 输出 %s tok\n",
 			formatCompactTokens(m.tokensIn), formatCompactTokens(m.tokensOut))
 	}
+	// 原来 /cost 的窗口与轮次统计并到这里：窗口占用、消息数、实耗本来就是同一份读数，
+	// 分两条指令只会让人少看一半。
+	fmt.Fprintf(&b, "  估算       窗口约 %s / %s tokens（%d%% · %d 条消息）\n",
+		formatCompactTokens(st.EstimatedTok), formatCompactTokens(st.WindowLimitTok), st.Percent, st.Messages)
 	return strings.TrimRight(b.String(), "\n")
-}
-
-func (m *cliModel) cmdCost() string {
-	m.refreshContextStats()
-	var b strings.Builder
-	b.WriteString("Token 与轮次统计\n")
-	fmt.Fprintf(&b, "  累计输入  %d tokens (%s)\n", m.tokensIn, formatCompactTokens(m.tokensIn))
-	fmt.Fprintf(&b, "  累计输出  %d tokens (%s)\n", m.tokensOut, formatCompactTokens(m.tokensOut))
-	fmt.Fprintf(&b, "  当前窗口  约 %s / %s tokens (%d%%，共 %d 条消息)",
-		formatCompactTokens(m.ctxStats.EstimatedTok),
-		formatCompactTokens(m.ctxStats.WindowLimitTok),
-		m.ctxStats.Percent,
-		m.ctxStats.Messages,
-	)
-	return b.String()
 }
 
 func (m *cliModel) cmdCompact(arg string) string {
@@ -260,6 +249,14 @@ func (m *cliModel) cmdStatus() string {
 	fmt.Fprintf(&b, "  目录    %s\n", m.cwd)
 	if branch, dirty := gitQuickSummary(m.cwd); branch != "" {
 		fmt.Fprintf(&b, "  Git     %s（%s）\n", branch, dirty)
+	}
+	// 附加工作区根原来只在 /session 里显示，合并后在这里给出来，一条都不少。
+	if m.agentID != "" && m.mgr != nil {
+		if a, ok := m.mgr.Get(m.agentID); ok {
+			if extra := a.EffectiveExtraDirs(); len(extra) > 0 {
+				fmt.Fprintf(&b, "  附加根  %s\n", strings.Join(extra, ", "))
+			}
+		}
 	}
 	fmt.Fprintf(&b, "  会话    %s\n", m.cmdSession())
 	fmt.Fprintf(&b, "  上下文  %d%% (%s / %s)\n",

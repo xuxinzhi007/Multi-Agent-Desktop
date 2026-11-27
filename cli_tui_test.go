@@ -7,7 +7,7 @@ import (
 
 func TestSlashHelpListsCommands(t *testing.T) {
 	text := slashHelp(cliSlashCommands())
-	for _, name := range []string{"/help", "/new", "/resume", "/session", "/name", "/model", "/stop", "/quit"} {
+	for _, name := range []string{"/help", "/new", "/resume", "/status", "/name", "/model", "/stop", "/quit"} {
 		if !strings.Contains(text, name) {
 			t.Fatalf("help missing %s\n%s", name, text)
 		}

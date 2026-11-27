@@ -60,9 +60,13 @@ func TestSuggestFilterAndSelect(t *testing.T) {
 	if !sg.Visible() || len(sg.Matches()) != 2 {
 		t.Fatalf("matches = %d visible=%v", len(sg.Matches()), sg.Visible())
 	}
+	// 同级匹配按命令名更短者优先，所以 /mode 排在 /model 之前
+	if sg.Matches()[0].Name != "/mode" {
+		t.Fatalf("first = %s, want /mode", sg.Matches()[0].Name)
+	}
 	sg = sg.CursorDown()
 	sel, ok := sg.Selected()
-	if !ok || sel.Name != "/mode" {
+	if !ok || sel.Name != "/model" {
 		t.Fatalf("selected = %+v ok=%v", sel, ok)
 	}
 	view := sg.View()

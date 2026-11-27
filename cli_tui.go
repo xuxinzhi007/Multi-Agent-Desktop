@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,59 +42,94 @@ type cliTurnDone struct {
 type cliTickMsg time.Time
 
 type slashCmd struct {
-	Name string
-	Args string
-	Hint string
+	Name  string
+	Args  string
+	Hint  string
+	Group string // 归组展示用；留空归入“其他”
+}
+
+// 系统指令的分组与展示顺序，帮助页与补全按此归类。
+var slashGroupOrder = []string{
+	"会话", "上下文", "工作区与代码", "模型与权限", "扩展与协作", "帮助", "开放技能", "外部插件", "其他",
 }
 
 func cliSlashCommands() []slashCmd {
 	return []slashCmd{
-		{Name: "/help", Hint: "列出指令与快捷键"},
-		{Name: "/status", Hint: "查看工作区、Git、会话、上下文与生态状态"},
-		{Name: "/context", Hint: "查看上下文窗口占用拆解、AGENTS.md 与挂载能力"},
-		{Name: "/compact", Args: "[保留重点]", Hint: "智能压缩历史消息以释放上下文窗口"},
-		{Name: "/undo", Hint: "撤回上一轮用户提问与助手回复"},
-		{Name: "/diff", Args: "[git参数]", Hint: "查看当前 Git 工作区变更统计"},
-		{Name: "/review", Args: "[范围]", Hint: "对当前改动执行严格代码审查"},
-		{Name: "/init", Hint: "扫描当前仓库自动生成或更新 AGENTS.md"},
-		{Name: "/skills", Args: "[reload|<技能名>]", Hint: "查看开放目录 SKILL.md 技能或按名激活"},
-		{Name: "/mcp", Hint: "查看已连接 MCP 服务、状态与工具列表"},
-		{Name: "/doctor", Hint: "自检模型连通性、工具链、规则与 MCP/Skills"},
-		{Name: "/cost", Hint: "查看当前会话 Token 消耗与窗口统计"},
-		{Name: "/export", Args: "[路径.md]", Hint: "将当前会话导出为 Markdown 文件"},
-		{Name: "/new", Args: "[名字]", Hint: "在当前目录新建会话"},
-		{Name: "/resume", Args: "[名字|ID]", Hint: "列出或切换到已有会话"},
-		{Name: "/session", Hint: "查看当前会话、模型与工作区根"},
-		{Name: "/name", Args: "<名字>", Hint: "修改当前会话名称"},
-		{Name: "/model", Args: "[provider/model]", Hint: "交互式切换提供商与模型（同 Ctrl+K）"},
-		{Name: "/cd", Args: "[目录]", Hint: "切换主工作目录"},
-		{Name: "/add-dir", Args: "[目录|-|clear]", Hint: "管理附加工作区根"},
-		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式（同 Shift+Tab）"},
-		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态"},
-		{Name: "/logs", Args: "[status|auth <token>|查询条件]", Hint: "查询 ACK 服务日志或管理 devops.x2robot.com 凭证"},
-		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件"},
-		{Name: "/paste", Args: "[图片路径|clear]", Hint: "粘贴剪贴板截图或本地图片为视觉附件（同 Ctrl+V）"},
-		{Name: "/think", Hint: "展开或折叠思考过程全文（同 Ctrl+T）"},
-		{Name: "/tools", Hint: "打开工具与改动详情（同 Ctrl+O）"},
-		{Name: "/copy", Args: "[序号]", Hint: "复制最近回复或第 N 段代码"},
-		{Name: "/clear", Hint: "清空当前屏幕转录（保留会话）"},
-		{Name: "/stop", Hint: "停止正在运行的这一轮（同 Esc）"},
-		{Name: "/quit", Hint: "退出终端"},
+		{Name: "/help", Hint: "列出指令与快捷键", Group: "帮助"},
+		{Name: "/status", Hint: "查看工作区、Git、会话、上下文与生态状态", Group: "工作区与代码"},
+		{Name: "/context", Hint: "查看上下文窗口占用拆解、AGENTS.md 与挂载能力", Group: "上下文"},
+		{Name: "/compact", Args: "[保留重点]", Hint: "智能压缩历史消息以释放上下文窗口", Group: "上下文"},
+		{Name: "/undo", Hint: "撤回上一轮用户提问与助手回复", Group: "上下文"},
+		{Name: "/diff", Args: "[git参数]", Hint: "查看当前 Git 工作区变更统计", Group: "工作区与代码"},
+		{Name: "/review", Args: "[范围]", Hint: "对当前改动执行严格代码审查", Group: "工作区与代码"},
+		{Name: "/init", Hint: "扫描当前仓库自动生成或更新 AGENTS.md", Group: "工作区与代码"},
+		{Name: "/skills", Args: "[reload|<技能名>]", Hint: "查看开放目录 SKILL.md 技能或按名激活", Group: "扩展与协作"},
+		{Name: "/mcp", Hint: "查看已连接 MCP 服务、状态与工具列表", Group: "扩展与协作"},
+		{Name: "/doctor", Hint: "自检模型连通性、工具链、规则与 MCP/Skills", Group: "模型与权限"},
+		{Name: "/export", Args: "[路径.md]", Hint: "将当前会话导出为 Markdown 文件", Group: "上下文"},
+		{Name: "/new", Args: "[名字]", Hint: "在当前目录新建会话", Group: "会话"},
+		{Name: "/resume", Args: "[名字|ID]", Hint: "列出或切换到已有会话", Group: "会话"},
+		{Name: "/name", Args: "<名字>", Hint: "修改当前会话名称", Group: "会话"},
+		{Name: "/model", Args: "[provider/model]", Hint: "交互式切换提供商与模型（同 Ctrl+K）", Group: "模型与权限"},
+		{Name: "/add-dir", Args: "[目录|-|clear]", Hint: "把另一个目录挂进当前会话（额外工作区根）", Group: "工作区与代码"},
+		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式（同 Shift+Tab）", Group: "模型与权限"},
+		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态", Group: "扩展与协作"},
+		{Name: "/logs", Args: "[status|auth <token>|查询条件]", Hint: "查询 ACK 服务日志或管理 devops.x2robot.com 凭证", Group: "工作区与代码"},
+		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件", Group: "扩展与协作"},
+		{Name: "/paste", Args: "[图片路径|clear]", Hint: "粘贴剪贴板截图或本地图片为视觉附件（同 Ctrl+V）", Group: "工作区与代码"},
+		{Name: "/think", Hint: "展开或折叠思考过程全文（同 Ctrl+T）", Group: "上下文"},
+		{Name: "/tools", Hint: "打开工具与改动详情（同 Ctrl+O）", Group: "扩展与协作"},
+		{Name: "/copy", Args: "[序号]", Hint: "复制最近回复或第 N 段代码", Group: "上下文"},
+		{Name: "/clear", Hint: "清空当前屏幕转录（保留会话）", Group: "会话"},
+		{Name: "/stop", Hint: "停止正在运行的这一轮（同 Esc）", Group: "会话"},
+		{Name: "/quit", Hint: "退出终端", Group: "会话"},
 	}
 }
 
 func slashHelp(cmds []slashCmd) string {
-	var b strings.Builder
-	b.WriteString("指令（支持 `!<命令>` 直跑本地 Shell · `/<技能名>` 直接激活 SKILL.md）\n")
+	groups := make(map[string][]slashCmd, len(slashGroupOrder))
 	for _, c := range cmds {
+		g := c.Group
+		if g == "" {
+			g = "其他"
+		}
+		groups[g] = append(groups[g], c)
+	}
+	var b strings.Builder
+	b.WriteString("指令（输入 `/` 后用 ↑↓ 选择 · 直接敲字符过滤 · Tab 补全 · `!<命令>` 直跑本地 Shell · `/<技能名>` 激活技能）\n")
+	for _, g := range slashGroupOrder {
+		items, ok := groups[g]
+		if !ok {
+			continue
+		}
+		writeSlashGroup(&b, g, items)
+	}
+	b.WriteString("\n快捷键  Enter 发送 · Shift+Tab 切权限 · Ctrl+K 切模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Ctrl+C/y 复制选中 · Esc 停止")
+	return b.String()
+}
+
+func writeSlashGroup(b *strings.Builder, title string, items []slashCmd) {
+	limit := 12
+	if title == "开放技能" || title == "外部插件" {
+		limit = 8
+	}
+	fmt.Fprintf(b, "\n【%s】%d 项\n", title, len(items))
+	for i, c := range items {
+		if i >= limit {
+			fmt.Fprintf(b, "  … 其余 %d 项 · 输入 `/` 加关键词过滤查看\n", len(items)-i)
+			break
+		}
 		label := c.Name
 		if c.Args != "" {
 			label += " " + c.Args
 		}
-		fmt.Fprintf(&b, "  %-24s %s\n", label, c.Hint)
+		// 用显示宽度对齐列；标签过长时把说明另起一行，避免中英混排把提示列挤歪。
+		if clitui.TextWidth(label) > 26 {
+			fmt.Fprintf(b, "  %s\n      %s\n", label, c.Hint)
+			continue
+		}
+		fmt.Fprintf(b, "  %s%s\n", clitui.PadRight(label, 28), c.Hint)
 	}
-	b.WriteString("\n快捷键  Enter 发送 · !<cmd> 本地命令 · Shift+Tab 切权限 · Ctrl+K 切模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · 拖拽划词后 Ctrl+C/y 复制 · Esc 停止/取消选中")
-	return b.String()
 }
 
 type cellKind int
@@ -183,6 +220,9 @@ type cliModel struct {
 	copyNotice      string
 	copyNoticeUntil time.Time
 	ctxStats        agent.ContextStats
+	pathCacheAt     time.Time
+	pathCacheDir    string
+	pathCache       []clitui.SuggestItem
 }
 
 func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) *cliModel {
@@ -193,10 +233,7 @@ func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, r
 		mgr.SetPluginTools(plugMgr.Tools)
 	}
 	cmds := buildAllSlashCommands(plugMgr, mgr, cwd)
-	items := make([]clitui.SuggestItem, 0, len(cmds))
-	for _, c := range cmds {
-		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
-	}
+	items := slashSuggestItems(cmds)
 	m := &cliModel{
 		mgr:       mgr,
 		plugins:   plugMgr,
@@ -205,7 +242,7 @@ func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, r
 		theme:     th,
 		vp:        clitui.NewVScroll(80, 18),
 		input:     clitui.NewEditor(80, th),
-		suggest:   clitui.NewSuggest(80, items, th),
+		suggest:   clitui.NewSuggest(80, items, th).SetArgItems(slashArgItems(cmds)),
 		picker:    clitui.NewPicker(80, th),
 		approvals: clitui.NewApprovalBar(80, th),
 		toolModal: clitui.NewToolModal(th),
@@ -216,6 +253,7 @@ func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, r
 		height:    24,
 		cwd:       cwd,
 	}
+	m.suggest = m.suggest.SetPathLister(m.workspacePathCandidates)
 
 	if m.agentID == "" && mgr != nil {
 		if id, err := ensureCLIAgent(mgr, "", cwd, resume); err == nil {
@@ -1259,29 +1297,61 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "tab":
 			if sel, ok := m.suggest.Selected(); ok {
-				if m.tryOpenSlashPicker(sel.Name) {
+				if m.suggest.Mode() == clitui.ModeCommand && m.tryOpenSlashPicker(sel.Name) {
 					m.input = m.input.Reset()
 					m.suggest = m.suggest.Close()
 					m.layout()
 					return m, nil
 				}
-				val := sel.Name
-				if sel.Args != "" {
-					val += " "
-				}
-				m.input = m.input.SetValue(val)
+				m.input = m.input.SetValue(m.suggest.Completion(sel))
 				m.suggest = m.suggest.Update(m.input.Value())
 				m.layout()
 			}
 			return m, nil
 		case "enter":
+			// 一级命令：输入不是完整写法时 Enter 只补全，避免 /cl 直接跑成 /clear。
+			// 二级参数 / @ 路径：Enter 也是采用候选；路径已补到实项后再次 Enter 就是发送。
 			raw := strings.TrimSpace(m.input.Value())
-			if sel, ok := m.suggest.Selected(); ok && !strings.Contains(raw, " ") {
-				m.input = m.input.PushHistory(sel.Name).Reset()
+			if raw == "" {
+				return m, nil
+			}
+			// 命令名已完整（或参数已定稿）→ 直接执行，把已敲的参数原样带过去。
+			// 这条必须先于“补全”判断：否则 `/compact ` 这种带尾空格的输入会因为
+			// 补全值多一个空格而永远判不相等，Enter 变成死键。
+			if m.suggest.Mode() != clitui.ModePath && m.suggest.ExecutesOnEnter() {
+				name, arg := splitSlash(raw)
+				m.input = m.input.PushHistory(raw).Reset()
 				m.suggest = m.suggest.Close()
 				m.layout()
-				return m.execSlash(sel.Name, "")
+				return m.execSlash(name, arg)
 			}
+			sel, ok := m.suggest.Selected()
+			if !ok {
+				// 没有高亮项（匹配把握不足）：不替用户猜，关掉补全按原样提交。
+				m.suggest = m.suggest.Close()
+				m.input = m.input.PushHistory(raw).Reset()
+				m.layout()
+				return m.submit(raw)
+			}
+			comp := m.suggest.Completion(sel)
+			if strings.EqualFold(raw, strings.TrimSpace(comp)) {
+				if !m.suggest.InPathMode() {
+					name, arg := splitSlash(raw)
+					m.input = m.input.PushHistory(sel.Name).Reset()
+					m.suggest = m.suggest.Close()
+					m.layout()
+					return m.execSlash(name, arg)
+				}
+				// 路径已补全到实项：按 Enter 就是发送这条消息
+				m.input = m.input.PushHistory(raw).Reset()
+				m.suggest = m.suggest.Close()
+				m.layout()
+				return m.submit(raw)
+			}
+			m.input = m.input.SetValue(comp)
+			m.suggest = m.suggest.Update(m.input.Value())
+			m.layout()
+			return m, nil
 		}
 	}
 	switch msg.String() {
@@ -1298,14 +1368,11 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	m.syncDraftImagesWithInput()
 	curVal := m.input.Value()
-	if curVal == "/resume " || curVal == "/model " || curVal == "/mode " {
-		slashName := strings.TrimSpace(curVal)
-		if m.tryOpenSlashPicker(slashName) {
-			m.input = m.input.Reset()
-			m.suggest = m.suggest.Close()
-			m.layout()
-			return m, cmd
-		}
+	if cmdName, ok := trailingSlashCommand(curVal); ok && m.tryOpenSlashPicker(cmdName) {
+		m.input = m.input.Reset()
+		m.suggest = m.suggest.Close()
+		m.layout()
+		return m, cmd
 	}
 	m.suggest = m.suggest.Update(curVal)
 	m.layout()
@@ -1434,13 +1501,31 @@ func splitSlash(line string) (string, string) {
 	return fields[0], strings.TrimSpace(fields[1])
 }
 
+// trailingSlashCommand 判断输入是否刚好停在“/cmd + 空格”，用于自动拉起该指令的参数选择器。
+// 返回去掉首尾空白后的指令名。这样新增交互式指令不必再在按键处理里加分支。
+func trailingSlashCommand(v string) (string, bool) {
+	if !strings.HasSuffix(v, " ") {
+		return "", false
+	}
+	t := strings.TrimSpace(v)
+	if t == "" || t == "/" || strings.Contains(t, " ") || !strings.HasPrefix(t, "/") {
+		return "", false
+	}
+	return t, true
+}
+
 func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	m.suggest = m.suggest.Close()
+	// 不带参数的交互式指令（/model、/resume、/mode）统一在这里拉起选择器。
+	if strings.TrimSpace(arg) == "" && m.tryOpenSlashPicker(name) {
+		m.layout()
+		return m, nil
+	}
 	switch name {
 	case "/quit", "/exit":
 		return m, tea.Quit
 	case "/help":
-		m.pushSystem(slashHelp(cliSlashCommands()))
+		m.pushSystem(slashHelp(m.cmds))
 	case "/status":
 		m.pushSystem(m.cmdStatus())
 	case "/context":
@@ -1471,42 +1556,29 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	case "/doctor":
 		m.pushSystem(m.cmdDoctor())
 	case "/cost":
-		m.pushSystem(m.cmdCost())
+		// 已合并进 /context：窗口占用、消息数、实耗本来就是同一份读数。
+		m.pushSystem("/cost 已合并进 /context（窗口占用、消息数与累计 tok 都在那里）。")
 	case "/export":
 		m.pushSystem(m.cmdExport(arg))
 	case "/new":
 		m.pushSystem(m.cmdNew(arg))
 	case "/resume":
-		if strings.TrimSpace(arg) == "" {
-			if m.openResumePicker() {
-				m.layout()
-				return m, nil
-			}
-		}
 		m.pushSystem(m.cmdResume(arg))
 	case "/session":
-		m.pushSystem(m.cmdSession())
+		// 已合并进 /status：它本来就是把目录、Git、会话、上下文、生态拼在一起，
+		// 再留一个只印会话块的指令，等于同一份信息两个入口。
+		m.pushSystem("/session 已合并进 /status（/status 里就有会话名、ID、模型、审批与主目录）。")
 	case "/name":
 		m.pushSystem(m.cmdName(arg))
 	case "/model":
-		if strings.TrimSpace(arg) == "" {
-			if m.openModelPicker() {
-				m.layout()
-				return m, nil
-			}
-		}
 		m.pushSystem(m.cmdModel(arg))
 	case "/cd":
-		m.pushSystem(m.cmdCD(arg))
+		// 已从指令表移除：会话中途换主目录会让上下文里的路径、规则与技能目录全部错位，
+		// 换目录就在目标目录下启动 cli；要同时访问别的目录用 /add-dir。
+		m.pushSystem("/cd 已移除：换工作目录请在目标目录下启动 cli（当前 " + shortPath(m.cwd) + "）；需要同时访问别的目录用 /add-dir <目录>。")
 	case "/add-dir":
 		m.pushSystem(m.cmdAddDir(arg))
 	case "/mode":
-		if strings.TrimSpace(arg) == "" {
-			if m.openModePicker() {
-				m.layout()
-				return m, nil
-			}
-		}
 		m.pushSystem(m.cmdMode(arg))
 	case "/agents":
 		m.pushSystem(m.cmdAgents())
@@ -1563,7 +1635,15 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 			m.layout()
 			return m.submit(prompt)
 		}
-		m.pushSystem("未知指令 " + name + "，/help 看系统命令，/skills 看已发现技能，或用 /plugins init <名> 创建插件")
+		msg := "未知指令 " + name + "，/help 看系统命令，/skills 看已发现技能，或用 /plugins init <名> 创建插件"
+		// 技能在列表里出现过、执行时却读不到：说明目录刚变过。明确说出来，
+		// 别让用户以为“这个技能点了没反应”。
+		if listed, group := findSlashCommand(m.cmds, name); listed && group == "开放技能" {
+			msg = "技能 " + name + " 在技能清单里，但这次没能加载它的 SKILL.md（可能刚被移动或删除）。试 /skills reload 重新扫描。"
+		} else if cand, score, ok := clitui.BestMatch(slashSuggestItems(m.cmds), name); ok && score >= clitui.MatchWordBoundary {
+			msg = fmt.Sprintf("未知指令 %s，是不是想用 %s？%s", name, cand.Name, cand.Hint)
+		}
+		m.pushSystem(msg)
 	}
 	m.layout()
 	return m, nil
@@ -1579,35 +1659,6 @@ func expandUserPath(arg string) (string, error) {
 	return filepath.Abs(p)
 }
 
-func (m *cliModel) cmdCD(arg string) string {
-	if strings.TrimSpace(arg) == "" {
-		return "当前目录 " + shortPath(m.cwd)
-	}
-	abs, err := expandUserPath(arg)
-	if err != nil {
-		return "路径不对：" + err.Error()
-	}
-	st, err := os.Stat(abs)
-	if err != nil {
-		return "没有这个目录：" + abs
-	}
-	if !st.IsDir() {
-		return "不是目录：" + abs
-	}
-	m.cwd = abs
-	if m.mgr != nil {
-		m.mgr.SetWorkDir(abs)
-	}
-	if m.agentID != "" && m.mgr != nil {
-		if err := m.mgr.SetAgentWorkDir(m.agentID, abs); err != nil {
-			return "目录切了，但会话没跟上：" + err.Error()
-		}
-	}
-	m.reloadPlugins()
-	m.refreshContextStats()
-	return "目录 " + shortPath(abs)
-}
-
 func buildAllSlashCommands(pm *plugin.Manager, mgr *agent.Manager, cwd string) []slashCmd {
 	base := cliSlashCommands()
 	existing := make(map[string]bool, len(base))
@@ -1619,16 +1670,16 @@ func buildAllSlashCommands(pm *plugin.Manager, mgr *agent.Manager, cwd string) [
 			if existing[bc.Spec.Name] {
 				continue
 			}
-			hint := bc.Spec.Hint
+			hint := cleanSlashHint(bc.Spec.Hint)
 			if hint == "" {
 				hint = "自定义插件命令"
 			}
-			hint += " [" + bc.PluginName + "]"
 			existing[bc.Spec.Name] = true
 			base = append(base, slashCmd{
-				Name: bc.Spec.Name,
-				Args: bc.Spec.Args,
-				Hint: hint,
+				Name:  bc.Spec.Name,
+				Args:  bc.Spec.Args,
+				Hint:  hint,
+				Group: "外部插件",
 			})
 		}
 	}
@@ -1642,19 +1693,15 @@ func buildAllSlashCommands(pm *plugin.Manager, mgr *agent.Manager, cwd string) [
 				continue
 			}
 			existing[slash] = true
-			hint := sk.Description
+			hint := cleanSlashHint(sk.Description)
 			if hint == "" {
-				hint = "开放技能 (SKILL.md)"
-			}
-			if sk.Scope == "workspace" {
-				hint = "[工作区技能] " + hint
-			} else {
-				hint = "[技能] " + hint
+				hint = "开放技能（SKILL.md）"
 			}
 			base = append(base, slashCmd{
-				Name: slash,
-				Args: "[任务说明]",
-				Hint: hint,
+				Name:  slash,
+				Args:  "[任务说明]",
+				Hint:  hint,
+				Group: "开放技能",
 			})
 		}
 	}
@@ -1672,12 +1719,205 @@ func (m *cliModel) reloadPlugins() error {
 	}
 	err := m.plugins.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(m.cwd))
 	m.cmds = buildAllSlashCommands(m.plugins, m.mgr, m.cwd)
-	items := make([]clitui.SuggestItem, 0, len(m.cmds))
-	for _, c := range m.cmds {
-		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
-	}
-	m.suggest = clitui.NewSuggest(m.width, items, m.theme)
+	m.suggest = clitui.NewSuggest(m.width, slashSuggestItems(m.cmds), m.theme).
+		SetArgItems(slashArgItems(m.cmds)).
+		SetArgLister(m.dynamicArgItems).
+		SetPathLister(m.workspacePathCandidates)
 	return err
+}
+
+// slashArgItems 注册“命令 → 二级候选”：/skills 后面补技能名，/mode 后面补模式值。
+// 这些候选原本靠参数方括号 `[reload|<技能名>]` 表达，现在改成空格之后才展开的子菜单。
+func slashArgItems(cmds []slashCmd) map[string][]clitui.SuggestItem {
+	arg := make(map[string][]clitui.SuggestItem, 6)
+	var skills []clitui.SuggestItem
+	for _, c := range cmds {
+		if c.Group != "开放技能" {
+			continue
+		}
+		skills = append(skills, clitui.SuggestItem{
+			Name: strings.TrimPrefix(c.Name, "/"),
+			Hint: c.Hint,
+			Kind: "技能",
+		})
+	}
+	if len(skills) > 0 {
+		arg["/skills"] = append([]clitui.SuggestItem{
+			{Name: "reload", Hint: "重新扫描技能目录", Kind: "子命令"},
+		}, skills...)
+	}
+	arg["/plugins"] = []clitui.SuggestItem{
+		{Name: "reload", Hint: "热重载全部插件", Kind: "子命令"},
+		{Name: "init", Args: "<名>", Hint: "生成一个可执行插件脚手架", Kind: "子命令"},
+	}
+	arg["/mode"] = []clitui.SuggestItem{
+		{Name: "ask", Hint: "写文件或跑命令前询问（推荐日常）", Kind: "模式"},
+		{Name: "auto", Hint: "工作区内自动放行", Kind: "模式"},
+		{Name: "readonly", Hint: "纯只读，禁止修改", Kind: "模式"},
+	}
+	arg["/logs"] = []clitui.SuggestItem{
+		{Name: "status", Hint: "查看凭证与连通状态", Kind: "子命令"},
+		{Name: "auth", Args: "<token>", Hint: "写入 devops.x2robot.com 凭证", Kind: "子命令"},
+	}
+	arg["/paste"] = []clitui.SuggestItem{{Name: "clear", Hint: "清空待发送的附图", Kind: "子命令"}}
+	arg["/add-dir"] = []clitui.SuggestItem{{Name: "clear", Hint: "清空所有附加目录", Kind: "子命令"}}
+	return arg
+}
+
+// dynamicArgItems 给“参数确实有待选集合”的指令提供二级候选：目前只有 /resume 的会话列表。
+// 路径类参数（/cd、/add-dir、/export、/paste）不在这里做目录选择——选路径统一走 @，
+// 两个入口做同一件事只会增加学习成本；这些命令的参数按自由文本直接执行。
+func (m *cliModel) dynamicArgItems(cmd, partial string, limit int) []clitui.SuggestItem {
+	if cmd == "/resume" {
+		return m.sessionCandidates(partial, limit)
+	}
+	return nil
+}
+
+func (m *cliModel) sessionCandidates(partial string, limit int) []clitui.SuggestItem {
+	if m.mgr == nil {
+		return nil
+	}
+	var items []clitui.SuggestItem
+	for _, a := range m.mgr.List() {
+		sn := a.Snapshot()
+		if sn.ID == m.agentID {
+			continue
+		}
+		hint := string(sn.Status) + " · " + shortPath(a.EffectiveWorkDir(m.mgr))
+		items = append(items, clitui.SuggestItem{Name: sn.Name, Hint: hint, Kind: "会话"})
+		items = append(items, clitui.SuggestItem{Name: sn.ID, Hint: hint, Kind: "会话"})
+		if len(items) >= limit {
+			break
+		}
+	}
+	return items
+}
+
+// workspacePathCandidates 给 @ 路径补全提供数据：优先 ripgrep（尊重 .gitignore），
+// 没装 rg 时退回受限目录遍历。结果按工作目录缓存 5 秒，避免每次按键都重扫仓库。
+func (m *cliModel) workspacePathCandidates(_ string, _ int) []clitui.SuggestItem {
+	if strings.TrimSpace(m.cwd) == "" {
+		return nil
+	}
+	if m.pathCacheDir != m.cwd || time.Since(m.pathCacheAt) > 5*time.Second {
+		m.pathCache = listWorkspacePaths(m.cwd)
+		m.pathCacheDir = m.cwd
+		m.pathCacheAt = time.Now()
+	}
+	return m.pathCache
+}
+
+func listWorkspacePaths(cwd string) []clitui.SuggestItem {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rg", "--files")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return walkWorkspacePaths(cwd)
+	}
+	var items []clitui.SuggestItem
+	seenDir := make(map[string]bool)
+	add := func(raw string) {
+		p := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/"), "./")
+		if p == "" {
+			return
+		}
+		if i := strings.LastIndex(p, "/"); i > 0 {
+			dir := p[:i] + "/"
+			if !seenDir[dir] {
+				seenDir[dir] = true
+				items = append(items, clitui.SuggestItem{Name: dir, Kind: "目录"})
+			}
+		}
+		items = append(items, clitui.SuggestItem{Name: p, Kind: "文件"})
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		if len(items) >= 3000 {
+			break
+		}
+		add(ln)
+	}
+	return items
+}
+
+func walkWorkspacePaths(cwd string) []clitui.SuggestItem {
+	var items []clitui.SuggestItem
+	seenDir := make(map[string]bool)
+	skip := map[string]bool{".git": true, "node_modules": true, "dist": true, "build": true, ".idea": true, "test-results": true}
+	_ = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, rerr := filepath.Rel(cwd, path)
+		if rerr != nil || rel == "." {
+			return nil
+		}
+		rel = strings.ReplaceAll(rel, "\\", "/")
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return fs.SkipDir
+			}
+			if strings.Count(rel, "/") < 3 {
+				items = append(items, clitui.SuggestItem{Name: rel + "/", Kind: "目录"})
+			}
+			return nil
+		}
+		if i := strings.LastIndex(rel, "/"); i > 0 {
+			dir := rel[:i] + "/"
+			if !seenDir[dir] {
+				seenDir[dir] = true
+				items = append(items, clitui.SuggestItem{Name: dir, Kind: "目录"})
+			}
+		}
+		items = append(items, clitui.SuggestItem{Name: rel, Kind: "文件"})
+		if len(items) >= 3000 {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return items
+}
+
+// slashSuggestItems 把指令表转成补全项，补全菜单与“未知指令”提示共用同一份数据。
+// 参数签名留在 Args 里供底部“用法”行使用，列表行只显示名字与一句短描述。
+func slashSuggestItems(cmds []slashCmd) []clitui.SuggestItem {
+	items := make([]clitui.SuggestItem, 0, len(cmds))
+	for _, c := range cmds {
+		kind := ""
+		switch c.Group {
+		case "开放技能":
+			kind = "技能"
+		case "外部插件":
+			kind = "插件"
+		}
+		items = append(items, clitui.SuggestItem{
+			Name: c.Name,
+			Args: c.Args,
+			Hint: cleanSlashHint(c.Hint),
+			Kind: kind,
+		})
+	}
+	return items
+}
+
+// findSlashCommand 按名字在指令表里查来源分组，用于区分“不存在的指令”和“存在但没跑起来的技能”。
+func findSlashCommand(cmds []slashCmd, name string) (bool, string) {
+	n := "/" + strings.TrimPrefix(strings.TrimSpace(name), "/")
+	for _, c := range cmds {
+		if c.Name == n {
+			return true, c.Group
+		}
+	}
+	return false, ""
+}
+
+// cleanSlashHint 把技能/插件描述压成适合列表显示的一行：去换行、折叠空白、去掉开头的列表符号。
+func cleanSlashHint(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
+	s = strings.TrimLeft(s, "#-*·• \t")
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func (m *cliModel) cmdPlugins(arg string) string {
@@ -2529,17 +2769,27 @@ func friendlyCLIError(raw string) string {
 	return "错误：" + msg
 }
 
+// slashPickerKinds 登记“空参数时需要交互选择”的指令，新增一款只要在这里加一行。
+// /mode 走的是二级参数补全（三个固定值），不进这里；/model、/resume 的选择器带状态徽标，保留。
+var slashPickerKinds = map[string]string{
+	"/model":  "model",
+	"/resume": "resume",
+}
+
 func (m *cliModel) tryOpenSlashPicker(slashName string) bool {
-	switch slashName {
-	case "/model":
-		return m.openModelPicker()
-	case "/resume":
-		return m.openResumePicker()
-	case "/mode":
-		return m.openModePicker()
-	default:
+	kind, ok := slashPickerKinds[strings.TrimSpace(slashName)]
+	if !ok {
 		return false
 	}
+	switch kind {
+	case "model":
+		return m.openModelPicker()
+	case "resume":
+		return m.openResumePicker()
+	case "mode":
+		return m.openModePicker()
+	}
+	return false
 }
 
 func (m *cliModel) openModelPicker() bool {
