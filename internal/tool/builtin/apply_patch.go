@@ -39,7 +39,9 @@ func (*ApplyPatch) Writes() bool { return true }
 func (*ApplyPatch) Description() string {
 	return "Apply a batch of file changes in one call: add new files, update existing files via a unique " +
 		"context anchor (oldText -> newText), or delete files. The whole batch is validated before anything " +
-		"is written; a missing or ambiguous anchor rejects the batch without modifying files."
+		"is written; a missing or ambiguous anchor rejects the batch without modifying files. " +
+		"An anchor that differs from the file only in line endings, trailing whitespace or one uniform " +
+		"indentation shift still applies when that match is unique; the result names the files where this happened."
 }
 
 func (*ApplyPatch) Schema() json.RawMessage {
@@ -85,6 +87,8 @@ type patchItem struct {
 	Before string
 	After  string
 	Diff   string
+	// Hit 只在 op=update 时有意义：锚点是逐字节命中还是放宽命中。
+	Hit anchorHit
 }
 
 // applyPatchInput 是入参外壳。
@@ -157,19 +161,23 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 				return nil, fmt.Errorf("%s: cannot read: %v", rel, err)
 			}
 			before := string(src)
-			n := strings.Count(before, e.OldText)
-			if n == 0 {
+			hit, miss := locateAnchor(before, e.OldText, e.NewText)
+			switch {
+			case miss == nil:
+			case miss.Count == 0:
 				return nil, fmt.Errorf(
 					"%s: anchor (oldText) not found. Read the file again and copy the exact text, "+
 						"including whitespace and indentation.%s", rel, nearbyExcerpt(before, e.OldText, 5))
-			}
-			if n > 1 {
+			case miss.Tier == tierExact:
 				return nil, fmt.Errorf(
 					"%s: anchor appears %d times; it must be unique. Include more surrounding context to disambiguate.",
-					rel, n)
+					rel, miss.Count)
+			default:
+				return nil, fmt.Errorf("%s: %s", rel, miss.ambiguity("anchor (oldText)"))
 			}
 			item.Before = before
-			item.After = strings.Replace(before, e.OldText, e.NewText, 1)
+			item.After = hit.apply(before)
+			item.Hit = hit
 
 		case patchOpDelete:
 			// 先确认文件在，再校验版本：否则"文件不存在"会被报成一个 stat 错误，
@@ -224,6 +232,9 @@ func (a *ApplyPatch) Preview(ctx context.Context, raw json.RawMessage) (tool.Pre
 	var b strings.Builder
 	for _, it := range items {
 		fmt.Fprintf(&b, "- %s %s\n", opLabel(it.Entry.Op), it.Rel)
+		if note := it.Hit.previewNote(); note != "" {
+			fmt.Fprintf(&b, "  %s\n", note)
+		}
 	}
 	return tool.Preview{
 		Title:  fmt.Sprintf("应用补丁（%d 个文件）", len(items)),
@@ -281,6 +292,14 @@ func (a *ApplyPatch) Execute(ctx context.Context, raw json.RawMessage) tool.Resu
 		rels = append(rels, it.Rel)
 		fmt.Fprintf(&summary, "%s %s (%d → %d bytes)\n",
 			opLabel(it.Entry.Op), it.Rel, len(it.Before), len(it.After))
+		if note := it.Hit.note(); note != "" {
+			fmt.Fprintf(&summary, "  %s\n", note)
+		}
+		if it.Entry.Op != patchOpDelete {
+			if note := goSyntaxNote(it.Rel, it.After); note != "" {
+				summary.WriteString(note + "\n")
+			}
+		}
 	}
 
 	res := tool.OK(strings.TrimRight(summary.String(), "\n"))

@@ -27,6 +27,10 @@ import (
 type RepoMap struct {
 	WorkDir   string
 	ExtraDirs []string
+	// Scope 是会话 id。非空时，本会话写过的文件在地图里排前面。
+	Scope string
+	// Request 是这一轮用户的原话。里面点到的声明名和路径段决定哪些文件排前面。
+	Request string
 }
 
 func (*RepoMap) Name() string          { return "repo_map" }
@@ -34,8 +38,10 @@ func (*RepoMap) Writes() bool          { return false }
 func (*RepoMap) ConcurrencySafe() bool { return true }
 
 func (*RepoMap) Description() string {
-	return "List declarations (functions, types, consts) of Go/TS files under a directory, " +
-		"so you can navigate without reading whole files. Capped at ~200 lines."
+	return "List declarations (functions, types, consts) of Go/TS files under a directory with their line numbers, " +
+		"so you can navigate without reading whole files and pass the line to read_file as offset. " +
+		"Files and declarations named in the current request, or edited earlier in this session, come first. " +
+		"Capped at ~200 lines."
 }
 
 func (*RepoMap) Schema() json.RawMessage {
@@ -55,6 +61,20 @@ const (
 	repoMapMaxSyms      = 12
 	repoMapMaxFileBytes = 512 << 10
 	repoMapDefaultLines = 220
+	// repoMapParseSyms 是每个文件最多解析的声明数。先全解析、排完序再截到
+	// repoMapMaxSyms：点名的声明排在文件靠后的位置时不能被提前截掉。
+	repoMapParseSyms = 400
+	// repoMapMaxAsked 是从用户原话里最多取多少个标识符，防止贴进来的长日志拖慢排序。
+	repoMapMaxAsked = 64
+)
+
+// 排序权重。点名的声明 > 本会话写过 > 路径对得上 > focus 关键词。
+const (
+	repoMapScoreAskedSym  = 6
+	repoMapScoreWritten   = 5
+	repoMapScoreAskedPath = 4
+	repoMapScoreFocusPath = 3
+	repoMapScoreFocusSym  = 2
 )
 
 // repoMapExtraSkip 是在共享 skipDirs 之外、这张地图同样不该扫的目录。
@@ -78,9 +98,11 @@ type repoSymbol struct {
 	kind string // func / type / const / var / class / interface
 	name string
 	doc  string
+	line int  // 声明所在行，1 基
+	hit  bool // 被 focus 或用户原话点到，文件内排前面
 }
 
-// Execute 扫描并渲染。focus 命中越多、修改越近，排得越前。
+// Execute 扫描并渲染。排序依据见 rank：原话点名、本会话写过、focus 命中、修改时间。
 func (r *RepoMap) Execute(ctx context.Context, raw json.RawMessage) tool.Result {
 	var in struct {
 		Path     string `json:"path"`
@@ -122,7 +144,7 @@ func (r *RepoMap) Execute(ctx context.Context, raw json.RawMessage) tool.Result 
 			if lines >= budget {
 				break
 			}
-			line := fmt.Sprintf("  %s %s", s.kind, s.name)
+			line := fmt.Sprintf("  %d: %s %s", s.line, s.kind, s.name)
 			if s.doc != "" {
 				line += "  // " + s.doc
 			}
@@ -149,10 +171,11 @@ func pickRoot(workDir string, extra []string, rel string) (string, error) {
 	return rootsPath(workDir, extra, rel)
 }
 
-// scan 遍历目录、解析符号、按"focus 命中 + 最近修改"排序。
+// scan 遍历目录、解析符号、打分排序。同分时最近修改的在前。
 func (r *RepoMap) scan(root, focus string) []repoFile {
 	var files []repoFile
 	visited := 0
+	asked := askedIdents(r.Request)
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // 无权限的子目录跳过，不让整张地图失败
@@ -183,20 +206,8 @@ func (r *RepoMap) scan(root, focus string) []repoFile {
 		if len(syms) == 0 {
 			return nil
 		}
-		if len(syms) > repoMapMaxSyms {
-			syms = syms[:repoMapMaxSyms]
-		}
 		f := repoFile{rel: rel, mod: info.ModTime(), symbols: syms}
-		if focus != "" {
-			if strings.Contains(strings.ToLower(rel), focus) {
-				f.score += 3
-			}
-			for _, s := range syms {
-				if strings.Contains(strings.ToLower(s.name), focus) || strings.Contains(strings.ToLower(s.doc), focus) {
-					f.score += 2
-				}
-			}
-		}
+		f.rank(focus, asked, wroteInSession(r.Scope, path))
 		files = append(files, f)
 		return nil
 	})
@@ -208,6 +219,97 @@ func (r *RepoMap) scan(root, focus string) []repoFile {
 		return files[i].mod.After(files[j].mod)
 	})
 	return files
+}
+
+// rank 给文件打分，并把被点到的声明提到文件内的前面，再截到每文件上限。
+//
+// 思路来自 Aider 的 repo map：地图不是目录清单，是"和这句话最相关的那部分代码"。
+// 它用引用图排序；这里没有引用图，只用三个不需要索引的信号：
+// 用户原话里出现的标识符、本会话写过的文件、调用方给的 focus 关键词。
+func (f *repoFile) rank(focus string, asked map[string]bool, written bool) {
+	if written {
+		f.score += repoMapScoreWritten
+	}
+	if focus != "" && strings.Contains(strings.ToLower(f.rel), focus) {
+		f.score += repoMapScoreFocusPath
+	}
+	for _, seg := range pathIdents(f.rel) {
+		if asked[seg] {
+			f.score += repoMapScoreAskedPath
+		}
+	}
+	for i := range f.symbols {
+		s := &f.symbols[i]
+		if focus != "" && (strings.Contains(strings.ToLower(s.name), focus) || strings.Contains(strings.ToLower(s.doc), focus)) {
+			f.score += repoMapScoreFocusSym
+			s.hit = true
+		}
+		for _, part := range symbolIdents(s.name) {
+			if asked[part] {
+				f.score += repoMapScoreAskedSym
+				s.hit = true
+				break
+			}
+		}
+	}
+	// 稳定排序：命中的在前，其余保持源码顺序。
+	sort.SliceStable(f.symbols, func(i, j int) bool { return f.symbols[i].hit && !f.symbols[j].hit })
+	if len(f.symbols) > repoMapMaxSyms {
+		f.symbols = f.symbols[:repoMapMaxSyms]
+	}
+}
+
+var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+// genericWords 是原话里不算"点名"的词：英文虚词，以及几乎每个仓库里都到处是的名字。
+// 不过滤的话，一句"这个 error 哪来的"会把所有带 Error() 方法的文件顶到最前面。
+var genericWords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "this": true, "that": true, "from": true,
+	"not": true, "but": true, "are": true, "was": true, "can": true, "why": true, "how": true,
+	"what": true, "when": true, "where": true, "which": true, "should": true, "would": true,
+	"please": true, "does": true, "did": true, "fix": true, "bug": true, "add": true, "use": true,
+	"new": true, "get": true, "set": true, "run": true, "make": true,
+	"file": true, "files": true, "code": true, "line": true, "lines": true, "todo": true,
+	"func": true, "function": true, "method": true, "type": true, "struct": true, "interface": true,
+	"const": true, "var": true, "package": true, "import": true, "return": true,
+	"error": true, "errors": true, "err": true, "string": true, "int": true, "bool": true,
+	"nil": true, "null": true, "true": true, "false": true,
+	"test": true, "tests": true, "main": true, "init": true,
+}
+
+// askedIdents 从用户原话里取出像标识符的词（小写）。中文原话里夹的英文基本就是
+// 函数名、类型名和路径，所以不需要分词，只按标识符形状取。
+func askedIdents(request string) map[string]bool {
+	if strings.TrimSpace(request) == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, m := range identRe.FindAllString(request, -1) {
+		w := strings.ToLower(m)
+		if len(w) < 3 || genericWords[w] {
+			continue
+		}
+		out[w] = true
+		if len(out) >= repoMapMaxAsked {
+			break
+		}
+	}
+	return out
+}
+
+// pathIdents 把相对路径拆成可以和原话比对的段：每层目录名，加上去掉扩展名的文件名。
+func pathIdents(rel string) []string {
+	segs := strings.Split(strings.ToLower(rel), "/")
+	last := len(segs) - 1
+	if i := strings.IndexByte(segs[last], '.'); i > 0 {
+		segs[last] = segs[last][:i]
+	}
+	return segs
+}
+
+// symbolIdents 把 `Server.Handler()` 拆成 server、handler。
+func symbolIdents(name string) []string {
+	return strings.Split(strings.ToLower(strings.TrimSuffix(name, "()")), ".")
 }
 
 func isCodeFile(name string) bool {
@@ -243,6 +345,7 @@ func goSymbols(path string) []repoSymbol {
 		return nil
 	}
 	var out []repoSymbol
+	lineOf := func(p token.Pos) int { return fset.Position(p).Line }
 	docOf := func(cg *ast.CommentGroup) string {
 		if cg == nil {
 			return ""
@@ -263,7 +366,7 @@ func goSymbols(path string) []repoSymbol {
 					name = recv + "." + name
 				}
 			}
-			out = append(out, repoSymbol{kind: "func", name: name + "()", doc: docOf(d.Doc)})
+			out = append(out, repoSymbol{kind: "func", name: name + "()", doc: docOf(d.Doc), line: lineOf(d.Pos())})
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				switch s := spec.(type) {
@@ -275,14 +378,14 @@ func goSymbols(path string) []repoSymbol {
 					case *ast.InterfaceType:
 						kind = "interface"
 					}
-					out = append(out, repoSymbol{kind: kind, name: s.Name.Name, doc: docOf(firstDoc(d.Doc, s.Doc))})
+					out = append(out, repoSymbol{kind: kind, name: s.Name.Name, doc: docOf(firstDoc(d.Doc, s.Doc)), line: lineOf(s.Pos())})
 				case *ast.ValueSpec:
 					kind := "var"
 					if d.Tok == token.CONST {
 						kind = "const"
 					}
 					for _, n := range s.Names {
-						out = append(out, repoSymbol{kind: kind, name: n.Name, doc: docOf(firstDoc(d.Doc, s.Doc))})
+						out = append(out, repoSymbol{kind: kind, name: n.Name, doc: docOf(firstDoc(d.Doc, s.Doc)), line: lineOf(n.Pos())})
 					}
 				}
 			}
@@ -322,7 +425,7 @@ func tsSymbols(path string) []repoSymbol {
 		return nil
 	}
 	var out []repoSymbol
-	for _, line := range strings.Split(string(data), "\n") {
+	for i, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		m := tsDecl.FindStringSubmatch(trimmed)
 		if m == nil {
@@ -332,8 +435,8 @@ func tsSymbols(path string) []repoSymbol {
 		if m[1] == "function" {
 			name += "()"
 		}
-		out = append(out, repoSymbol{kind: m[1], name: name})
-		if len(out) >= repoMapMaxSyms {
+		out = append(out, repoSymbol{kind: m[1], name: name, line: i + 1})
+		if len(out) >= repoMapParseSyms {
 			break
 		}
 	}

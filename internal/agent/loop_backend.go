@@ -164,6 +164,10 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	reg := tool.NewRegistry()
 	reg.ObservDir = m.ObservDir()
 	builtin.RegisterRootsScoped(reg, workDir, a.EffectiveExtraDirs(), a.ID, m.ObservDir())
+	// 地图按这一轮的原话排序：用户点到的函数名、路径排在最前面。
+	// 同名注册会覆盖上面那份不带原话的；工具的名字、说明、参数都不变，
+	// 所以发给模型的工具表（以及它的缓存前缀）不受影响。
+	reg.Register(&builtin.RepoMap{WorkDir: workDir, ExtraDirs: a.EffectiveExtraDirs(), Scope: a.ID, Request: text})
 	// 外部 MCP 工具：只装已经握手成功的那些。还没启动完就等下一轮，
 	// 不让一次 prompt 卡在 uv 安装或服务端超时上。
 	m.MCP().Register(reg)

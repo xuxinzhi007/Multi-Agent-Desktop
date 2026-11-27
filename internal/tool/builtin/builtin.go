@@ -430,7 +430,11 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 		return tool.Fail("cannot write %s: %v", in.Path, err)
 	}
 	rememberWriteScoped(w.Scope, abs)
-	res := tool.OK(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path))
+	content := fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path)
+	if note := goSyntaxNote(displayPath(in.Path), in.Content); note != "" {
+		content += "\n" + note
+	}
+	res := tool.OK(content)
 	res.Meta.Path = displayPath(in.Path)
 	res.Meta.Diff = diff.Unified(displayPath(in.Path), string(before), in.Content, 3)
 	return res
@@ -449,7 +453,9 @@ type EditFile struct {
 func (*EditFile) Name() string { return "edit_file" }
 func (*EditFile) Writes() bool { return true }
 func (*EditFile) Description() string {
-	return "Replace an exact string in a file. oldText must appear exactly once."
+	return "Replace an exact string in a file. oldText must appear exactly once. " +
+		"Copy it from read_file output. If it differs from the file only in line endings, trailing whitespace " +
+		"or one uniform indentation shift, the edit is still applied when that match is unique, and the result says so."
 }
 
 func (*EditFile) Schema() json.RawMessage {
@@ -471,6 +477,8 @@ type editPlan struct {
 	Abs    string
 	Before string
 	After  string
+	// Hit 记下锚点是逐字节命中还是放宽命中，审批卡和工具结果都要说明。
+	Hit anchorHit
 }
 
 // plan 做所有只读校验，算出替换后的全文。
@@ -503,22 +511,26 @@ func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 		return editPlan{}, fmt.Errorf("cannot read %s: %v", in.Path, err)
 	}
 	src := string(data)
-	n := strings.Count(src, in.OldText)
-	if n == 0 {
+	hit, miss := locateAnchor(src, in.OldText, in.NewText)
+	switch {
+	case miss == nil:
+	case miss.Count == 0:
 		return editPlan{}, fmt.Errorf(
 			"oldText not found in %s. Read the file again and copy the exact text, "+
 				"including whitespace and indentation.%s", in.Path, nearbyExcerpt(src, in.OldText, 5))
-	}
-	if n > 1 {
+	case miss.Tier == tierExact:
 		return editPlan{}, fmt.Errorf(
 			"oldText appears %d times in %s; it must be unique. "+
-				"Include more surrounding context to disambiguate.", n, in.Path)
+				"Include more surrounding context to disambiguate.", miss.Count, in.Path)
+	default:
+		return editPlan{}, fmt.Errorf("%s: %s", in.Path, miss.ambiguity("oldText"))
 	}
 	return editPlan{
 		Path:   in.Path,
 		Abs:    abs,
 		Before: src,
-		After:  strings.Replace(src, in.OldText, in.NewText, 1),
+		After:  hit.apply(src),
+		Hit:    hit,
 	}, nil
 }
 
@@ -527,9 +539,13 @@ func (e *EditFile) Preview(ctx context.Context, raw json.RawMessage) (tool.Previ
 	if err != nil {
 		return tool.Preview{}, err
 	}
+	detail := fmt.Sprintf("编辑 %s：%d 字节 → %d 字节", p.Path, len(p.Before), len(p.After))
+	if note := p.Hit.previewNote(); note != "" {
+		detail += "\n" + note
+	}
 	return tool.Preview{
 		Title:  "编辑文件",
-		Detail: fmt.Sprintf("编辑 %s：%d 字节 → %d 字节", p.Path, len(p.Before), len(p.After)),
+		Detail: detail,
 		Diff:   diff.Unified(displayPath(p.Path), p.Before, p.After, 3),
 	}, nil
 }
@@ -543,7 +559,14 @@ func (e *EditFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 		return tool.Fail("cannot write %s: %v", p.Path, err)
 	}
 	rememberWriteScoped(e.Scope, p.Abs)
-	res := tool.OK(fmt.Sprintf("edited %s (%d bytes -> %d bytes)", p.Path, len(p.Before), len(p.After)))
+	content := fmt.Sprintf("edited %s (%d bytes -> %d bytes)", p.Path, len(p.Before), len(p.After))
+	if note := p.Hit.note(); note != "" {
+		content += "\n" + note
+	}
+	if note := goSyntaxNote(displayPath(p.Path), p.After); note != "" {
+		content += "\n" + note
+	}
+	res := tool.OK(content)
 	res.Meta.Path = displayPath(p.Path)
 	res.Meta.Diff = diff.Unified(displayPath(p.Path), p.Before, p.After, 3)
 	return res
@@ -577,7 +600,7 @@ func RegisterRootsScoped(r *tool.Registry, workDir string, extra []string, scope
 	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
 	r.Register(&Verify{WorkDir: workDir, ExtraDirs: extra})
-	r.Register(&RepoMap{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&RepoMap{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
 	r.Register(&Changeset{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WorktreeMerge{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&RestoreObservation{ObservDir: observDir})

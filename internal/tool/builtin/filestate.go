@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -171,6 +172,39 @@ func rememberWriteScoped(scope, abs string) {
 	if v, err := fingerprintFile(abs); err == nil {
 		rememberRead(scope, abs, v.String())
 	}
+	noteWritten(scope, abs)
+}
+
+// writtenFiles 记每个会话写过哪些文件，repo_map 用它把"刚改过的"排到前面。
+//
+// 和 readStates 分开存：读过不等于改过，而读取记录会被后续的 read_file 覆盖。
+// 空作用域不记——那是没有会话的调用方（测试、一次性工具），它们之间不该互相影响排序。
+var writtenFiles = struct {
+	sync.Mutex
+	m map[string]map[string]bool
+}{m: map[string]map[string]bool{}}
+
+func noteWritten(scope, abs string) {
+	if scope == "" {
+		return
+	}
+	writtenFiles.Lock()
+	defer writtenFiles.Unlock()
+	set := writtenFiles.m[scope]
+	if set == nil {
+		set = map[string]bool{}
+		writtenFiles.m[scope] = set
+	}
+	set[filepath.Clean(abs)] = true
+}
+
+func wroteInSession(scope, abs string) bool {
+	if scope == "" {
+		return false
+	}
+	writtenFiles.Lock()
+	defer writtenFiles.Unlock()
+	return writtenFiles.m[scope][filepath.Clean(abs)]
 }
 
 // versionHint 是附在 read_file 输出末尾的一行，让模型能把它带回 ifVersion。
