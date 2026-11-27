@@ -81,6 +81,13 @@ func runtimeEventFromLoop(ev loop.Event) (rt.Event, bool) {
 		if ev.Status != "" {
 			meta["loopToolStatus"] = string(ev.Status)
 		}
+		if ev.Result != nil {
+			// Meta 不回填模型，但 UI 正需要它来回答「改了哪个文件、具体改了什么」。
+			// 以前只带 Output 摘要，写工具已经算好的 Path/Diff 在这里被丢掉了。
+			meta["path"] = ev.Result.Meta.Path
+			meta["diff"] = ev.Result.Meta.Diff
+			meta["truncated"] = fmt.Sprint(ev.Result.Meta.Truncated)
+		}
 		return rt.Event{Kind: rt.KindToolFinished, Tool: t, Meta: meta}, true
 	case "done":
 		return rt.Event{Kind: rt.KindTurnFinished, Stop: &rt.Stop{

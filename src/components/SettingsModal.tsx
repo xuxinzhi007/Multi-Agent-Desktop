@@ -1242,7 +1242,7 @@ export default function SettingsModal(p: Props) {
               </section>
             )}
 
-            {tab === 'appearance' && keepAwakeState !== null && (
+            {tab === 'appearance' && keepAwakeState && (
               <section className="c-settings__card">
                 <div className="c-settings__card-head">
                   <div>

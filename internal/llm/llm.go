@@ -47,6 +47,14 @@ type Chunk struct {
 	ToolPhase  string `json:"toolPhase,omitempty"` // start | end
 	ToolStatus string `json:"toolStatus,omitempty"`
 	Content    string `json:"content,omitempty"`
+	// CallID 把同一次工具调用的 start 和 end 串起来。
+	// 没有它，界面只能按工具名猜配对，会多出一堆「tool / tool」的假记录。
+	CallID string `json:"callId,omitempty"`
+	// Path 是这次工具调用碰到的文件（file_path / path / notebook_path）。
+	// 界面据此判断「这次真的改了哪个文件」，并去取 diff。
+	Path string `json:"path,omitempty"`
+	// Input 是工具入参原文（截断）。详情面板用它展示「到底想做什么」。
+	Input string `json:"input,omitempty"`
 	// Final 是 result 事件里的最终答案。正文没流出来时用它兜底。
 	Final string `json:"final,omitempty"`
 }

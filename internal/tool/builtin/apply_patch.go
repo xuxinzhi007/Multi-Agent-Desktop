@@ -23,6 +23,7 @@ import (
 type ApplyPatch struct {
 	WorkDir   string
 	ExtraDirs []string
+	Scope     string
 }
 
 const (
@@ -145,7 +146,7 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 			if e.OldText == e.NewText {
 				return nil, fmt.Errorf("%s: oldText and newText are identical; nothing to do", rel)
 			}
-			if _, err := writeGuard(abs, e.IfVersion); err != nil {
+			if _, err := writeGuardScoped(a.Scope, abs, e.IfVersion); err != nil {
 				return nil, relGuardError(rel, abs, err)
 			}
 			src, err := os.ReadFile(abs)
@@ -179,7 +180,7 @@ func (a *ApplyPatch) plan(raw json.RawMessage) ([]patchItem, error) {
 				}
 				return nil, fmt.Errorf("%s: cannot stat: %v", rel, statErr)
 			}
-			if _, err := writeGuard(abs, e.IfVersion); err != nil {
+			if _, err := writeGuardScoped(a.Scope, abs, e.IfVersion); err != nil {
 				return nil, relGuardError(rel, abs, err)
 			}
 			src, err := os.ReadFile(abs)
@@ -260,17 +261,17 @@ func (a *ApplyPatch) Execute(ctx context.Context, raw json.RawMessage) tool.Resu
 			if err := os.WriteFile(it.Abs, []byte(it.After), 0o644); err != nil {
 				return tool.Fail("cannot write %s: %v", it.Rel, err)
 			}
-			rememberWrite(it.Abs)
+			rememberWriteScoped(a.Scope, it.Abs)
 		case patchOpUpdate:
 			if err := os.WriteFile(it.Abs, []byte(it.After), 0o644); err != nil {
 				return tool.Fail("cannot write %s: %v", it.Rel, err)
 			}
-			rememberWrite(it.Abs)
+			rememberWriteScoped(a.Scope, it.Abs)
 		case patchOpDelete:
 			if err := os.Remove(it.Abs); err != nil {
 				return tool.Fail("cannot delete %s: %v", it.Rel, err)
 			}
-			ForgetRead(it.Abs)
+			forgetRead(a.Scope, it.Abs)
 		}
 	}
 

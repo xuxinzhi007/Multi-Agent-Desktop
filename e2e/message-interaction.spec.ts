@@ -300,7 +300,7 @@ test('窄窗口下模型选择器让位，发送按钮必须仍可见', async ({
   }
 })
 
-test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器', async ({ page }) => {
+test('agent 消息是窄栏 + 带边框卡片正文，代码锚点和产物能打开检查器', async ({ page }) => {
   await mockRuntime(page, { agents: AGENTS, channels: [], notes: [] })
   await page.goto('/')
   await page.waitForSelector('.c-shell')
@@ -336,6 +336,10 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
   const agentBorder = await agent.evaluate((el) => getComputedStyle(el).borderTopWidth)
   expect(agentBorder).toBe('0px')
   await expect(agent).toContainText('前端')
+  // 行本身无边框，正文必须落在带边框的消息卡片里（三视图统一口径）
+  const agentCard = agent.locator('.c-msg-card').first()
+  await expect(agentCard).toBeVisible()
+  expect(await agentCard.evaluate((el) => getComputedStyle(el).borderTopWidth)).toBe('1px')
 
   const user = page.locator('.c-user-bubble')
   const userBg = await user.evaluate((el) => getComputedStyle(el).backgroundColor)
@@ -361,7 +365,7 @@ test('agent 消息是无边框窄栏，代码锚点和产物能打开检查器',
 
   await expect(page.getByText('loop.go:120-145')).toBeVisible()
   await expect(page.getByRole('button', { name: 'loop.go:120-145' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /改动/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '改动', exact: true })).toBeVisible()
 
   await page.locator('.c-artifact', { hasText: '知识库' }).click()
   await expect(page.getByRole('button', { name: '知识', exact: true })).toBeVisible()

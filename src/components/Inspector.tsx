@@ -1,15 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { isWriteTool, toolLabel as cnLabel } from '../lib/tool-names'
 
 export type ToolCall = {
   /** 前端列表行 key。后端 agent.tool 的 id 是会话 id，不能直接当列表 key。 */
   key: string
   id: string
+  callId?: string
   tool: string
   target: string
   status: 'running' | 'ok' | 'error' | 'waiting' | 'cancelled'
   detail?: string
+  input?: string
   /** 有界工具输出，仅用于选中后的证据定位，不发额外文件请求。 */
   output?: string
+  path?: string
+  diff?: string
+  truncated?: boolean
+  exitCode?: number
+  durationMs?: number
   at: number
 }
 
@@ -21,7 +29,30 @@ const TOOL_META = {
   cancelled: { icon: '⊘', color: 'var(--text-tertiary)', label: '已打断' },
 } as const
 
-type Tab = 'tools' | 'knowledge' | 'caps'
+function toolTitle(name: string) {
+  const cn = cnLabel(name)
+  return cn === name ? name : `${cn} · ${name}`
+}
+
+function toolSummary(t: ToolCall) {
+  if (t.path) return t.path
+  const raw = (t.target || '').trim()
+  if (!raw) return ''
+  if (raw.startsWith('{')) {
+    try {
+      const v = JSON.parse(raw) as Record<string, unknown>
+      for (const k of ['file_path', 'path', 'command', 'cmd', 'pattern', 'query']) {
+        const s = v[k]
+        if (typeof s === 'string' && s.trim()) return s
+      }
+    } catch {
+      /* 截断过的 JSON 解析不了，退回原文 */
+    }
+  }
+  return raw
+}
+
+type Tab = 'tools' | 'changes' | 'knowledge' | 'caps'
 type ToolGroup = 'all' | 'read' | 'edit' | 'command' | 'collab' | 'other'
 type StatusFilter = 'all' | ToolCall['status']
 
@@ -57,6 +88,12 @@ export default function Inspector({
   knowledge?: { count: number; node: React.ReactNode }
   caps?: { node: React.ReactNode }
 }) {
+  const visible = tools.filter((t) => t.tool !== 'tool' || !!t.path || !!t.input || t.status === 'error')
+  const changes = visible.filter((t) => isWriteTool(t.tool) && (t.path || t.diff))
+  const changeCount = new Set(
+    changes.flatMap((t) => (t.path || '未标注路径').split(',').map((p) => p.trim()).filter(Boolean)),
+  ).size
+
   return (
     <aside
       className="c-col c-inspector slide-in"
@@ -86,7 +123,8 @@ export default function Inspector({
       </div>
 
       <div className="c-inspector__tabs">
-        <TabBtn label="工具" count={tools.length} active={tab === 'tools'} onClick={() => onTab('tools')} />
+        <TabBtn label="工具" count={visible.length} active={tab === 'tools'} onClick={() => onTab('tools')} />
+        <TabBtn label="改动" count={changeCount} active={tab === 'changes'} onClick={() => onTab('changes')} />
         {knowledge && (
           <TabBtn label="知识" count={knowledge.count} active={tab === 'knowledge'} onClick={() => onTab('knowledge')} />
         )}
@@ -94,7 +132,8 @@ export default function Inspector({
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-        {tab === 'tools' && <ToolList tools={tools} />}
+        {tab === 'tools' && <ToolList tools={visible} />}
+        {tab === 'changes' && <ChangeList tools={changes} />}
         {tab === 'knowledge' && knowledge && knowledge.node}
         {tab === 'caps' && caps && caps.node}
       </div>
@@ -105,6 +144,8 @@ export default function Inspector({
 function TabBtn({ label, count, active, onClick }: { label: string; count: number | string; active: boolean; onClick: () => void }) {
   return (
     <button
+      data-tab-active={active ? 'true' : 'false'}
+      aria-pressed={active}
       onClick={onClick}
       style={{
         padding: '7px 11px',
@@ -258,7 +299,8 @@ function ToolCard({
   onSelect: () => void
 }) {
   const meta = TOOL_META[t.status]
-  const fileRef = fileRefOf(t.target)
+  const summary = toolSummary(t)
+  const fileRef = fileRefOf(summary || t.target)
   const cancelled = t.status === 'cancelled'
   return (
     <div
@@ -274,14 +316,21 @@ function ToolCard({
       <button type="button" className="c-tool-card__head" aria-pressed={selected} onClick={onSelect}>
         <span className="c-tool-card__seq mono">#{String(sequence).padStart(2, '0')}</span>
         <span style={{ color: meta.color, flexShrink: 0 }}>{meta.icon}</span>
-        <span className="mono c-tool-card__name">{t.tool}</span>
+        <span className="mono c-tool-card__name">{toolTitle(t.tool)}</span>
         <span className="c-tool-card__status">{meta.label}</span>
       </button>
-      <div className="mono c-tool-card__target" title={t.target}>{t.target || '—'}</div>
+      <div className="mono c-tool-card__target" title={summary}>{summary || '—'}</div>
       {fileRef && (
         <button type="button" className="c-tool-card__file mono" onClick={onSelect} title={`定位第 ${fileRef.line} 行的工具结果证据`}>
           {fileRef.label}
         </button>
+      )}
+      {(t.exitCode !== undefined || t.durationMs !== undefined || t.truncated) && (
+        <div className="c-tool-card__detail">
+          {t.exitCode !== undefined && `exit ${t.exitCode}`}
+          {t.durationMs !== undefined && ` · ${t.durationMs}ms`}
+          {t.truncated && ' · 展示已截断'}
+        </div>
       )}
       {t.detail && !(selected && t.output) && <div className="c-tool-card__detail">{t.detail}</div>}
       {selected && (t.output || t.detail) && (
@@ -289,6 +338,82 @@ function ToolCard({
           {t.output || t.detail}
         </pre>
       )}
+      {selected && t.diff && <DetailBlock title="文件 diff" text={t.diff} />}
+    </div>
+  )
+}
+
+function DetailBlock({ title, text }: { title: string; text: string }) {
+  return (
+    <div style={{ marginTop: 7 }}>
+      <div style={{ marginBottom: 3, fontSize: 'var(--text-xs)', color: 'var(--text-disabled)' }}>{title}</div>
+      <pre
+        className="mono"
+        style={{
+          margin: 0,
+          padding: 8,
+          maxHeight: 260,
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 'var(--radius-md)',
+          background: 'var(--bg-inset)',
+          color: 'var(--text-secondary)',
+          fontSize: 'var(--text-xs)',
+          lineHeight: 1.55,
+        }}
+      >
+        {text}
+      </pre>
+    </div>
+  )
+}
+
+function ChangeList({ tools }: { tools: ToolCall[] }) {
+  if (tools.length === 0) {
+    return (
+      <div className="c-empty">
+        还没有可见的文件改动
+        <br />
+        <span style={{ fontSize: 'var(--text-xs)', marginTop: 6, display: 'inline-block' }}>
+          文件工具成功落盘后，路径和 diff 会出现在这里
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div style={{ padding: 'var(--space-2)' }}>
+      <div style={{ padding: '4px 4px 10px', color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)', lineHeight: 1.6 }}>
+        按工具完成顺序记录。终端命令造成的改动不在此列表中，可在项目里用 git diff 复核。
+      </div>
+      {tools.map((t) => (
+        <section
+          key={t.key}
+          data-file-change={t.path || 'unknown'}
+          style={{
+            marginBottom: 'var(--space-2)',
+            padding: '9px 10px',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--bg-surface)',
+          }}
+        >
+          <div className="mono" style={{ color: 'var(--accent-bright)', fontSize: 'var(--text-xs)', overflowWrap: 'anywhere' }}>
+            {t.path || '未标注路径'}
+          </div>
+          <div style={{ marginTop: 3, color: 'var(--text-disabled)', fontSize: 'var(--text-xs)' }}>
+            {toolTitle(t.tool)} · {t.status === 'ok' ? '已落盘' : t.status === 'error' ? '失败' : t.status}
+          </div>
+          {t.diff ? (
+            <DetailBlock title="统一 diff" text={t.diff} />
+          ) : (
+            <div style={{ marginTop: 7, color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>
+              这个运行时只报告了文件路径，没有提供 diff。
+            </div>
+          )}
+        </section>
+      ))}
     </div>
   )
 }

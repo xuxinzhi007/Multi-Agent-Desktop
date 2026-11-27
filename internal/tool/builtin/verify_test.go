@@ -124,7 +124,9 @@ func TestVerifyTimeout(t *testing.T) {
 
 	var script string
 	if runtime.GOOS == "windows" {
-		script = "timeout /t 3 /nobreak"
+		// timeout 在带重定向的自动化终端里会直接报 Input redirection is not supported；
+		// ping 的每次回包间隔提供可取消的真实等待，适合验证 runStep 的超时分支。
+		script = "ping 127.0.0.1 -n 4 >nul"
 	} else {
 		script = "sleep 3"
 	}

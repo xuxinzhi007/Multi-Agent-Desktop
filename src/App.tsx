@@ -5,7 +5,8 @@ import ChannelView from './components/ChannelView'
 import FeishuRoomView from './components/FeishuRoomView'
 import FleetView from './components/FleetView'
 import AmbientBackground from './components/AmbientBackground'
-import Inspector, { type InspectorTab } from './components/Inspector'
+import Inspector, { type InspectorTab, type ToolCall } from './components/Inspector'
+import { isWriteTool } from './lib/tool-names'
 import ApprovalModal from './components/ApprovalModal'
 import KnowledgePanel from './components/KnowledgePanel'
 import SettingsModal from './components/SettingsModal'
@@ -27,6 +28,24 @@ import type { AcpForm, RuntimeKind } from './lib/runtime'
 import { toastError } from './components/Toast'
 
 type ActiveRef = { kind: 'agent' | 'channel' | 'feishu'; id: string } | null
+
+/**
+ * changedFiles 汇总某个会话本轮写过的文件。
+ *
+ * 这里不能复用传给思考链的那一小截 steps（只留最近 8 条）：
+ * 一轮里改了 10 个文件时，最早的改动会悄悄从清单里消失。
+ * 也只收真正写盘的工具——Read / Glob 的 path 是搜索位置，不是改动。
+ */
+function changedFiles(tools: ToolCall[], id?: string) {
+  const map = new Map<string, { path: string; diff?: string }>()
+  if (!id) return []
+  for (const t of tools) {
+    if (t.id !== id || !t.path || !isWriteTool(t.tool)) continue
+    const prev = map.get(t.path)
+    map.set(t.path, { path: t.path, diff: t.diff ?? prev?.diff })
+  }
+  return [...map.values()]
+}
 
 export default function App() {
   const s = useBackend()
@@ -254,6 +273,9 @@ export default function App() {
           channel={activeChannel}
           agents={s.agents}
           streaming={s.channelStreaming}
+          trail={s.tools}
+          pace={s.pace}
+          reasoning={s.reasoning}
           onSend={async (text, mentions, images) => {
             // 同对象抢占：新消息再 @ 正在本群输出的人 → 先停旧回合再投新指令；
             // 异对象并行：空闲成员不受影响。精确只断群回合需后端，见交接单。
@@ -343,6 +365,11 @@ export default function App() {
           }}
           inspectorOpen={inspectorOpen}
           onToggleInspector={() => setInspectorOpen((v) => !v)}
+          onOpenChanges={() => {
+            setTab('changes')
+            setInspectorOpen(true)
+          }}
+          changes={changedFiles(s.tools, activeAgent?.id)}
           onQuickCreate={async (name, role) => {
             const created = await s.send<Agent | null>('agent.create', { name, role })
             if (created) setActive({ kind: 'agent', id: created.id })

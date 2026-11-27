@@ -198,7 +198,11 @@ func TestRuntimeEventMappingToOldEvents(t *testing.T) {
 		rt.Event{Kind: rt.KindTurnFinished, Stop: &rt.Stop{Reason: rt.StopEndTurn, FinalText: "最终回复"}},
 	)
 
-	consumeRuntimeEvents(m, a, sess, "", context.Background())
+	consumed := consumeRuntimeEvents(m, a, sess, "", context.Background())
+
+	if consumed.reasoning != "在想" {
+		t.Errorf("最终思考 = %q, want %q", consumed.reasoning, "在想")
+	}
 
 	if d := collector.named("agent.delta"); len(d) != 1 || d[0].payload["delta"] != "你好" {
 		t.Errorf("agent.delta = %+v", collector.snapshot())
@@ -217,10 +221,11 @@ func TestRuntimeEventMappingToOldEvents(t *testing.T) {
 			end = e
 		}
 	}
-	if start.payload["tool"] != "read_file" || start.payload["content"] != "读文件" {
+	if start.payload["tool"] != "read_file" || start.payload["content"] != "读文件" || start.payload["callId"] != "c1" {
 		t.Errorf("工具开始事件 = %+v", start.payload)
 	}
-	if end.payload["status"] != "ok" || end.payload["content"] != "文件内容" {
+	if end.payload["status"] != "ok" || end.payload["content"] != "文件内容" ||
+		end.payload["output"] != "文件内容" || end.payload["callId"] != "c1" {
 		t.Errorf("工具结束事件 = %+v", end.payload)
 	}
 
@@ -232,7 +237,45 @@ func TestRuntimeEventMappingToOldEvents(t *testing.T) {
 	}
 }
 
-// ③ 选了 ACP 但没填命令：中文可读错误，运行态记 error，不崩溃。
+// 写工具结果必须带着路径与 diff 到 UI；400 字摘要只用于标题，不能替代完整输出。
+func TestRuntimeToolEventKeepsOutputAndFileDiff(t *testing.T) {
+	m, collector := newCollectingManager()
+	a := m.Create("a1", "甲", "后端")
+	longOutput := strings.Repeat("结果", 7000) + "结尾"
+	sess := newFakeSession(
+		rt.Event{Kind: rt.KindToolFinished, Tool: &rt.Tool{
+			ID: "write-1", Name: "edit_file", Status: rt.ToolCompleted,
+			Input: []byte(`{"path":"a.go"}`), Output: longOutput,
+		}, Meta: map[string]string{"path": "a.go", "diff": "@@ -1 +1 @@\n-old\n+new"}},
+		rt.Event{Kind: rt.KindTurnFinished, Stop: &rt.Stop{Reason: rt.StopEndTurn}},
+	)
+	consumeRuntimeEvents(m, a, sess, "", context.Background())
+
+	events := collector.named("agent.tool")
+	if len(events) != 1 {
+		t.Fatalf("工具事件数 = %d", len(events))
+	}
+	p := events[0].payload
+	if p["path"] != "a.go" || p["diff"] != "@@ -1 +1 @@\n-old\n+new" {
+		t.Fatalf("文件改动丢失：%+v", p)
+	}
+	if p["output"] != strings.Repeat("结果", 6000)+"…" || p["truncated"] != true {
+		t.Fatalf("完整输出没有按约定截断：len=%v truncated=%v", len(p["output"].(string)), p["truncated"])
+	}
+	if p["content"] != strings.Repeat("结果", 200)+"…" {
+		t.Fatalf("摘要长度或 UTF-8 截断不正确：%q", p["content"])
+	}
+}
+
+func TestEventTextDoesNotSplitUTF8(t *testing.T) {
+	if got := eventText("甲乙丙", 2); got != "甲乙…" {
+		t.Fatalf("eventText = %q", got)
+	}
+	if got := eventText("甲乙", 2); got != "甲乙" {
+		t.Fatalf("恰好到上限不应截断：%q", got)
+	}
+}
+
 func TestACPUnconfiguredCommand(t *testing.T) {
 	m, collector := newCollectingManager()
 	a := m.Create("a1", "甲", "后端")

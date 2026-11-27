@@ -259,13 +259,15 @@ type ReadFile struct {
 	WorkDir string
 	// ExtraDirs 是主根之外声明的工作区根。
 	ExtraDirs []string
+	// Scope 是文件读取版本所属的 Agent；空值保留无会话作用域的兼容行为。
+	Scope string
 }
 
 func (*ReadFile) Name() string        { return "read_file" }
 func (*ReadFile) Writes() bool        { return false }
 func (*ReadFile) Description() string { return "Read a text file. Returns content with line numbers." }
 
-// ConcurrencySafe 显式声明：只读文件、不持有共享可变状态，可在同一轮并发执行。
+// ConcurrencySafe 显式声明：文件本身只读，版本表由互斥锁保护，可在同一轮并发执行。
 func (*ReadFile) ConcurrencySafe() bool { return true }
 
 func (*ReadFile) Schema() json.RawMessage {
@@ -332,7 +334,7 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 		fmt.Fprintf(&sb, "... (%d more lines)\n", len(lines)-end)
 	}
 	// 版本随内容一起回给模型：它必须有机会把 ifVersion 带回来。
-	return tool.OK(sb.String() + versionHint(abs))
+	return tool.OK(sb.String() + versionHintScoped(r.Scope, abs))
 }
 
 // WriteFile 写入整个文件。
@@ -342,6 +344,7 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 type WriteFile struct {
 	WorkDir   string
 	ExtraDirs []string
+	Scope     string
 }
 
 func (*WriteFile) Name() string { return "write_file" }
@@ -407,14 +410,14 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 	before, _ := os.ReadFile(abs)
 	// 已存在的文件才校验版本；新建文件没有"旧版本"可比，直接放行。
 	if _, statErr := os.Stat(abs); statErr == nil {
-		if _, err := writeGuard(abs, in.IfVersion); err != nil {
+		if _, err := writeGuardScoped(w.Scope, abs, in.IfVersion); err != nil {
 			return tool.Fail("%v", err)
 		}
 	}
 	if err := os.WriteFile(abs, []byte(in.Content), 0o644); err != nil {
 		return tool.Fail("cannot write %s: %v", in.Path, err)
 	}
-	rememberWrite(abs)
+	rememberWriteScoped(w.Scope, abs)
 	res := tool.OK(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path))
 	res.Meta.Path = displayPath(in.Path)
 	res.Meta.Diff = diff.Unified(displayPath(in.Path), string(before), in.Content, 3)
@@ -428,6 +431,7 @@ func (w *WriteFile) Execute(ctx context.Context, raw json.RawMessage) tool.Resul
 type EditFile struct {
 	WorkDir   string
 	ExtraDirs []string
+	Scope     string
 }
 
 func (*EditFile) Name() string { return "edit_file" }
@@ -479,7 +483,7 @@ func (e *EditFile) plan(raw json.RawMessage) (editPlan, error) {
 	if err != nil {
 		return editPlan{}, err
 	}
-	if _, err := writeGuard(abs, in.IfVersion); err != nil {
+	if _, err := writeGuardScoped(e.Scope, abs, in.IfVersion); err != nil {
 		return editPlan{}, relGuardError(in.Path, abs, err)
 	}
 	data, err := os.ReadFile(abs)
@@ -526,7 +530,7 @@ func (e *EditFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 	if err := os.WriteFile(p.Abs, []byte(p.After), 0o644); err != nil {
 		return tool.Fail("cannot write %s: %v", p.Path, err)
 	}
-	rememberWrite(p.Abs)
+	rememberWriteScoped(e.Scope, p.Abs)
 	res := tool.OK(fmt.Sprintf("edited %s (%d bytes -> %d bytes)", p.Path, len(p.Before), len(p.After)))
 	res.Meta.Path = displayPath(p.Path)
 	res.Meta.Diff = diff.Unified(displayPath(p.Path), p.Before, p.After, 3)
@@ -545,14 +549,21 @@ func Register(r *tool.Registry, workDir string) {
 
 // RegisterRoots 装文件、搜索与 shell 工具。extra 是主根之外声明的工作区根：
 // 文件工具与跨根检索覆盖整组根；bash 默认在主根跑，可用 cwd 切到某个已声明根内。
+// 无会话调用方走这里，作用域为空。
 func RegisterRoots(r *tool.Registry, workDir string, extra []string, observDir string) {
-	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra})
-	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra})
-	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra})
+	RegisterRootsScoped(r, workDir, extra, "", observDir)
+}
+
+// RegisterRootsScoped 与 RegisterRoots 相同，但把 read → write 的版本状态放进
+// 指定 Agent 的作用域，避免一个会话的读写替另一个会话刷新过期检查。
+func RegisterRootsScoped(r *tool.Registry, workDir string, extra []string, scope, observDir string) {
+	r.Register(&ReadFile{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
+	r.Register(&WriteFile{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
+	r.Register(&EditFile{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
 	r.Register(&Bash{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Grep{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Glob{WorkDir: workDir, ExtraDirs: extra})
-	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra})
+	r.Register(&ApplyPatch{WorkDir: workDir, ExtraDirs: extra, Scope: scope})
 	r.Register(&Verify{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&RepoMap{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&Changeset{WorkDir: workDir, ExtraDirs: extra})

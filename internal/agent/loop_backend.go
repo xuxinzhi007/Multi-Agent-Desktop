@@ -163,7 +163,7 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 
 	reg := tool.NewRegistry()
 	reg.ObservDir = m.ObservDir()
-	builtin.RegisterRoots(reg, workDir, a.EffectiveExtraDirs(), m.ObservDir())
+	builtin.RegisterRootsScoped(reg, workDir, a.EffectiveExtraDirs(), a.ID, m.ObservDir())
 	// 外部 MCP 工具：只装已经握手成功的那些。还没启动完就等下一轮，
 	// 不让一次 prompt 卡在 uv 安装或服务端超时上。
 	m.MCP().Register(reg)

@@ -41,6 +41,7 @@ func consumeRuntimeEvents(m *Manager, a *Agent, sess rt.Session, channelID strin
 			if ev.Text == "" {
 				continue
 			}
+			c.reasoning += ev.Text
 			m.emit("agent.reasoning", map[string]any{"id": a.ID, "reasoning": ev.Text})
 		case rt.KindToolStarted:
 			if ev.Tool == nil {
@@ -54,7 +55,8 @@ func consumeRuntimeEvents(m *Manager, a *Agent, sess rt.Session, channelID strin
 			a.LastTool = label
 			a.mu.Unlock()
 			m.emit("agent.tool", map[string]any{
-				"id": a.ID, "tool": ev.Tool.Name, "phase": "start", "content": label,
+				"id": a.ID, "callId": ev.Tool.ID, "tool": ev.Tool.Name, "phase": "start",
+				"content": label, "input": eventText(string(ev.Tool.Input), 12000),
 			})
 		case rt.KindToolFinished:
 			if ev.Tool == nil {
@@ -64,13 +66,37 @@ func consumeRuntimeEvents(m *Manager, a *Agent, sess rt.Session, channelID strin
 			a.mu.Lock()
 			a.Chars += len(t.Output)
 			a.mu.Unlock()
-			m.emit("agent.tool", map[string]any{
-				"id":      a.ID,
-				"tool":    t.Name,
-				"phase":   "end",
-				"status":  runtimeToolStatusUI(t, ev.Meta),
-				"content": truncate(t.Output, 400),
-			})
+			output, outputCut := eventTextTruncated(t.Output, 12000)
+			diff, diffCut := eventTextTruncated(ev.Meta["diff"], 40000)
+			path := ev.Meta["path"]
+			if path == "" && len(t.Locations) > 0 {
+				paths := make([]string, 0, len(t.Locations))
+				for _, loc := range t.Locations {
+					if loc.Path != "" {
+						paths = append(paths, loc.Path)
+					}
+				}
+				path = strings.Join(paths, ", ")
+			}
+			status := runtimeToolStatusUI(t, ev.Meta)
+			payload := map[string]any{
+				"id":         a.ID,
+				"callId":     t.ID,
+				"tool":       t.Name,
+				"phase":      "end",
+				"status":     status,
+				"content":    eventText(t.Output, 400),
+				"output":     output,
+				"input":      eventText(string(t.Input), 12000),
+				"path":       path,
+				"diff":       diff,
+				"truncated":  outputCut || diffCut || status == "truncated" || ev.Meta["truncated"] == "true",
+				"durationMs": t.DurationMS,
+			}
+			if t.Name == "bash" || t.Name == "verify" {
+				payload["exitCode"] = t.ExitCode
+			}
+			m.emit("agent.tool", payload)
 			auditRuntimeTool(m, a, ev)
 		case rt.KindPermission:
 			handleRuntimePermission(m, a, sess, runCtx, ev.Permission)
@@ -101,6 +127,28 @@ type runtimeConsume struct {
 	stop      *rt.Stop
 	finalText string
 	errText   string
+	reasoning string
+}
+
+// eventText 限制单条事件体积，避免一次超大工具结果拖垮桌面桥。
+// 按 rune 截断，中文摘要不会在 UTF-8 字节中间被切开。
+func eventText(s string, limit int) string {
+	text, _ := eventTextTruncated(s, limit)
+	return text
+}
+
+func eventTextTruncated(s string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", s != ""
+	}
+	count := 0
+	for i := range s {
+		if count == limit {
+			return s[:i] + "…", true
+		}
+		count++
+	}
+	return s, false
 }
 
 // runtimeToolStatusUI 把协议工具状态翻成前端工具结束卡片的旧状态串。
@@ -148,7 +196,10 @@ func auditRuntimeTool(m *Manager, a *Agent, ev rt.Event) {
 	res := &tool.Result{
 		Status:  runtimeToolStatusForAudit(t, ev.Meta),
 		Content: t.Output,
-		Meta:    tool.Meta{ExitCode: t.ExitCode, DurationMS: int(t.DurationMS)},
+		Meta: tool.Meta{
+			ExitCode: t.ExitCode, DurationMS: int(t.DurationMS),
+			Path: ev.Meta["path"], Diff: ev.Meta["diff"],
+		},
 	}
 	auditToolCall(m, a, call, res)
 }
@@ -400,7 +451,10 @@ func (a *Agent) runACPSession(m *Manager, runCtx context.Context, sess rt.Sessio
 		a.setRuntimeState(m, "idle", "")
 		final := strings.TrimSpace(stop.FinalText)
 		if channelID == "" && final != "" {
-			msg := llm.Message{Role: "assistant", Content: stop.FinalText, Timestamp: time.Now().Unix()}
+			msg := llm.Message{
+				Role: "assistant", Content: stop.FinalText,
+				Reasoning: consumed.reasoning, Timestamp: time.Now().Unix(),
+			}
 			a.mu.Lock()
 			a.Messages = append(a.Messages, msg)
 			a.mu.Unlock()

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import MentionInput, { type MentionInputHandle } from './MentionInput'
 import type { MentionTarget } from './MentionText'
 import Modal from './Modal'
@@ -10,12 +10,22 @@ import { bodyOf } from '../lib/message'
 import { previewMode } from '../lib/preview-runtime'
 import { ImageStrip, readImageFiles, type DraftImage } from './ImageDraft'
 import { MessageRow } from './MessageRow'
+import { Thinking, type Pace, type ThinkStep } from './ThinkRail'
+
+/** 频道里每个成员最近的工具步骤：与单聊共用同一套思考链渲染。 */
+type TrailStep = ThinkStep & { id: string }
 
 type Props = {
   channel: Channel | null
   agents: Agent[]
   /** 各 agent 的流式增量，key 是 agent ID */
   streaming?: Record<string, string>
+  /** 各 agent 最近的工具步骤（含 agentId），用来显示和单聊一致的思考链 */
+  trail?: TrailStep[]
+  /** 各 agent 这一轮请求的等待计时 */
+  pace?: Record<string, Pace>
+  /** 各 agent 尚未落成消息的思考文本 */
+  reasoning?: Record<string, string>
   /** text 已含 @名字；mentions 是结构化的被点名成员名列表 */
   onSend: (text: string, mentions: string[], images?: { mime: string; data: string }[]) => Promise<void> | void
   onSetSpeaker?: (agentId: string) => void
@@ -33,7 +43,7 @@ type Props = {
  * ChannelView 是「群聊」视图：一个频道里的消息对所有成员广播。
  * 与 AgentView 的区别是消息带发言人身份，且成员都是 agent。
  */
-export default function ChannelView({ channel, agents, streaming, onSend, onSetSpeaker, onDelete, allChannels, onOpenAgent, onOpenChannel, connected = true, onStopAgent }: Props) {
+export default function ChannelView({ channel, agents, streaming, trail, pace, reasoning, onSend, onSetSpeaker, onDelete, allChannels, onOpenAgent, onOpenChannel, connected = true, onStopAgent }: Props) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<DraftImage[]>([])
   const [imageNote, setImageNote] = useState('')
@@ -356,19 +366,35 @@ export default function ChannelView({ channel, agents, streaming, onSend, onSetS
           )
         })}
 
-        {/* 流式输出：正在生成回复的成员；≥3 并发时限高折叠 */}
+        {/* 流式输出：与落定消息同一套 MessageRow（live 走节流 Markdown），≥3 并发时限高折叠 */}
         {Object.entries(streaming ?? {})
           .filter(([id, text]) => text && (channel.members ?? []).includes(id))
-          .map(([id, text]) => (
-            <StreamCard
-              key={`streaming-${id}`}
-              agent={memberById(id)}
-              id={id}
-              text={text}
-              clamp={burst}
-              onStop={onStopAgent}
-            />
-          ))}
+          .map(([id, text]) => {
+            const a = memberById(id)
+            const body = bodyOf(text)
+            const long = body.length > 180 || body.split('\n').length > 6
+            const steps = (trail ?? []).filter((t) => t.id === id).slice(-8)
+            const p = pace?.[id]
+            const r = reasoning?.[id]
+            // 思考链和单聊共用 ThinkRail：同一个 agent 在两个视图里说同一句话，
+            // 不该一个显示工具步骤、一个只显示「正在思考中」。
+            const showRail = steps.length > 0 || !!p || !!r
+            return (
+              <Fragment key={`streaming-${id}`}>
+                {showRail && <Thinking steps={steps} pace={p} reasoning={r} />}
+                <MessageRow
+                  side="agent"
+                  name={a?.name ?? id}
+                  color={a?.color ?? 'var(--text-tertiary)'}
+                  text={body}
+                  live
+                  clamp={burst && long}
+                  onStop={onStopAgent ? () => onStopAgent(id) : undefined}
+                  tableScroll
+                />
+              </Fragment>
+            )
+          })}
 
         {/* 接入了但还没开口：送达 ≠ 已回复，把状态摆出来，别像已读不回 */}
         {pending.map((a) => (
@@ -776,93 +802,6 @@ function DeliveryRow({ msg, agents, total }: { msg: ChannelMessage; agents: Agen
           ))}
         </div>
       )}
-    </div>
-  )
-}
-
-/** 流式回复卡片：≥3 人并发时限高折叠，防止瀑布流淹没主时间轴。 */
-function StreamCard({
-  agent,
-  id,
-  text,
-  clamp,
-  onStop,
-}: {
-  agent?: Agent
-  id: string
-  text: string
-  clamp?: boolean
-  onStop?: (id: string) => void
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const body = bodyOf(text)
-  const long = body.length > 180 || body.split('\n').length > 6
-  const clamped = clamp && long && !expanded
-
-  return (
-    <div style={{ display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
-      <span
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 'var(--radius-sm)',
-          background: agent?.color ?? 'var(--text-disabled)',
-          color: 'var(--bg-base)',
-          display: 'grid',
-          placeItems: 'center',
-          fontSize: 'var(--text-xs)',
-          fontWeight: 700,
-          flexShrink: 0,
-          marginTop: 1,
-        }}
-      >
-        {(agent?.name ?? id).slice(0, 1).toUpperCase()}
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            marginBottom: 3,
-            fontSize: 'var(--text-xs)',
-            fontWeight: 600,
-            color: agent?.color ?? 'var(--text-tertiary)',
-          }}
-        >
-          {agent?.name ?? id}
-          <span className="blink" style={{ color: 'var(--warning)', fontSize: 'var(--text-xs)' }}>
-            ●
-          </span>
-          {onStop && (
-            <button
-              className="c-btn c-btn--danger c-btn--sm"
-              style={{ marginLeft: 'auto' }}
-              onClick={() => onStop(id)}
-            >
-              停止
-            </button>
-          )}
-        </div>
-        <div
-          style={{
-            fontSize: 'var(--text-md)',
-            lineHeight: 1.7,
-            wordBreak: 'break-word',
-            color: 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap',
-            maxHeight: clamped ? '10.2em' : undefined,
-            overflow: clamped ? 'hidden' : undefined,
-          }}
-        >
-          {body}
-        </div>
-        {clamp && long && (
-          <button className="c-btn c-btn--ghost c-btn--sm" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '收起' : '展开全文'}
-          </button>
-        )}
-      </div>
     </div>
   )
 }
