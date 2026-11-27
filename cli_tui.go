@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/clitui"
+	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/plugin"
 )
 
 var writeClipboard = clipboard.WriteAll
@@ -45,10 +48,13 @@ func cliSlashCommands() []slashCmd {
 		{Name: "/resume", Args: "[名字|ID]", Hint: "列出或切换到已有会话"},
 		{Name: "/session", Hint: "查看当前会话、模型与工作区根"},
 		{Name: "/name", Args: "<名字>", Hint: "修改当前会话名称"},
-		{Name: "/model", Args: "[序号|名]", Hint: "列出或切换已保存模型"},
+		{Name: "/model", Args: "[provider/model]", Hint: "交互式切换提供商与模型（同 Ctrl+K）"},
 		{Name: "/cd", Args: "[目录]", Hint: "切换主工作目录"},
 		{Name: "/add-dir", Args: "[目录|-|clear]", Hint: "管理附加工作区根"},
-		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "查看或切换写操作审批模式"},
+		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式"},
+		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态"},
+		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件"},
+		{Name: "/think", Hint: "展开或折叠思考过程全文（同 Ctrl+T）"},
 		{Name: "/tools", Hint: "打开工具与改动详情（同 Ctrl+O）"},
 		{Name: "/copy", Args: "[序号]", Hint: "复制最近回复或第 N 段代码"},
 		{Name: "/clear", Hint: "清空当前屏幕转录（保留会话）"},
@@ -67,7 +73,7 @@ func slashHelp(cmds []slashCmd) string {
 		}
 		fmt.Fprintf(&b, "  %-24s %s\n", label, c.Hint)
 	}
-	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · ↑/↓ 历史 · PgUp/PgDn 翻页 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
+	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · ↑/↓ 历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
 	return b.String()
 }
 
@@ -75,12 +81,26 @@ type cellKind int
 
 const (
 	cellSystem cellKind = iota
+	cellBanner
 	cellUser
 	cellThink
 	cellAssistant
 	cellTool
+	cellSubAgent
 	cellError
 )
+
+type subAgentItem struct {
+	ChildID  string
+	Name     string
+	Role     string
+	Mode     string
+	Branch   string
+	Status   string
+	Activity string
+	Summary  string
+	Duration time.Duration
+}
 
 type transcriptCell struct {
 	kind       cellKind
@@ -90,8 +110,13 @@ type transcriptCell struct {
 	tool       string
 	title      string
 	path       string
+	input      string
+	output     string
 	status     string
 	diff       string
+	exitCode   *int
+	trunc      bool
+	subAgents  []subAgentItem
 	duration   time.Duration
 	started    time.Time
 	done       bool
@@ -105,12 +130,14 @@ var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"
 
 type cliModel struct {
 	mgr         *agent.Manager
+	plugins     *plugin.Manager
 	agentID     string
 	ctx         context.Context
 	theme       clitui.Theme
 	vp          clitui.VScroll
 	input       clitui.Editor
 	suggest     clitui.Suggest
+	picker      clitui.Picker
 	approvals   clitui.ApprovalBar
 	toolModal   clitui.ToolModal
 	cmds        []slashCmd
@@ -122,6 +149,12 @@ type cliModel struct {
 	height      int
 	lastRenderW int
 	busy        bool
+	turnStart   time.Time
+	phase       string // waiting | thinking | tool | streaming
+	round       int
+	prepHint    string
+	expandThink bool
+	bannerFrame int
 	spin        int
 	tokensIn    int
 	tokensOut   int
@@ -131,19 +164,26 @@ type cliModel struct {
 
 func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) *cliModel {
 	th := clitui.DefaultTheme()
-	cmds := cliSlashCommands()
+	plugMgr := plugin.NewManager()
+	_ = plugMgr.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(cwd))
+	if mgr != nil {
+		mgr.SetPluginTools(plugMgr.Tools)
+	}
+	cmds := buildAllSlashCommands(plugMgr)
 	items := make([]clitui.SuggestItem, 0, len(cmds))
 	for _, c := range cmds {
 		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
 	}
 	m := &cliModel{
 		mgr:       mgr,
+		plugins:   plugMgr,
 		agentID:   agentID,
 		ctx:       ctx,
 		theme:     th,
 		vp:        clitui.NewVScroll(80, 18),
 		input:     clitui.NewEditor(80, th),
 		suggest:   clitui.NewSuggest(80, items, th),
+		picker:    clitui.NewPicker(80, th),
 		approvals: clitui.NewApprovalBar(80, th),
 		toolModal: clitui.NewToolModal(th),
 		cmds:      cmds,
@@ -190,11 +230,8 @@ func (m *cliModel) syncAgentState(a *agent.Agent, banner bool) {
 		_ = m.mgr.SetAgentWorkDir(sn.ID, m.cwd)
 	}
 	if banner {
-		head := fmt.Sprintf("当前会话 %s（%s）", sn.Name, shortPath(m.cwd))
-		if extra := a.EffectiveExtraDirs(); len(extra) > 0 {
-			head += fmt.Sprintf("  +%d 附加目录", len(extra))
-		}
-		m.pushSystem(head + "\n输入消息开始，/ 查看指令，Ctrl+O 查看工具与改动详情。")
+		m.bannerFrame = 0
+		m.cells = append(m.cells, transcriptCell{kind: cellBanner})
 	}
 	var visible []struct {
 		role string
@@ -261,6 +298,9 @@ func (m *cliModel) plainTranscript() string {
 	var b strings.Builder
 	for _, c := range m.cells {
 		switch c.kind {
+		case cellBanner:
+			info := m.currentBannerInfo()
+			fmt.Fprintf(&b, "[欢迎] %s  %s\n", info.WorkDir, info.Model)
 		case cellUser:
 			fmt.Fprintf(&b, "你\n%s\n", c.raw)
 		case cellAssistant, cellSystem:
@@ -279,6 +319,9 @@ func (m *cliModel) plainTranscript() string {
 func (m *cliModel) renderCell(c transcriptCell) string {
 	w := max(16, m.width-4)
 	switch c.kind {
+	case cellBanner:
+		return clitui.RenderBanner(m.currentBannerInfo(), m.width, m.bannerFrame, m.theme)
+
 	case cellSystem:
 		bar := m.theme.Border.Render("│ ")
 		var lines []string
@@ -292,9 +335,13 @@ func (m *cliModel) renderCell(c transcriptCell) string {
 	case cellError:
 		bar := m.theme.Err.Render("▎ ")
 		var lines []string
-		for _, ln := range strings.Split("错误："+c.raw, "\n") {
+		for _, ln := range strings.Split(friendlyCLIError(c.raw), "\n") {
 			for _, seg := range clitui.WrapPlain(ln, w) {
-				lines = append(lines, bar+m.theme.Err.Render(seg))
+				if strings.HasPrefix(ln, "提示：") {
+					lines = append(lines, bar+m.theme.Warn.Render(seg))
+				} else {
+					lines = append(lines, bar+m.theme.Err.Render(seg))
+				}
 			}
 		}
 		return strings.Join(lines, "\n")
@@ -312,13 +359,7 @@ func (m *cliModel) renderCell(c transcriptCell) string {
 		return strings.Join(lines, "\n")
 
 	case cellThink:
-		flat := strings.Join(strings.Fields(c.raw), " ")
-		label := "思考"
-		if !c.done {
-			label = spinFrames[m.spin%len(spinFrames)] + " 思考中"
-		}
-		preview := clitui.FitWidth(flat, max(12, w-12))
-		return m.theme.ThinkBar.Render("  ◌ ") + m.theme.ThinkText.Render(label+" · "+preview)
+		return m.renderThinkCell(c, w)
 
 	case cellAssistant:
 		role := c.role
@@ -337,34 +378,360 @@ func (m *cliModel) renderCell(c transcriptCell) string {
 		return head + "\n" + clitui.PrefixBlock(m.theme.AgentBar.Render("▎ "), body)
 
 	case cellTool:
-		icon := m.theme.Accent.Render(spinFrames[m.spin%len(spinFrames)])
-		tail := ""
-		if c.done {
-			if c.status == "" || c.status == "ok" {
-				icon = m.theme.Ok.Render("✓")
-				tail = "  " + m.theme.Muted.Render(humanDuration(c.duration))
-			} else {
-				icon = m.theme.Err.Render("✗")
-				tail = "  " + m.theme.Err.Render(c.status) + " " + m.theme.Muted.Render(humanDuration(c.duration))
-			}
-		}
-		target := c.path
-		if target == "" && c.title != "" && c.title != c.tool {
-			target = c.title
-		}
-		line := "  " + icon + " " + m.theme.ToolName.Render(c.tool)
-		if target != "" {
-			line += "  " + m.theme.Muted.Render(clitui.FitWidth(firstLine(target), max(12, w-18)))
-		}
-		line += tail
-		if c.diff != "" {
-			if db := clitui.RenderDiffBlock(c.diff, m.width, 16, m.theme); db != "" {
-				line += "\n" + db
-			}
-		}
-		return line
+		return m.renderToolCell(c, w)
+
+	case cellSubAgent:
+		return m.renderSubAgentCell(c, w)
 	}
 	return c.raw
+}
+
+func (m *cliModel) renderSubAgentCell(c transcriptCell, w int) string {
+	running, okCnt, errCnt := 0, 0, 0
+	for _, it := range c.subAgents {
+		switch it.Status {
+		case "running", "":
+			running++
+		case "ok":
+			okCnt++
+		default:
+			errCnt++
+		}
+	}
+	headIcon := m.theme.Accent.Render(spinFrames[m.spin%len(spinFrames)])
+	statusSummary := fmt.Sprintf("%d 运行中", running)
+	if running == 0 {
+		if errCnt > 0 {
+			headIcon = m.theme.Warn.Render("⏺")
+			statusSummary = fmt.Sprintf("完成 %d · 失败 %d", okCnt, errCnt)
+		} else {
+			headIcon = m.theme.Ok.Render("⏺")
+			statusSummary = fmt.Sprintf("全部完成 (%d)", okCnt)
+		}
+	} else if okCnt+errCnt > 0 {
+		statusSummary = fmt.Sprintf("%d 运行中 · %d 已完成", running, okCnt+errCnt)
+	}
+	dur := c.duration
+	if !c.done && !c.started.IsZero() {
+		dur = time.Since(c.started)
+	}
+	durPart := ""
+	if dur >= 100*time.Millisecond {
+		durPart = " · " + humanDuration(dur)
+	}
+
+	var rows []string
+	rows = append(rows, fmt.Sprintf("  %s %s %s",
+		headIcon,
+		m.theme.ToolName.Render("子智能体协作"),
+		m.theme.Muted.Render("("+statusSummary+durPart+")"),
+	))
+
+	for i, it := range c.subAgents {
+		branch := "├─"
+		if i == len(c.subAgents)-1 {
+			branch = "└─"
+		}
+		var stIcon string
+		switch it.Status {
+		case "running", "":
+			stIcon = m.theme.Accent.Render(spinFrames[(m.spin+i)%len(spinFrames)])
+		case "ok":
+			stIcon = m.theme.Ok.Render("✓")
+		default:
+			stIcon = m.theme.Err.Render("✗")
+		}
+		meta := ""
+		if it.Branch != "" {
+			meta = " [" + it.Branch + "]"
+		} else if it.Mode == "read" {
+			meta = " [只读检索]"
+		}
+		detail := it.Activity
+		if it.Status != "running" && it.Status != "" && it.Summary != "" {
+			detail = it.Summary
+		}
+		if detail == "" {
+			detail = "等待调度…"
+		}
+		durItem := ""
+		if it.Duration > 0 {
+			durItem = " (" + humanDuration(it.Duration) + ")"
+		}
+		namePart := m.theme.AgentRole.Render(it.Name) + m.theme.Muted.Render(meta)
+		detailStyle := m.theme.Muted
+		if it.Status == "error" {
+			detailStyle = m.theme.Err
+		} else if it.Status == "running" || it.Status == "" {
+			detailStyle = m.theme.Text
+		}
+		maxDetail := max(14, w-28)
+		rows = append(rows, fmt.Sprintf("    %s %s %s  %s%s",
+			m.theme.Border.Render(branch),
+			stIcon,
+			namePart,
+			detailStyle.Render(clitui.FitWidth(detail, maxDetail)),
+			m.theme.Muted.Render(durItem),
+		))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m *cliModel) renderThinkCell(c transcriptCell, w int) string {
+	var wrapped []string
+	for _, ln := range strings.Split(strings.TrimSpace(c.raw), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		wrapped = append(wrapped, clitui.WrapPlain(ln, max(16, w-4))...)
+	}
+	dur := c.duration
+	if !c.done && !c.started.IsZero() {
+		dur = time.Since(c.started)
+	}
+	durTag := ""
+	if dur >= 100*time.Millisecond {
+		durTag = " " + humanDuration(dur)
+	}
+
+	if !c.done {
+		head := fmt.Sprintf("  %s 思考中%s", spinFrames[m.spin%len(spinFrames)], durTag)
+		if len(wrapped) > 4 && !m.expandThink {
+			head += fmt.Sprintf(" · 共 %d 行（Ctrl+T 展开全文）", len(wrapped))
+		}
+		lines := []string{m.theme.ThinkBar.Render(head)}
+		tail := wrapped
+		if !m.expandThink && len(tail) > 4 {
+			tail = tail[len(tail)-4:]
+		}
+		bar := m.theme.ThinkBar.Render("    │ ")
+		for _, ln := range tail {
+			lines = append(lines, bar+m.theme.ThinkText.Render(ln))
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	if !m.expandThink {
+		lastLine := ""
+		if len(wrapped) > 0 {
+			lastLine = " · " + clitui.FitWidth(wrapped[len(wrapped)-1], max(12, w-30))
+		}
+		summary := fmt.Sprintf("  ◌ 已思考%s（%d 行 · Ctrl+T 展开）%s", durTag, max(1, len(wrapped)), lastLine)
+		return m.theme.ThinkBar.Render(summary)
+	}
+
+	head := fmt.Sprintf("  ▾ 思考过程%s（%d 行 · Ctrl+T 收起）", durTag, len(wrapped))
+	lines := []string{m.theme.ThinkBar.Render(head)}
+	bar := m.theme.ThinkBar.Render("    │ ")
+	for _, ln := range wrapped {
+		lines = append(lines, bar+m.theme.ThinkText.Render(ln))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *cliModel) renderToolCell(c transcriptCell, w int) string {
+	icon := m.theme.Accent.Render(spinFrames[m.spin%len(spinFrames)])
+	if c.done {
+		switch c.status {
+		case "", "ok", "truncated":
+			icon = m.theme.Ok.Render("⏺")
+		case "cancelled":
+			icon = m.theme.Warn.Render("⊘")
+		default:
+			icon = m.theme.Err.Render("✗")
+		}
+	}
+	verb, target := semanticToolCall(c.tool, c.path, c.title, c.input)
+	line := "  " + icon + " " + m.theme.ToolName.Render(verb)
+	if target != "" {
+		line += " " + m.theme.Text.Render(clitui.FitWidth(target, max(12, w-len(verb)-16)))
+	}
+	if !c.done && !c.started.IsZero() {
+		if el := time.Since(c.started); el >= 200*time.Millisecond {
+			line += "  " + m.theme.Muted.Render(humanDuration(el))
+		}
+	} else if c.done && c.duration > 0 {
+		line += "  " + m.theme.Muted.Render(humanDuration(c.duration))
+	}
+
+	var rows []string
+	rows = append(rows, line)
+
+	if c.done {
+		if sub := summarizeToolOutcome(c); sub != "" {
+			style := m.theme.Muted
+			if c.status != "" && c.status != "ok" && c.status != "truncated" {
+				style = m.theme.Err
+			}
+			rows = append(rows, "    "+m.theme.Border.Render("⎿  ")+style.Render(clitui.FitWidth(sub, max(12, w-8))))
+		}
+		if c.diff != "" {
+			if db := clitui.RenderDiffBlock(c.diff, m.width, 12, m.theme); db != "" {
+				rows = append(rows, db)
+			}
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func semanticToolCall(toolName, path, title, rawInput string) (verb, target string) {
+	var in map[string]any
+	if rawInput != "" {
+		_ = json.Unmarshal([]byte(rawInput), &in)
+	}
+	getStr := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := in[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		return ""
+	}
+	switch toolName {
+	case "read_file":
+		p := path
+		if p == "" {
+			p = getStr("path", "file_path")
+		}
+		return "Read", p
+	case "grep":
+		pat := getStr("pattern")
+		scope := getStr("path")
+		if pat != "" && scope != "" {
+			return "Search", fmt.Sprintf("%q in %s", pat, scope)
+		}
+		if pat != "" {
+			return "Search", fmt.Sprintf("%q", pat)
+		}
+		return "Search", firstLine(title)
+	case "glob":
+		pat := getStr("pattern")
+		if pat != "" {
+			return "Glob", pat
+		}
+		return "Glob", firstLine(title)
+	case "repo_map":
+		p := getStr("path")
+		if p == "" {
+			p = "."
+		}
+		return "RepoMap", p
+	case "edit_file":
+		if path != "" {
+			return "Edit", path
+		}
+		return "Edit", getStr("path", "file_path")
+	case "write_file":
+		if path != "" {
+			return "Write", path
+		}
+		return "Write", getStr("path", "file_path")
+	case "apply_patch":
+		if path != "" {
+			return "Patch", path
+		}
+		return "Patch", firstLine(title)
+	case "bash":
+		cmd := getStr("command", "cmd")
+		if cmd == "" {
+			cmd = strings.TrimPrefix(firstLine(title), "bash ")
+		}
+		return "Bash", firstLine(cmd)
+	case "verify":
+		cmd := getStr("cmd", "scope")
+		if cmd == "" {
+			cmd = "project checks"
+		}
+		return "Verify", firstLine(cmd)
+	case "web":
+		op := getStr("op")
+		u := getStr("url", "ref")
+		return "Web", strings.TrimSpace(op + " " + u)
+	default:
+		t := path
+		if t == "" && title != "" && title != toolName {
+			t = strings.TrimSpace(strings.TrimPrefix(firstLine(title), toolName))
+		}
+		return toolName, t
+	}
+}
+
+func summarizeToolOutcome(c transcriptCell) string {
+	out := strings.TrimSpace(c.output)
+	if c.status != "" && c.status != "ok" && c.status != "truncated" {
+		if out != "" {
+			return c.status + ": " + firstLine(out)
+		}
+		return c.status
+	}
+	switch c.tool {
+	case "read_file":
+		if out == "" {
+			return "已读取文件"
+		}
+		lines := strings.Count(out, "\n") + 1
+		if c.trunc {
+			return fmt.Sprintf("读取 %d 行（已截断，Ctrl+O 看全文）", lines)
+		}
+		return fmt.Sprintf("读取 %d 行", lines)
+	case "grep":
+		if out == "" || out == "(no matches)" {
+			return "0 处命中"
+		}
+		lines := strings.Split(out, "\n")
+		hits := len(lines)
+		if strings.HasPrefix(lines[len(lines)-1], "... [result truncated") {
+			hits--
+			return fmt.Sprintf("命中 %d+ 处（已达上限）", max(1, hits))
+		}
+		return fmt.Sprintf("命中 %d 处", hits)
+	case "glob":
+		if out == "" || out == "(no matches)" {
+			return "0 个文件"
+		}
+		lines := strings.Split(out, "\n")
+		cnt := len(lines)
+		if strings.HasPrefix(lines[len(lines)-1], "... [result truncated") {
+			cnt--
+			return fmt.Sprintf("匹配 %d+ 个文件", max(1, cnt))
+		}
+		return fmt.Sprintf("匹配 %d 个文件", cnt)
+	case "edit_file", "write_file", "apply_patch":
+		if c.diff != "" {
+			add, del := 0, 0
+			for _, ln := range strings.Split(c.diff, "\n") {
+				if strings.HasPrefix(ln, "+") && !strings.HasPrefix(ln, "+++") {
+					add++
+				} else if strings.HasPrefix(ln, "-") && !strings.HasPrefix(ln, "---") {
+					del++
+				}
+			}
+			return fmt.Sprintf("变更 +%d -%d 行", add, del)
+		}
+		if out != "" {
+			return firstLine(out)
+		}
+		return "已写入"
+	case "bash", "verify":
+		code := 0
+		if c.exitCode != nil {
+			code = *c.exitCode
+		}
+		if out == "" {
+			return fmt.Sprintf("exit %d", code)
+		}
+		lines := strings.Count(out, "\n") + 1
+		if lines == 1 {
+			return firstLine(out)
+		}
+		return fmt.Sprintf("%s（共 %d 行，Ctrl+O 详情）", firstLine(out), lines)
+	default:
+		if out != "" {
+			return firstLine(out)
+		}
+		return ""
+	}
 }
 
 func (m *cliModel) renderCellCached(idx int) string {
@@ -416,6 +783,7 @@ func (m *cliModel) layout() {
 	}
 	m.input = m.input.SetWidth(m.width)
 	m.suggest = m.suggest.SetWidth(m.width)
+	m.picker = m.picker.SetWidth(m.width)
 	m.approvals = m.approvals.SetWidth(m.width)
 
 	statusH := 1
@@ -425,16 +793,23 @@ func (m *cliModel) layout() {
 		return
 	}
 
+	activityH := 0
+	if m.busy {
+		activityH = 1
+	}
+
 	inputH := m.input.Height()
 	overlayH := m.suggest.Height()
 	if m.approvals.Active() {
 		overlayH = m.approvals.Height()
+	} else if m.picker.Active() {
+		overlayH = m.picker.Height()
 	}
-	maxBottom := m.height - statusH - 2
+	maxBottom := m.height - statusH - activityH - 2
 	if inputH+overlayH > maxBottom {
 		overlayH = max(0, maxBottom-inputH)
 	}
-	vpH := max(1, m.height-statusH-inputH-overlayH)
+	vpH := max(1, m.height-statusH-activityH-inputH-overlayH)
 	if m.lastRenderW != m.width || m.vp.ItemCount() != len(m.cells) {
 		m.rebuildViewport(false)
 	}
@@ -449,8 +824,20 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 	case cliTickMsg:
+		dirty := false
+		if m.bannerFrame < clitui.BannerMaxFrame {
+			m.bannerFrame++
+			if m.bannerFrame >= clitui.BannerMaxFrame {
+				m.settleBanner()
+			} else {
+				dirty = true
+			}
+		}
 		if m.busy {
 			m.spin++
+			dirty = true
+		}
+		if dirty {
 			m.refreshActiveCells()
 		}
 		return m, cliTick()
@@ -485,9 +872,13 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *cliModel) finishLiveCells() {
 	if m.thinkIdx >= 0 && m.thinkIdx < len(m.cells) {
-		m.cells[m.thinkIdx].done = true
-		m.cells[m.thinkIdx].cacheWidth = 0
-		m.cells[m.thinkIdx].cachedView = ""
+		c := &m.cells[m.thinkIdx]
+		if !c.done && !c.started.IsZero() && c.duration <= 0 {
+			c.duration = time.Since(c.started)
+		}
+		c.done = true
+		c.cacheWidth = 0
+		c.cachedView = ""
 	}
 	if m.liveIdx >= 0 && m.liveIdx < len(m.cells) {
 		m.cells[m.liveIdx].done = true
@@ -499,9 +890,23 @@ func (m *cliModel) finishLiveCells() {
 	m.rebuildViewport(false)
 }
 
+func (m *cliModel) toggleThinkExpanded() {
+	m.expandThink = !m.expandThink
+	for i := range m.cells {
+		if m.cells[i].kind == cellThink {
+			m.cells[i].cacheWidth = 0
+			m.cells[i].cachedView = ""
+		}
+	}
+	m.rebuildViewport(false)
+}
+
 func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if m.bannerFrame < clitui.BannerMaxFrame {
+		m.settleBanner()
 	}
 	if m.toolModal.Open() {
 		var used bool
@@ -516,6 +921,16 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 	}
+	if msg.String() == "ctrl+t" {
+		m.toggleThinkExpanded()
+		m.layout()
+		return m, nil
+	}
+	if msg.String() == "ctrl+k" {
+		m.openModelPicker()
+		m.layout()
+		return m, nil
+	}
 	if m.approvals.Active() {
 		cur, _ := m.approvals.Current()
 		var choice *clitui.ApprovalChoice
@@ -523,6 +938,19 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.approvals, choice, used = m.approvals.HandleKey(msg)
 		if choice != nil && cur.ID != "" {
 			m.applyApproval(cur, *choice)
+		}
+		if used {
+			m.layout()
+			return m, nil
+		}
+	}
+	if m.picker.Active() {
+		prevKind := m.picker.Kind()
+		var chosen *clitui.PickerItem
+		var used bool
+		m.picker, chosen, _, used = m.picker.HandleKey(msg)
+		if chosen != nil {
+			m.onPickerChosen(prevKind, *chosen)
 		}
 		if used {
 			m.layout()
@@ -555,6 +983,12 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "tab":
 			if sel, ok := m.suggest.Selected(); ok {
+				if m.tryOpenSlashPicker(sel.Name) {
+					m.input = m.input.Reset()
+					m.suggest = m.suggest.Close()
+					m.layout()
+					return m, nil
+				}
 				val := sel.Name
 				if sel.Args != "" {
 					val += " "
@@ -566,12 +1000,6 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			raw := strings.TrimSpace(m.input.Value())
-			if raw == "/" {
-				m.input = m.input.Reset()
-				m.suggest = m.suggest.Close()
-				m.layout()
-				return m.submit("/")
-			}
 			if sel, ok := m.suggest.Selected(); ok && !strings.Contains(raw, " ") {
 				m.input = m.input.PushHistory(sel.Name).Reset()
 				m.suggest = m.suggest.Close()
@@ -588,7 +1016,17 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	m.suggest = m.suggest.Update(m.input.Value())
+	curVal := m.input.Value()
+	if curVal == "/resume " || curVal == "/model " || curVal == "/mode " {
+		slashName := strings.TrimSpace(curVal)
+		if m.tryOpenSlashPicker(slashName) {
+			m.input = m.input.Reset()
+			m.suggest = m.suggest.Close()
+			m.layout()
+			return m, cmd
+		}
+	}
+	m.suggest = m.suggest.Update(curVal)
 	m.layout()
 	return m, cmd
 }
@@ -658,6 +1096,10 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.busy = true
+	m.turnStart = time.Now()
+	m.phase = "waiting"
+	m.round = 1
+	m.prepHint = ""
 	m.liveIdx = -1
 	m.thinkIdx = -1
 	m.lastErr = ""
@@ -692,19 +1134,48 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	case "/new":
 		m.pushSystem(m.cmdNew(arg))
 	case "/resume":
+		if strings.TrimSpace(arg) == "" {
+			if m.openResumePicker() {
+				m.layout()
+				return m, nil
+			}
+		}
 		m.pushSystem(m.cmdResume(arg))
 	case "/session":
 		m.pushSystem(m.cmdSession())
 	case "/name":
 		m.pushSystem(m.cmdName(arg))
 	case "/model":
+		if strings.TrimSpace(arg) == "" {
+			if m.openModelPicker() {
+				m.layout()
+				return m, nil
+			}
+		}
 		m.pushSystem(m.cmdModel(arg))
 	case "/cd":
 		m.pushSystem(m.cmdCD(arg))
 	case "/add-dir":
 		m.pushSystem(m.cmdAddDir(arg))
 	case "/mode":
+		if strings.TrimSpace(arg) == "" {
+			if m.openModePicker() {
+				m.layout()
+				return m, nil
+			}
+		}
 		m.pushSystem(m.cmdMode(arg))
+	case "/agents":
+		m.pushSystem(m.cmdAgents())
+	case "/plugins":
+		m.pushSystem(m.cmdPlugins(arg))
+	case "/think":
+		m.toggleThinkExpanded()
+		if m.expandThink {
+			m.pushSystem("已展开思考过程全文（Ctrl+T 可再次收起）。")
+		} else {
+			m.pushSystem("已收起思考过程为摘要（Ctrl+T 可展开全文）。")
+		}
 	case "/tools":
 		m.toolModal = m.toolModal.Toggle(m.tools, m.width, max(4, m.height-1))
 	case "/copy":
@@ -717,7 +1188,24 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	case "/stop":
 		m.pushSystem(m.cmdStop())
 	default:
-		m.pushSystem("未知指令 " + name + "，/help 看全部")
+		if m.plugins != nil && m.plugins.HasCommand(name) {
+			out, err := m.plugins.ExecCommand(m.ctx, name, arg, m.cwd, m.agentID)
+			if err != nil {
+				m.pushError(err.Error())
+				m.layout()
+				return m, nil
+			}
+			if strings.TrimSpace(out.Output) != "" {
+				m.pushSystem(out.Output)
+			}
+			if strings.TrimSpace(out.Prompt) != "" {
+				m.layout()
+				return m.submit(out.Prompt)
+			}
+			m.layout()
+			return m, nil
+		}
+		m.pushSystem("未知指令 " + name + "，/help 看全部，或用 /plugins init <名> 创建自定义插件指令")
 	}
 	m.layout()
 	return m, nil
@@ -757,7 +1245,88 @@ func (m *cliModel) cmdCD(arg string) string {
 			return "目录切了，但会话没跟上：" + err.Error()
 		}
 	}
+	m.reloadPlugins()
 	return "目录 " + shortPath(abs)
+}
+
+func buildAllSlashCommands(pm *plugin.Manager) []slashCmd {
+	base := cliSlashCommands()
+	if pm == nil {
+		return base
+	}
+	existing := make(map[string]bool, len(base))
+	for _, c := range base {
+		existing[c.Name] = true
+	}
+	for _, bc := range pm.Commands() {
+		if existing[bc.Spec.Name] {
+			continue
+		}
+		hint := bc.Spec.Hint
+		if hint == "" {
+			hint = "自定义插件命令"
+		}
+		hint += " [" + bc.PluginName + "]"
+		base = append(base, slashCmd{
+			Name: bc.Spec.Name,
+			Args: bc.Spec.Args,
+			Hint: hint,
+		})
+	}
+	return base
+}
+
+func (m *cliModel) reloadPlugins() error {
+	if m.plugins == nil {
+		m.plugins = plugin.NewManager()
+	}
+	err := m.plugins.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(m.cwd))
+	m.cmds = buildAllSlashCommands(m.plugins)
+	items := make([]clitui.SuggestItem, 0, len(m.cmds))
+	for _, c := range m.cmds {
+		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
+	}
+	m.suggest = clitui.NewSuggest(m.width, items, m.theme)
+	return err
+}
+
+func (m *cliModel) cmdPlugins(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "reload" {
+		if err := m.reloadPlugins(); err != nil {
+			return fmt.Sprintf("插件已重载（共 %d 个），部分清单有告警：%v", len(m.plugins.List()), err)
+		}
+		return fmt.Sprintf("已重新扫描并加载 %d 个插件（%d 条自定义 / 指令）", len(m.plugins.List()), len(m.plugins.Commands()))
+	}
+	if strings.HasPrefix(arg, "init ") || arg == "init" {
+		name := strings.TrimSpace(strings.TrimPrefix(arg, "init"))
+		if name == "" {
+			return "用法：/plugins init <插件名>（例如 /plugins init git-check）"
+		}
+		dir, err := plugin.InitScaffold(m.cwd, name)
+		if err != nil {
+			return "创建插件脚手架失败：" + err.Error()
+		}
+		_ = m.reloadPlugins()
+		return fmt.Sprintf("已生成插件脚手架：%s\n现在可以直接输入 /%s 测试，或编辑 plugin.json 与 bin/run.sh 扩展功能。", shortPath(dir), strings.TrimPrefix(name, "/"))
+	}
+
+	if m.plugins == nil || len(m.plugins.List()) == 0 {
+		return fmt.Sprintf("当前未加载任何外部插件。\n  全局目录：%s\n  项目目录：%s\n  快速新建：输入 /plugins init my-plugin 一键生成可执行插件模板",
+			shortPath(plugin.DefaultGlobalDir()), shortPath(plugin.WorkspacePluginDir(m.cwd)))
+	}
+	var b strings.Builder
+	b.WriteString("已加载插件\n")
+	for i, lp := range m.plugins.List() {
+		ver := lp.Manifest.Version
+		if ver == "" {
+			ver = "dev"
+		}
+		fmt.Fprintf(&b, "  %d  %-16s v%-8s [%s]  %d 命令 / %d 工具  %s\n",
+			i+1, lp.Manifest.Name, ver, lp.Scope, len(lp.Manifest.Commands), len(lp.Manifest.Tools), lp.Manifest.Description)
+	}
+	b.WriteString("用法：/plugins reload 热重载 · /plugins init <名> 新建插件模板")
+	return b.String()
 }
 
 func (m *cliModel) cmdAddDir(arg string) string {
@@ -1017,14 +1586,54 @@ func (m *cliModel) currentAgentName() string {
 
 func (m *cliModel) onEvent(msg cliMsg) {
 	switch msg.event {
+	case "agent.loop":
+		if mp, ok := msg.data.(map[string]any); ok {
+			id, _ := mp["id"].(string)
+			if id != "" && id != m.agentID {
+				return
+			}
+			switch v := mp["round"].(type) {
+			case int:
+				if v > m.round {
+					m.round = v
+				}
+			case float64:
+				if int(v) > m.round {
+					m.round = int(v)
+				}
+			}
+			ph, _ := mp["phase"].(string)
+			switch ph {
+			case "think":
+				if m.phase != "thinking" && m.phase != "streaming" {
+					m.phase = "waiting"
+				}
+			case "act":
+				m.phase = "tool"
+				m.prepHint = ""
+			}
+		}
+
 	case "agent.reasoning":
 		v, ok := toAgentReasoning(msg.data)
 		if !ok || v.ID != m.agentID || v.Reasoning == "" {
 			return
 		}
+		trimmed := strings.TrimSpace(v.Reasoning)
+		if strings.HasPrefix(trimmed, "▸ ") {
+			m.prepHint = strings.TrimPrefix(trimmed, "▸ ")
+			m.phase = "thinking"
+			return
+		}
+		m.phase = "thinking"
+		m.prepHint = ""
 		if m.thinkIdx < 0 || m.thinkIdx >= len(m.cells) {
 			m.thinkIdx = len(m.cells)
-			m.cells = append(m.cells, transcriptCell{kind: cellThink})
+			m.cells = append(m.cells, transcriptCell{
+				kind:    cellThink,
+				raw:     v.Reasoning,
+				started: time.Now(),
+			})
 			m.vp = m.vp.AppendItem(m.renderCellCached(m.thinkIdx)).GotoBottom()
 			return
 		}
@@ -1036,10 +1645,16 @@ func (m *cliModel) onEvent(msg cliMsg) {
 		if !ok || v.ID != m.agentID || v.Delta == "" {
 			return
 		}
+		m.phase = "streaming"
+		m.prepHint = ""
 		if m.thinkIdx >= 0 && m.thinkIdx < len(m.cells) {
-			m.cells[m.thinkIdx].done = true
-			m.cells[m.thinkIdx].cacheWidth = 0
-			m.cells[m.thinkIdx].cachedView = ""
+			c := &m.cells[m.thinkIdx]
+			if !c.done && !c.started.IsZero() && c.duration <= 0 {
+				c.duration = time.Since(c.started)
+			}
+			c.done = true
+			c.cacheWidth = 0
+			c.cachedView = ""
 			m.vp = m.vp.ReplaceItem(m.thinkIdx, m.renderCellCached(m.thinkIdx))
 			m.thinkIdx = -1
 		}
@@ -1092,12 +1707,15 @@ func (m *cliModel) onEvent(msg cliMsg) {
 		m.lastErr = v.Error
 		m.pushError(v.Error)
 
+	case "agent.subtask":
+		m.onSubtaskEvent(msg.data)
+
 	case "agent.tool":
 		m.onToolEvent(msg.data)
 
 	case "tool.approval":
 		v, ok := toApprovalEvent(msg.data)
-		if !ok || (m.agentID != "" && v.AgentID != m.agentID) {
+		if !ok || (m.agentID != "" && v.AgentID != m.agentID && !m.isChildAgent(v.AgentID)) {
 			return
 		}
 		m.approvals = m.approvals.Enqueue(clitui.ApprovalReq{
@@ -1114,7 +1732,19 @@ func (m *cliModel) onEvent(msg cliMsg) {
 
 func (m *cliModel) onToolEvent(data any) {
 	v, ok := toAgentTool(data)
-	if !ok || v.ID != m.agentID {
+	if !ok {
+		return
+	}
+	if v.ID != m.agentID {
+		if v.Phase == "start" && m.isChildAgent(v.ID) {
+			rawMap, _ := data.(map[string]any)
+			inStr, _ := rawMap["input"].(string)
+			m.updateSubAgentActivity(v.ID, v.Tool, v.Path, v.Content, inStr)
+		}
+		return
+	}
+	// delegate 主工具本身如果已经有实时子智能体树在展示，不再重复塞一条冗余工具行
+	if v.Tool == "delegate" && v.Phase == "end" && m.hasActiveSubAgentCell() {
 		return
 	}
 	rawMap, _ := data.(map[string]any)
@@ -1142,6 +1772,8 @@ func (m *cliModel) onToolEvent(data any) {
 	}
 	switch v.Phase {
 	case "start":
+		m.phase = "tool"
+		m.prepHint = ""
 		for i := len(m.cells) - 1; i >= 0; i-- {
 			c := &m.cells[i]
 			if c.kind == cellTool && !c.done && v.CallID != "" && c.callID == v.CallID {
@@ -1150,6 +1782,9 @@ func (m *cliModel) onToolEvent(data any) {
 				}
 				if v.Path != "" {
 					c.path = v.Path
+				}
+				if inputStr != "" {
+					c.input = inputStr
 				}
 				m.upsertToolRecord(callKey, v, inputStr, "", nil, 0, false)
 				m.rebuildViewport(true)
@@ -1162,6 +1797,7 @@ func (m *cliModel) onToolEvent(data any) {
 			tool:    v.Tool,
 			title:   v.Content,
 			path:    v.Path,
+			input:   inputStr,
 			started: time.Now(),
 		})
 		m.upsertToolRecord(callKey, v, inputStr, "", nil, 0, false)
@@ -1185,6 +1821,18 @@ func (m *cliModel) onToolEvent(data any) {
 				if v.Path != "" {
 					c.path = v.Path
 				}
+				if inputStr != "" && c.input == "" {
+					c.input = inputStr
+				}
+				if outputStr != "" {
+					c.output = outputStr
+				}
+				if exitCode != nil {
+					c.exitCode = exitCode
+				}
+				if trunc {
+					c.trunc = true
+				}
 				if v.Diff != "" {
 					c.diff = v.Diff
 				}
@@ -1199,15 +1847,35 @@ func (m *cliModel) onToolEvent(data any) {
 				tool:     v.Tool,
 				title:    v.Content,
 				path:     v.Path,
+				input:    inputStr,
+				output:   outputStr,
 				status:   v.Status,
 				diff:     v.Diff,
+				exitCode: exitCode,
+				trunc:    trunc,
 				duration: dur,
 				done:     true,
 			})
 		}
 		m.upsertToolRecord(callKey, v, inputStr, outputStr, exitCode, dur, trunc)
+		if m.runningToolCount() == 0 {
+			m.phase = "analyzing"
+		}
 		m.rebuildViewport(true)
 	}
+}
+
+func (m *cliModel) runningToolCount() int {
+	n := 0
+	for i := len(m.cells) - 1; i >= 0; i-- {
+		if m.cells[i].kind == cellUser {
+			break
+		}
+		if m.cells[i].kind == cellTool && !m.cells[i].done {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *cliModel) upsertToolRecord(key string, v AgentToolEvent, input, output string, exitCode *int, dur time.Duration, trunc bool) {
@@ -1270,9 +1938,16 @@ func (m *cliModel) View() string {
 	}
 	var parts []string
 	parts = append(parts, m.vp.View())
+	if m.busy {
+		parts = append(parts, m.activityLine())
+	}
 	if m.approvals.Active() {
 		if av := m.approvals.View(); av != "" {
 			parts = append(parts, av)
+		}
+	} else if m.picker.Active() {
+		if pv := m.picker.View(); pv != "" {
+			parts = append(parts, pv)
 		}
 	} else if m.suggest.Visible() {
 		if sv := m.suggest.View(); sv != "" {
@@ -1291,48 +1966,114 @@ func (m *cliModel) View() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *cliModel) activityLine() string {
+	spin := spinFrames[m.spin%len(spinFrames)]
+	elapsed := time.Duration(0)
+	if !m.turnStart.IsZero() {
+		elapsed = time.Since(m.turnStart)
+	}
+
+	var desc string
+	if m.approvals.Active() {
+		desc = "等待你确认工具权限（y/a/n）…"
+	} else if m.prepHint != "" {
+		desc = m.prepHint
+	} else {
+		switch m.phase {
+		case "subagent":
+			cnt := m.activeSubAgentCount()
+			if cnt > 0 {
+				desc = fmt.Sprintf("子智能体并行协助中（%d 个运行中）…", cnt)
+			} else {
+				desc = "正在汇总子智能体结果…"
+			}
+		case "thinking":
+			desc = "正在思考与推理…"
+		case "tool":
+			var active []string
+			for i := len(m.cells) - 1; i >= 0; i-- {
+				if m.cells[i].kind == cellUser {
+					break
+				}
+				if m.cells[i].kind == cellTool && !m.cells[i].done {
+					v, t := semanticToolCall(m.cells[i].tool, m.cells[i].path, m.cells[i].title, m.cells[i].input)
+					if t != "" {
+						active = append(active, v+" "+t)
+					} else {
+						active = append(active, v)
+					}
+				}
+			}
+			if len(active) > 1 {
+				desc = fmt.Sprintf("正在并发执行 %d 个工具（%s）…", len(active), active[0])
+			} else if len(active) == 1 {
+				desc = "正在执行 " + active[0] + "…"
+			} else {
+				desc = "正在执行工具…"
+			}
+		case "analyzing":
+			if m.round > 1 {
+				desc = fmt.Sprintf("正在分析工具结果（第 %d 轮）…", m.round)
+			} else {
+				desc = "正在汇总工具结果…"
+			}
+		case "streaming":
+			desc = "正在输出回复…"
+		default:
+			if m.round > 1 {
+				desc = fmt.Sprintf("正在规划下一步（第 %d 轮）…", m.round)
+			} else {
+				desc = "正在连接模型并思考…"
+			}
+		}
+	}
+
+	right := fmt.Sprintf(" %s · Esc 停止 · ^T 思考 · ^O 工具 ", humanDuration(elapsed))
+	maxDesc := max(10, m.width-lipgloss.Width(right)-6)
+	desc = clitui.FitWidth(desc, maxDesc)
+	leftPlain := "  " + spin + " " + desc
+	gap := max(1, m.width-lipgloss.Width(leftPlain)-lipgloss.Width(right))
+	return m.theme.Accent.Render("  "+spin+" ") +
+		m.theme.Text.Render(desc) +
+		strings.Repeat(" ", gap) +
+		m.theme.Muted.Render(right)
+}
+
 func (m *cliModel) statusLine() string {
-	name := "未选会话"
-	model := ""
-	status := ""
+	modelLabel := "未选模型"
 	mode := ""
 	if m.mgr != nil && m.agentID != "" {
-		if a, ok := m.mgr.Get(m.agentID); ok {
-			sn := a.Snapshot()
-			name = sn.Name
-			status = string(sn.Status)
-			cfg := m.mgr.LLMConfigFor(sn.ID)
-			model = cfg.Provider
+		cfg := llm.ApplyDefaults(m.mgr.LLMConfigFor(m.agentID))
+		if cfg.Provider != "" && cfg.Provider != "mock" {
 			if cfg.Model != "" {
-				model += "/" + cfg.Model
+				modelLabel = cfg.Provider + "/" + shortModel(cfg.Model)
+			} else {
+				modelLabel = cfg.Provider
 			}
 		}
 		if m.mgr.Approvals() != nil {
 			mode = string(m.mgr.Approvals().ModeOf(m.agentID))
 		}
 	}
-	if m.busy {
-		status = spinFrames[m.spin%len(spinFrames)] + " running"
-	}
-	left := shortPath(m.cwd)
-	if name != "" {
-		left += "  " + name
-	}
-	if model != "" {
-		left += "  " + shortModel(model)
-	}
+	parts := []string{shortPath(m.cwd), modelLabel}
 	if mode != "" {
-		left += "  [" + mode + "]"
+		parts = append(parts, mode)
 	}
-	if status != "" {
-		left += "  " + status
+	if subCnt := m.activeSubAgentCount(); subCnt > 0 {
+		parts = append(parts, fmt.Sprintf("%d sub-agents", subCnt))
 	}
-	if m.tokensIn+m.tokensOut > 0 {
-		left += fmt.Sprintf("  ↑%d ↓%d", m.tokensIn, m.tokensOut)
+	if totalTok := m.tokensIn + m.tokensOut; totalTok > 0 {
+		if totalTok >= 1000 {
+			parts = append(parts, fmt.Sprintf("%.1fk tok", float64(totalTok)/1000.0))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d tok", totalTok))
+		}
 	}
-	right := "/ 指令  ^O 详情  ^C 退出"
+	left := strings.Join(parts, "  ·  ")
+
+	right := "/ 指令  ^K 模型  ^T 思考  ^O 详情"
 	if m.busy {
-		right = "Esc 停止  ^O 详情  ^C 退出"
+		right = "Esc 停止  ^T 思考  ^O 详情  ^C 退出"
 	}
 	maxLeft := m.width - lipgloss.Width(right) - 2
 	if maxLeft < 8 {
@@ -1344,6 +2085,532 @@ func (m *cliModel) statusLine() string {
 		return fitWidth(left, m.width)
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+func friendlyCLIError(raw string) string {
+	msg := strings.TrimSpace(raw)
+	low := strings.ToLower(msg)
+	if strings.Contains(low, "connection refused") {
+		return "错误：" + msg + "\n提示：当前连接的模型服务未启动或端口不可达 → 按 Ctrl+K 或输入 /model 立即切换到可用模型。"
+	}
+	if strings.Contains(low, "401") || strings.Contains(low, "unauthorized") || strings.Contains(msg, "Key") || strings.Contains(msg, "没有模型") {
+		return "错误：" + msg + "\n提示：按 Ctrl+K 或输入 /model 选择已配置好凭证的模型。"
+	}
+	return "错误：" + msg
+}
+
+func (m *cliModel) tryOpenSlashPicker(slashName string) bool {
+	switch slashName {
+	case "/model":
+		return m.openModelPicker()
+	case "/resume":
+		return m.openResumePicker()
+	case "/mode":
+		return m.openModePicker()
+	default:
+		return false
+	}
+}
+
+func (m *cliModel) openModelPicker() bool {
+	if m.mgr == nil {
+		return false
+	}
+	list := m.mgr.Providers()
+	if len(list) == 0 {
+		return false
+	}
+	cur := llm.Config{}
+	if m.agentID != "" {
+		cur = llm.ApplyDefaults(m.mgr.LLMConfigFor(m.agentID))
+	}
+
+	var currentItems, readyItems, offlineItems []clitui.PickerItem
+	seen := make(map[string]bool)
+
+	for _, p := range list {
+		eff := llm.ApplyDefaults(p)
+		isLocal := eff.Provider == "llamacpp" || eff.Provider == "ollama"
+		localOnline := !isLocal || probeLocalEndpoint(eff.BaseURL, 60*time.Millisecond)
+
+		models := candidateModelsForProvider(p)
+		if len(models) == 0 && eff.Model != "" {
+			models = []string{eff.Model}
+		}
+		for _, mod := range models {
+			key := eff.Provider + "/" + mod
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			cfg := eff
+			cfg.Model = mod
+			isCurrent := cur.Provider == cfg.Provider && cur.Model == mod
+
+			badge := "✓ 可用"
+			hint := cfg.Provider
+			if isCurrent {
+				badge = "● 当前"
+			} else if isLocal && !localOnline {
+				badge = "⚠ 未启动"
+				hint = eff.BaseURL
+			} else if isLocal {
+				badge = "✓ 本地"
+				hint = eff.BaseURL
+			}
+
+			it := clitui.PickerItem{
+				ID:      key,
+				Label:   cfg.Provider + " / " + shortModel(mod),
+				Badge:   badge,
+				Hint:    hint,
+				Current: isCurrent,
+				Data:    cfg,
+			}
+			if isCurrent {
+				currentItems = append(currentItems, it)
+			} else if isLocal && !localOnline {
+				offlineItems = append(offlineItems, it)
+			} else {
+				readyItems = append(readyItems, it)
+			}
+		}
+	}
+
+	items := append(append(currentItems, readyItems...), offlineItems...)
+	if len(items) == 0 {
+		return false
+	}
+	m.suggest = m.suggest.Close()
+	m.picker = m.picker.Open("model", "切换模型", items)
+	return true
+}
+
+func candidateModelsForProvider(p llm.Config) []string {
+	eff := llm.ApplyDefaults(p)
+	var out []string
+	seen := make(map[string]bool)
+	add := func(names ...string) {
+		for _, n := range names {
+			n = strings.TrimSpace(n)
+			if n != "" && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	if p.Model != "" {
+		add(p.Model)
+	}
+	switch eff.Provider {
+	case "qoder":
+		add(llm.QoderModelNames()...)
+	case "deepseek":
+		add("deepseek-chat", "deepseek-reasoner")
+	case "openai":
+		add("gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o3-mini")
+	case "claude":
+		add("claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-latest")
+	case "ollama", "llamacpp":
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+		if names, err := llm.ListModels(ctx, eff); err == nil {
+			add(names...)
+		}
+		cancel()
+	case llm.DoubaoCLIProvider:
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		if metas, err := llm.ListDoubaoCLIModels(ctx); err == nil {
+			for _, mt := range metas {
+				add(mt.Name)
+			}
+		}
+		cancel()
+		add(llm.DefaultDoubaoCLIModel)
+	}
+	if eff.Model != "" {
+		add(eff.Model)
+	}
+	return out
+}
+
+func (m *cliModel) openModePicker() bool {
+	if m.mgr == nil || m.mgr.Approvals() == nil || m.agentID == "" {
+		return false
+	}
+	cur := m.mgr.Approvals().ModeOf(m.agentID)
+	modes := []struct {
+		mode approval.Mode
+		hint string
+	}{
+		{approval.ModeAsk, "修改文件或执行命令前弹窗询问（推荐日常开发）"},
+		{approval.ModeAuto, "自动放行工作区内读写与命令（适合受控仓库快速推进）"},
+		{approval.ModeReadOnly, "纯只读分析，禁止任何文件修改或命令执行"},
+	}
+	items := make([]clitui.PickerItem, 0, len(modes))
+	for _, it := range modes {
+		badge := ""
+		if it.mode == cur {
+			badge = "● 当前"
+		}
+		items = append(items, clitui.PickerItem{
+			ID:      string(it.mode),
+			Label:   string(it.mode),
+			Badge:   badge,
+			Current: it.mode == cur,
+			Hint:    it.hint,
+		})
+	}
+	m.suggest = m.suggest.Close()
+	m.picker = m.picker.Open("mode", "切换写操作审批模式", items)
+	return true
+}
+
+func (m *cliModel) openResumePicker() bool {
+	if m.mgr == nil {
+		return false
+	}
+	list := m.mgr.List()
+	var items []clitui.PickerItem
+	for _, a := range list {
+		sn := a.Snapshot()
+		// 过滤掉内部派生的子 Agent，只展示独立主对话
+		if sn.ParentID != "" {
+			continue
+		}
+		badge := ""
+		if sn.ID == m.agentID {
+			badge = "● 当前"
+		}
+		dir := shortPath(a.EffectiveWorkDir(m.mgr))
+		items = append(items, clitui.PickerItem{
+			ID:      sn.ID,
+			Label:   sn.Name,
+			Badge:   badge,
+			Current: sn.ID == m.agentID,
+			Hint:    fmt.Sprintf("%s · %d 条消息", dir, len(sn.Messages)),
+		})
+	}
+	if len(items) == 0 {
+		return false
+	}
+	m.suggest = m.suggest.Close()
+	m.picker = m.picker.Open("resume", "切换历史主对话", items)
+	return true
+}
+
+func (m *cliModel) onPickerChosen(kind string, item clitui.PickerItem) {
+	switch kind {
+	case "model":
+		cfg, ok := item.Data.(llm.Config)
+		if !ok || m.mgr == nil || m.agentID == "" {
+			return
+		}
+		if err := m.mgr.SetAgentLLM(m.agentID, cfg); err != nil {
+			m.pushError(err.Error())
+			return
+		}
+		m.lastErr = ""
+		m.invalidateBannerCache()
+		m.pushSystem("已切换模型 → " + cfg.Provider + "/" + cfg.Model)
+
+	case "mode":
+		m.invalidateBannerCache()
+		m.pushSystem(m.cmdMode(item.ID))
+
+	case "resume":
+		m.pushSystem(m.cmdResume(item.ID))
+	}
+}
+
+func (m *cliModel) isChildAgent(childID string) bool {
+	if childID == "" || m.agentID == "" {
+		return false
+	}
+	if m.mgr != nil {
+		if a, ok := m.mgr.Get(childID); ok && a.Snapshot().ParentID == m.agentID {
+			return true
+		}
+	}
+	for i := len(m.cells) - 1; i >= 0; i-- {
+		if m.cells[i].kind == cellSubAgent {
+			for _, it := range m.cells[i].subAgents {
+				if it.ChildID == childID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *cliModel) hasActiveSubAgentCell() bool {
+	for i := len(m.cells) - 1; i >= 0; i-- {
+		if m.cells[i].kind == cellUser {
+			break
+		}
+		if m.cells[i].kind == cellSubAgent {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *cliModel) activeSubAgentCount() int {
+	n := 0
+	for i := len(m.cells) - 1; i >= 0; i-- {
+		if m.cells[i].kind == cellSubAgent && !m.cells[i].done {
+			for _, it := range m.cells[i].subAgents {
+				if it.Status == "" || it.Status == "running" {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+func (m *cliModel) updateSubAgentActivity(childID, toolName, path, title, input string) {
+	verb, target := semanticToolCall(toolName, path, title, input)
+	act := verb
+	if target != "" {
+		act += " " + target
+	}
+	for i := len(m.cells) - 1; i >= 0; i-- {
+		c := &m.cells[i]
+		if c.kind != cellSubAgent {
+			continue
+		}
+		for j := range c.subAgents {
+			if c.subAgents[j].ChildID == childID {
+				c.subAgents[j].Activity = act
+				c.cacheWidth = 0
+				c.cachedView = ""
+				m.rebuildViewport(true)
+				return
+			}
+		}
+	}
+}
+
+func (m *cliModel) onSubtaskEvent(data any) {
+	mp, ok := data.(map[string]any)
+	if !ok {
+		return
+	}
+	parentID, _ := mp["parentId"].(string)
+	if parentID == "" || parentID != m.agentID {
+		return
+	}
+	batchID, _ := mp["batchId"].(string)
+	phase, _ := mp["phase"].(string)
+	m.finishLiveCells()
+
+	switch phase {
+	case "batch_start":
+		m.phase = "subagent"
+		rawItems, _ := mp["items"].([]any)
+		var items []subAgentItem
+		for _, r := range rawItems {
+			im, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			cid, _ := im["childId"].(string)
+			name, _ := im["name"].(string)
+			role, _ := im["role"].(string)
+			mode, _ := im["mode"].(string)
+			branch, _ := im["branch"].(string)
+			st, _ := im["status"].(string)
+			act, _ := im["activity"].(string)
+			items = append(items, subAgentItem{
+				ChildID:  cid,
+				Name:     name,
+				Role:     role,
+				Mode:     mode,
+				Branch:   branch,
+				Status:   st,
+				Activity: act,
+			})
+		}
+		m.cells = append(m.cells, transcriptCell{
+			kind:      cellSubAgent,
+			callID:    batchID,
+			subAgents: items,
+			started:   time.Now(),
+		})
+		m.rebuildViewport(true)
+
+	case "step":
+		childID, _ := mp["childId"].(string)
+		toolName, _ := mp["tool"].(string)
+		path, _ := mp["path"].(string)
+		title, _ := mp["title"].(string)
+		input, _ := mp["input"].(string)
+		m.updateSubAgentActivity(childID, toolName, path, title, input)
+
+	case "child_done":
+		childID, _ := mp["childId"].(string)
+		st, _ := mp["status"].(string)
+		summary, _ := mp["summary"].(string)
+		var dur time.Duration
+		switch d := mp["durationMs"].(type) {
+		case int:
+			dur = time.Duration(d) * time.Millisecond
+		case int64:
+			dur = time.Duration(d) * time.Millisecond
+		case float64:
+			dur = time.Duration(d) * time.Millisecond
+		}
+		for i := len(m.cells) - 1; i >= 0; i-- {
+			c := &m.cells[i]
+			if c.kind != cellSubAgent || (batchID != "" && c.callID != batchID) {
+				continue
+			}
+			for j := range c.subAgents {
+				if c.subAgents[j].ChildID == childID {
+					c.subAgents[j].Status = st
+					c.subAgents[j].Duration = dur
+					if summary != "" {
+						c.subAgents[j].Summary = summary
+					}
+					c.cacheWidth = 0
+					c.cachedView = ""
+					m.rebuildViewport(true)
+					return
+				}
+			}
+		}
+
+	case "batch_done":
+		for i := len(m.cells) - 1; i >= 0; i-- {
+			c := &m.cells[i]
+			if c.kind != cellSubAgent || (batchID != "" && c.callID != batchID) {
+				continue
+			}
+			if !c.started.IsZero() {
+				c.duration = time.Since(c.started)
+			}
+			c.done = true
+			c.cacheWidth = 0
+			c.cachedView = ""
+			break
+		}
+		m.phase = "analyzing"
+		m.rebuildViewport(true)
+	}
+}
+
+func (m *cliModel) cmdAgents() string {
+	var all []subAgentItem
+	seen := make(map[string]bool)
+	for _, c := range m.cells {
+		if c.kind != cellSubAgent {
+			continue
+		}
+		for _, it := range c.subAgents {
+			key := it.ChildID
+			if key == "" {
+				key = it.Name
+			}
+			if !seen[key] {
+				seen[key] = true
+				all = append(all, it)
+			}
+		}
+	}
+	if m.mgr != nil && m.agentID != "" {
+		for _, a := range m.mgr.List() {
+			sn := a.Snapshot()
+			if sn.ParentID == m.agentID && !seen[sn.ID] {
+				seen[sn.ID] = true
+				all = append(all, subAgentItem{
+					ChildID: sn.ID,
+					Name:    sn.Name,
+					Role:    sn.Role,
+					Branch:  sn.WorktreeBranch,
+					Status:  string(sn.Status),
+				})
+			}
+		}
+	}
+	if len(all) == 0 {
+		return "当前主对话暂无派生子智能体（复杂多模块任务时主对话会自动调度子智能体并行协助）。"
+	}
+	var b strings.Builder
+	b.WriteString("主对话协作子智能体\n")
+	for i, it := range all {
+		st := it.Status
+		if st == "" {
+			st = "running"
+		}
+		extra := ""
+		if it.Branch != "" {
+			extra = "  [" + it.Branch + "]"
+		} else if it.Mode == "read" {
+			extra = "  [只读检索]"
+		}
+		detail := it.Summary
+		if detail == "" {
+			detail = it.Activity
+		}
+		fmt.Fprintf(&b, "  %d  %-16s %-8s%s  %s\n", i+1, it.Name, st, extra, detail)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *cliModel) currentBannerInfo() clitui.BannerInfo {
+	info := clitui.BannerInfo{
+		WorkDir: shortPath(m.cwd),
+		Model:   "未选模型",
+		Mode:    "ask",
+	}
+	if m.plugins != nil {
+		info.PluginCount = len(m.plugins.List())
+	}
+	if m.mgr != nil && m.agentID != "" {
+		if a, ok := m.mgr.Get(m.agentID); ok {
+			info.ExtraDirs = len(a.EffectiveExtraDirs())
+		}
+		cfg := llm.ApplyDefaults(m.mgr.LLMConfigFor(m.agentID))
+		if cfg.Provider != "" && cfg.Provider != "mock" {
+			if cfg.Model != "" {
+				info.Model = cfg.Provider + "/" + shortModel(cfg.Model)
+			} else {
+				info.Model = cfg.Provider
+			}
+			if (cfg.Provider == "llamacpp" || cfg.Provider == "ollama") && !probeLocalEndpoint(cfg.BaseURL, 40*time.Millisecond) {
+				info.Warning = fmt.Sprintf("本地模型 %s 未启动，按 Ctrl+K 切换可用模型", cfg.BaseURL)
+			}
+		}
+		if m.mgr.Approvals() != nil {
+			info.Mode = string(m.mgr.Approvals().ModeOf(m.agentID))
+		}
+	}
+	return info
+}
+
+func (m *cliModel) invalidateBannerCache() {
+	for i := range m.cells {
+		if m.cells[i].kind == cellBanner {
+			m.cells[i].cacheWidth = 0
+			m.cells[i].cachedView = ""
+		}
+	}
+}
+
+func (m *cliModel) settleBanner() {
+	m.bannerFrame = clitui.BannerMaxFrame
+	for i := range m.cells {
+		if m.cells[i].kind == cellBanner {
+			m.cells[i].done = true
+			m.cells[i].cacheWidth = 0
+			m.cells[i].cachedView = ""
+			if m.vp.ItemCount() == len(m.cells) {
+				m.vp = m.vp.ReplaceItem(i, m.renderCellCached(i))
+			}
+		}
+	}
 }
 
 func shortModel(s string) string {
@@ -1375,6 +2642,46 @@ func renderDiff(diff string, width, maxLines int) string {
 	return clitui.RenderDiffBlock(diff, width, maxLines, clitui.DefaultTheme())
 }
 
+func newOrderedEventForwarder(sink func(cliMsg)) (send func(string, any), shutdown func()) {
+	ch := make(chan cliMsg, 1024)
+	done := make(chan struct{})
+	closed := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case ev := <-ch:
+				sink(ev)
+			case <-closed:
+				for {
+					select {
+					case ev := <-ch:
+						sink(ev)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	send = func(event string, data any) {
+		select {
+		case <-closed:
+			return
+		default:
+		}
+		select {
+		case ch <- cliMsg{event: event, data: data}:
+		case <-closed:
+		}
+	}
+	shutdown = func() {
+		close(closed)
+		<-done
+	}
+	return send, shutdown
+}
+
 func runTermUI(ctx context.Context, h *headlessIO, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) error {
 	if mgr == nil {
 		return fmt.Errorf("没有会话内核")
@@ -1382,10 +2689,14 @@ func runTermUI(ctx context.Context, h *headlessIO, mgr *agent.Manager, agentID, 
 	redirectCLILog()
 	m := newCLIModel(ctx, mgr, agentID, cwd, resume, wantModel...)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
-	h.send = func(event string, data any) {
-		go p.Send(cliMsg{event: event, data: data})
-	}
-	defer func() { h.send = nil }()
+	send, stopForwarder := newOrderedEventForwarder(func(ev cliMsg) {
+		p.Send(ev)
+	})
+	h.send = send
+	defer func() {
+		h.send = nil
+		stopForwarder()
+	}()
 	_, err := p.Run()
 	return err
 }

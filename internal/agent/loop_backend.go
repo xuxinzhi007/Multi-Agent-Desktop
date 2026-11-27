@@ -184,6 +184,14 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 		}
 	}
 	registerSpawnTools(reg, m, a, channelID)
+	m.mu.RLock()
+	plugFn := m.pluginTools
+	m.mu.RUnlock()
+	if plugFn != nil {
+		for _, pt := range plugFn(workDir, a.ID) {
+			reg.Register(pt)
+		}
+	}
 	for _, t := range m.testTools {
 		reg.Register(t)
 	}

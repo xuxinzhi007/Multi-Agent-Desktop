@@ -13,6 +13,7 @@ import (
 
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/approval"
+	"multi-agent-desktop/internal/clitui"
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/tool"
 )
@@ -499,5 +500,440 @@ func TestCLIViewLargeHistoryUnder2ms(t *testing.T) {
 	t.Logf("1600-msg session per-keystroke (Update + View) latency: %v", perFrame)
 	if perFrame > 2*time.Millisecond {
 		t.Fatalf("per-frame latency %v > 2ms budget on 1600-message session", perFrame)
+	}
+}
+
+func TestCLILiveActivityBarOnSubmit(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 26
+	m.layout()
+
+	_, _ = m.submit("帮我排查一下这个函数为什么慢")
+	if !m.busy {
+		t.Fatal("submit 后 busy 应为 true")
+	}
+	view := m.View()
+	if lines := strings.Count(view, "\n") + 1; lines != 26 {
+		t.Fatalf("submit 后 View 行数 = %d, want 26", lines)
+	}
+	if !strings.Contains(view, "正在连接模型并思考") {
+		t.Fatalf("submit 后首个 token 到达前未展示实时活动状态条：\n%s", view)
+	}
+	if !strings.Contains(view, "Esc 停止") || !strings.Contains(view, "^T 思考") {
+		t.Fatalf("活动状态条缺少操作提示：\n%s", view)
+	}
+
+	// 流式提前工具提示（如 ▸ 准备调用 grep…）应更新活动状态条，而不污染思考块正文
+	m.onEvent(cliMsg{
+		event: "agent.reasoning",
+		data:  map[string]any{"id": m.agentID, "reasoning": "\n▸ 准备调用 grep…"},
+	})
+	m.layout()
+	view = m.View()
+	if !strings.Contains(view, "准备调用 grep") {
+		t.Fatalf("提前工具提示未反映到活动状态条：\n%s", view)
+	}
+
+	// 工具执行完成后、下一轮模型响应尚未到达时，应展示“正在分析工具结果”而非空白
+	m.onEvent(cliMsg{
+		event: "agent.loop",
+		data:  map[string]any{"id": m.agentID, "round": 2, "phase": "act"},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data:  map[string]any{"id": m.agentID, "callId": "c1", "tool": "grep", "phase": "start", "input": `{"pattern":"RunPrompt"}`},
+	})
+	m.layout()
+	if v := m.View(); !strings.Contains(v, `正在执行 Search "RunPrompt"`) {
+		t.Fatalf("工具执行中活动条未显示语义化动作：\n%s", v)
+	}
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data:  map[string]any{"id": m.agentID, "callId": "c1", "tool": "grep", "phase": "end", "status": "ok", "output": "a.go:1:RunPrompt", "durationMs": 15},
+	})
+	m.layout()
+	if v := m.View(); !strings.Contains(v, "正在分析工具结果（第 2 轮）") {
+		t.Fatalf("工具结束等待下一轮思考时活动条未展示分析状态：\n%s", v)
+	}
+}
+
+func TestCLISteamingThinkingTailUpdates(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 90, 28
+	m.busy = true
+	m.layout()
+
+	steps := []string{
+		"第一步：先检查入口路由和命令行参数解析逻辑。\n",
+		"第二步：定位 Manager.RunPrompt 如何创建循环上下文。\n",
+		"第三步：检查 readToolStream 流式 chunk 解析顺序。\n",
+		"第四步：核对 Bubble Tea 视口高度与缓存刷新时机。\n",
+		"第五步：准备修改 cli_tui.go 并补充回归单测验证最新尾部行可见。\n",
+	}
+	for _, chunk := range steps {
+		m.onEvent(cliMsg{
+			event: "agent.reasoning",
+			data:  map[string]any{"id": m.agentID, "reasoning": chunk},
+		})
+	}
+	m.layout()
+	liveView := m.View()
+	if !strings.Contains(liveView, "第五步：准备修改 cli_tui.go") {
+		t.Fatalf("流式思考超过 4 行后未滚动展示最新尾部内容（被截断卡死）：\n%s", liveView)
+	}
+	if strings.Contains(liveView, "第一步：先检查入口路由") {
+		t.Fatalf("未展开模式下不应把全部旧思考行都撑满屏幕：\n%s", liveView)
+	}
+
+	// 开始输出正文后，思考块自动折叠为 1 行摘要
+	m.onEvent(cliMsg{
+		event: "agent.delta",
+		data:  map[string]any{"id": m.agentID, "delta": "下面是修复方案："},
+	})
+	m.layout()
+	collapsedView := m.View()
+	if !strings.Contains(collapsedView, "已思考") || !strings.Contains(collapsedView, "Ctrl+T 展开") {
+		t.Fatalf("正文开始后思考块未自动折叠为摘要：\n%s", collapsedView)
+	}
+
+	// 按 Ctrl+T 可展开查看全部 5 步思考内容
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	expandedView := m.View()
+	if !strings.Contains(expandedView, "第一步：先检查入口路由") || !strings.Contains(expandedView, "第五步：准备修改 cli_tui.go") {
+		t.Fatalf("按 Ctrl+T 后未完整展开思考全文：\n%s", expandedView)
+	}
+}
+
+func TestCLIOrderedEventDelivery(t *testing.T) {
+	const total = 300
+	got := make([]int, 0, total)
+	send, shutdown := newOrderedEventForwarder(func(ev cliMsg) {
+		got = append(got, ev.data.(int))
+	})
+	for i := 0; i < total; i++ {
+		send("seq", i)
+	}
+	shutdown()
+	if len(got) != total {
+		t.Fatalf("事件丢失：got %d, want %d", len(got), total)
+	}
+	for i := 0; i < total; i++ {
+		if got[i] != i {
+			t.Fatalf("事件乱序：index %d got %d, want %d", i, got[i], i)
+		}
+	}
+}
+
+func TestCLIToolRowSemanticSummary(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 30
+	m.layout()
+
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id": m.agentID, "callId": "g1", "tool": "grep", "phase": "start",
+			"input": `{"pattern":"newOrderedEventForwarder","path":"cli_tui.go"}`,
+		},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id": m.agentID, "callId": "g1", "tool": "grep", "phase": "end",
+			"status": "ok", "output": "cli_tui.go:1615:func newOrderedEventForwarder\ncli_tui.go:1660:send, stop",
+			"durationMs": 18,
+		},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id": m.agentID, "callId": "b1", "tool": "bash", "phase": "end",
+			"status": "error", "input": `{"command":"go test ./broken"}`,
+			"output": "build failed: undefined: foo\nexit status 2", "durationMs": 120,
+		},
+	})
+	m.layout()
+	view := m.View()
+	for _, want := range []string{
+		`Search "newOrderedEventForwarder" in cli_tui.go`,
+		"命中 2 处",
+		"Bash go test ./broken",
+		"error: build failed: undefined: foo",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("工具语义化链路缺少 %q：\n%s", want, view)
+		}
+	}
+}
+
+func TestCLILocalModelUnreachableFallback(t *testing.T) {
+	// 默认模型指向一个肯定未监听的本地端口，而 providers 里有已填好 APIKey 的 qoder（模型留空）
+	deadLocal := llm.Config{
+		Provider: "llamacpp",
+		BaseURL:  "http://127.0.0.1:19",
+		Model:    "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+	}
+	mgr := agent.NewManager(deadLocal, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	mgr.SetProviders([]llm.Config{
+		deadLocal,
+		{Provider: "deepseek", APIKey: "sk-test", Model: ""},
+		{Provider: "qoder", APIKey: "jt-token", Model: ""},
+	})
+
+	id, err := ensureCLIAgent(mgr, "", testWorkDir(t), false)
+	if err != nil {
+		t.Fatalf("ensureCLIAgent: %v", err)
+	}
+	a, _ := mgr.Get(id)
+	eff := a.EffectiveLLM(mgr)
+	if eff.Provider == "llamacpp" {
+		t.Fatalf("本地端口未监听时不应继续死绑 llamacpp，实际选了 %+v", eff)
+	}
+	if eff.Provider != "qoder" || eff.Model == "" {
+		t.Fatalf("应回退到可用的 qoder 默认模型，实际 %+v", eff)
+	}
+}
+
+func TestCLIPickerModelSingleStepFlatSelection(t *testing.T) {
+	deadLocal := llm.Config{
+		Provider: "llamacpp",
+		BaseURL:  "http://127.0.0.1:19",
+		Model:    "qwen2.5.gguf",
+	}
+	mgr := agent.NewManager(deadLocal, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	mgr.SetProviders([]llm.Config{
+		deadLocal,
+		{Provider: "deepseek", APIKey: "sk-demo", Model: ""},
+		{Provider: "qoder", APIKey: "jt-demo", Model: ""},
+	})
+
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	// 按 Ctrl+K 直接弹出扁平单层模型列表（所有 provider / model 直接平铺，没有二级子菜单！）
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlK})
+	if !m.picker.Active() {
+		t.Fatal("按 Ctrl+K 后应打开单层扁平模型选择器")
+	}
+	v1 := m.View()
+	if lines := strings.Count(v1, "\n") + 1; lines != 28 {
+		t.Fatalf("Picker 展开时 View 行数 = %d, want 28", lines)
+	}
+	for _, want := range []string{"deepseek / deepseek-reasoner", "qoder / Auto"} {
+		if !strings.Contains(v1, want) {
+			t.Fatalf("单层选择器未直接平铺 %q：\n%s", want, v1)
+		}
+	}
+
+	// 直接输入 "reasoner" + 一次 Enter 一步到位完成切换（无需进二级菜单）
+	for _, r := range "reasoner" {
+		_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.picker.Active() {
+		t.Fatal("一次回车确认后选择器应立即关闭，不应再进子菜单")
+	}
+	got := mgr.LLMConfigFor(m.agentID)
+	if got.Provider != "deepseek" || got.Model != "deepseek-reasoner" {
+		t.Fatalf("一步模型切换未成功：%+v", got)
+	}
+}
+
+func TestCLISlashSpaceOpensInlinePicker(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "qoder", APIKey: "jt", Model: "Auto"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+
+	dir := testWorkDir(t)
+	other := mgr.Create("agent-prev", "前端工程师", "前端")
+	_ = mgr.SetAgentWorkDir(other.ID, dir)
+
+	m := newCLIModel(context.Background(), mgr, "", dir, false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	// 模拟用户像截图里那样敲出 "/resume "（带空格）：直接弹出历史会话候选框并清空输入框，无需多按一次回车
+	for _, r := range "/resume " {
+		_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if !m.picker.Active() || m.picker.Kind() != "resume" {
+		t.Fatalf("输入 '/resume ' 后应立即展开会话选择器，got active=%v kind=%q", m.picker.Active(), m.picker.Kind())
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("展开会话选择器后输入框应自动清空不残留 '/resume '，got %q", m.input.Value())
+	}
+
+	// 按数字键 '1' 一步直接切到第一个会话（前端工程师），连 Enter 都省了！
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	if m.picker.Active() {
+		t.Fatal("按数字键 1 后应直接选中并关闭选择器")
+	}
+	if m.agentID != other.ID {
+		t.Fatalf("按数字键 1 未切到目标会话：got %s, want %s", m.agentID, other.ID)
+	}
+}
+
+func TestCLIStatusFooterNoTruncatedGarbage(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "qoder", APIKey: "jt", Model: "Auto"}, func(string, any) {})
+	mgr.SetApprovals(approval.New(func(string, any) {}))
+	t.Cleanup(mgr.Shutdown)
+
+	dir := testWorkDir(t)
+	m := newCLIModel(context.Background(), mgr, "", dir, false)
+	m.width, m.height = 96, 26
+	// 模拟会话之前报错导致 Snapshot.Status == "error"
+	m.onEvent(cliMsg{
+		event: "agent.error",
+		data:  map[string]any{"id": m.agentID, "error": `llm: do: Post "http://127.0.0.1:8080/v1/chat/completions": dial tcp 127.0.0.1:8080: connect: connection refused`},
+	})
+	m.layout()
+	footer := m.statusLine()
+	if strings.Contains(footer, "Agent ") || strings.Contains(footer, "er…") || strings.Contains(footer, "er...") {
+		t.Fatalf("底栏仍残留内部会话编号或截断状态噪声：%q", footer)
+	}
+	if !strings.Contains(footer, "^K 模型") {
+		t.Fatalf("底栏缺少 ^K 模型快捷提示：%q", footer)
+	}
+	view := m.View()
+	if !strings.Contains(view, "Ctrl+K") && !strings.Contains(view, "/model") {
+		t.Fatalf("连接被拒绝时错误块未给出切换模型的人性化修复提示：\n%s", view)
+	}
+}
+
+func TestCLISubAgentLiveTree(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "qoder", APIKey: "jt", Model: "Auto"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+
+	dir := testWorkDir(t)
+	m := newCLIModel(context.Background(), mgr, "", dir, false)
+	m.width, m.height = 104, 28
+	m.busy = true
+	m.layout()
+
+	// 模拟主对话发起 2 个并发子 Agent（1 个只读检索、1 个工作树修改）
+	m.onEvent(cliMsg{
+		event: "agent.subtask",
+		data: map[string]any{
+			"parentId": m.agentID,
+			"batchId":  "batch-1",
+			"phase":    "batch_start",
+			"items": []any{
+				map[string]any{"childId": "sub-1", "name": "检索调用链", "mode": "read", "status": "running", "activity": "准备开始…"},
+				map[string]any{"childId": "sub-2", "name": "补充单测", "mode": "write", "branch": "wt/sub-2", "status": "running", "activity": "准备开始…"},
+			},
+		},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.subtask",
+		data: map[string]any{
+			"parentId": m.agentID,
+			"batchId":  "batch-1",
+			"phase":    "step",
+			"childId":  "sub-1",
+			"tool":     "grep",
+			"input":    `{"pattern":"RunPrompt","path":"internal/agent"}`,
+		},
+	})
+	m.layout()
+	liveView := m.View()
+	if lines := strings.Count(liveView, "\n") + 1; lines != 28 {
+		t.Fatalf("子智能体树展开时 View 行数 = %d, want 28", lines)
+	}
+	for _, want := range []string{"子智能体协作", "检索调用链", `Search "RunPrompt" in internal/agent`, "补充单测", "wt/sub-2"} {
+		if !strings.Contains(liveView, want) {
+			t.Fatalf("实时子智能体协作树缺少 %q：\n%s", want, liveView)
+		}
+	}
+
+	// 子任务完成后更新状态与耗时摘要，且 /agents 可查看详情
+	m.onEvent(cliMsg{
+		event: "agent.subtask",
+		data: map[string]any{
+			"parentId":   m.agentID,
+			"batchId":    "batch-1",
+			"phase":      "child_done",
+			"childId":    "sub-1",
+			"status":     "ok",
+			"durationMs": 420,
+			"summary":    "找到 3 处 RunPrompt 调用入口",
+		},
+	})
+	m.layout()
+	doneView := m.View()
+	if !strings.Contains(doneView, "找到 3 处 RunPrompt 调用入口") {
+		t.Fatalf("子任务完成后未展示结果摘要：\n%s", doneView)
+	}
+	if out := m.cmdAgents(); !strings.Contains(out, "检索调用链") || !strings.Contains(out, "补充单测") {
+		t.Fatalf("/agents 输出未包含当前主对话的子智能体列表：%q", out)
+	}
+}
+
+func TestCLIPluginInitAndSlashExecution(t *testing.T) {
+	ws := testWorkDir(t)
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+
+	m := newCLIModel(context.Background(), mgr, "", ws, false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	// 1. 在 CLI 内直接运行 /plugins init hello-ext 生成插件并自动热重载
+	_, _ = m.submit("/plugins init hello-ext")
+	if !m.plugins.HasCommand("/hello-ext") {
+		t.Fatal("/plugins init 后未自动注册 /hello-ext 命令")
+	}
+
+	// 2. 输入 /hello 触发自动补全菜单应能看到新注册的插件命令
+	m.suggest = m.suggest.Update("/hello")
+	if !m.suggest.Visible() {
+		t.Fatal("Suggest 自动补全未包含动态注册的插件命令 /hello-ext")
+	}
+
+	// 3. 执行自定义插件命令 /hello-ext world，输出应落入终端对话流
+	_, _ = m.submit("/hello-ext world")
+	if got := m.plainTranscript(); !strings.Contains(got, "[hello-ext]") || !strings.Contains(got, "world") {
+		t.Fatalf("执行自定义插件斜杠命令未输出预期内容：\n%s", got)
+	}
+}
+
+func TestBannerAnimationAdvancesAndSettles(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "qoder", APIKey: "jt", Model: "Auto"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	if m.bannerFrame >= clitui.BannerMaxFrame {
+		t.Fatalf("新建 CLI 会话应从动画起始帧开始播放，got frame=%d", m.bannerFrame)
+	}
+	// Tick 推进一帧
+	_, _ = m.Update(cliTickMsg(time.Now()))
+	if m.bannerFrame == 0 {
+		t.Fatal("cliTickMsg 应推进启动动画帧")
+	}
+
+	// 用户敲任意字符时零阻塞：字符立刻进入输入框，且 Banner 动画直接定格到终态
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	if m.input.Value() != "h" {
+		t.Fatalf("启动动画期间按键不应被吞掉：input=%q", m.input.Value())
+	}
+	if m.bannerFrame != clitui.BannerMaxFrame {
+		t.Fatalf("用户开始打字后 Banner 应立即定格终态，got %d", m.bannerFrame)
+	}
+	v := m.View()
+	if lines := strings.Count(v, "\n") + 1; lines != 28 {
+		t.Fatalf("定格后 View 行数 = %d, want 28", lines)
+	}
+	if !strings.Contains(v, "Ciallo～(∠・ω< )⌒★") {
+		t.Fatalf("定格后欢迎卡片应包含 Ciallo～(∠・ω< )⌒★ 颜文字：\n%s", v)
 	}
 }

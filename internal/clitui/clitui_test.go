@@ -181,3 +181,72 @@ func TestVScrollCachesDisplayLines(t *testing.T) {
 		t.Fatalf("50 VScroll.View frames took %v, expected cached fast path", elapsed)
 	}
 }
+
+func TestPickerFilterAndSelect(t *testing.T) {
+	th := DefaultTheme()
+	p := NewPicker(80, th).Open("model", "选择模型", []PickerItem{
+		{ID: "llamacpp", Label: "llamacpp", Badge: "⚠ 未启动", Hint: "127.0.0.1:8080"},
+		{ID: "deepseek", Label: "deepseek", Badge: "✓ 已配置", Hint: "deepseek-chat / reasoner"},
+		{ID: "qoder", Label: "qoder", Badge: "● 当前", Hint: "Auto / Ultimate / Performance"},
+	})
+	if !p.Active() || p.Kind() != "model" {
+		t.Fatalf("picker should be active with kind=model")
+	}
+	view := p.View()
+	if lines := strings.Count(view, "\n") + 1; lines != p.Height() {
+		t.Fatalf("picker height mismatch: got %d lines, Height()=%d\n%s", lines, p.Height(), view)
+	}
+
+	// 输入 "qo" 过滤后只剩 qoder，按 Enter 直接命中
+	for _, r := range "qo" {
+		var used bool
+		p, _, _, used = p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		if !used {
+			t.Fatal("rune key should be consumed by active picker")
+		}
+	}
+	p, chosen, cancelled, used := p.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !used || cancelled || chosen == nil || chosen.ID != "qoder" {
+		t.Fatalf("expected chosen=qoder, got chosen=%+v cancelled=%v used=%v", chosen, cancelled, used)
+	}
+
+	// 验证 Esc 取消行为
+	p2 := NewPicker(80, th).Open("mode", "选择审批模式", []PickerItem{
+		{ID: "ask", Label: "ask"},
+		{ID: "auto", Label: "auto"},
+	})
+	p2, chosen2, cancelled2, used2 := p2.HandleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if !used2 || !cancelled2 || chosen2 != nil || p2.Active() {
+		t.Fatalf("Esc should cancel and close picker: active=%v cancelled=%v", p2.Active(), cancelled2)
+	}
+}
+
+func TestBannerRenderWideAndNarrow(t *testing.T) {
+	th := DefaultTheme()
+	info := BannerInfo{
+		WorkDir:     "~/Documents/gowork/multi-agent-desktop",
+		Model:       "qoder/Auto",
+		Mode:        "auto",
+		PluginCount: 2,
+	}
+
+	// 宽终端：展示眨眼的 Ciallo～(∠・ω< )⌒★ 颜文字 + 右侧概览卡片
+	wide := RenderBanner(info, 96, BannerMaxFrame, th)
+	for _, want := range []string{"Ciallo～(∠・ω< )⌒★", "qoder/Auto", "Ctrl+K"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide banner missing %q:\n%s", want, wide)
+		}
+	}
+
+	// 早期动画帧（frame=2）：睁眼准备动作 (∠・ω・ )，还没眨眼抛星星
+	early := RenderBanner(info, 96, 2, th)
+	if strings.Contains(early, "⌒★") {
+		t.Fatalf("early frame 2 should not show final wink star yet:\n%s", early)
+	}
+
+	// 窄终端（width=52）：自动降级为紧凑单栏卡片，不溢出宽度
+	narrow := RenderBanner(info, 52, BannerMaxFrame, th)
+	if !strings.Contains(narrow, "Ciallo～(∠・ω< )⌒★") || !strings.Contains(narrow, "qoder/Auto") {
+		t.Fatalf("narrow banner missing core info:\n%s", narrow)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,9 +284,18 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		if len(list) == 0 {
 			return "", errors.New("还没有会话可接")
 		}
-		a := list[0]
-		id = a.ID
-		if cur := a.EffectiveWorkDir(mgr); !validDir(cur) && cwd != "" {
+		var picked *agent.Agent
+		for _, cand := range list {
+			if cand.Snapshot().ParentID == "" {
+				picked = cand
+				break
+			}
+		}
+		if picked == nil {
+			picked = list[0]
+		}
+		id = picked.ID
+		if cur := picked.EffectiveWorkDir(mgr); !validDir(cur) && cwd != "" {
 			if err := mgr.SetAgentWorkDir(id, cwd); err != nil {
 				return "", err
 			}
@@ -292,15 +303,22 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		return id, nil
 	}
 
-	a := mgr.CreateInheriting("", "", "")
-	if cur := a.EffectiveLLM(mgr); cur.Provider == "" || (cur.Model == "" && cur.Provider != llm.DoubaoCLIProvider && cur.Provider != "qoder") {
-		for _, p := range mgr.Providers() {
-			p = llm.ApplyDefaults(p)
-			if p.Provider != "" && p.Model != "" && (llm.IsLocalProvider(p.Provider) || p.APIKey != "") {
-				_ = mgr.SetAgentLLM(a.ID, p)
-				break
-			}
+	leadName := "Main"
+	if cwd != "" {
+		if base := filepath.Base(cwd); base != "" && base != "." && base != string(filepath.Separator) {
+			leadName = base
 		}
+	}
+	a := mgr.CreateInheriting(leadName, "主对话", "")
+	rawCur := a.EffectiveLLM(mgr)
+	cur := llm.ApplyDefaults(rawCur)
+	curReady := cur.Model != "" && providerReadyForCLI(cur)
+	if !curReady {
+		if best, ok := pickBestCLIProvider(mgr.Providers()); ok {
+			_ = mgr.SetAgentLLM(a.ID, best)
+		}
+	} else if cur.Model != rawCur.Model {
+		_ = mgr.SetAgentLLM(a.ID, cur)
 	}
 	if cwd != "" {
 		if err := mgr.SetAgentWorkDir(a.ID, cwd); err != nil {
@@ -308,6 +326,82 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		}
 	}
 	return a.ID, nil
+}
+
+func probeLocalEndpoint(baseURL string, timeout time.Duration) bool {
+	if strings.TrimSpace(baseURL) == "" {
+		return false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		if u.Scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", host, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func providerDefaultModel(p llm.Config) llm.Config {
+	p = llm.ApplyDefaults(p)
+	if p.Model != "" {
+		return p
+	}
+	switch p.Provider {
+	case "deepseek":
+		p.Model = "deepseek-chat"
+	case "openai":
+		p.Model = "gpt-4o"
+	case "claude":
+		p.Model = "claude-sonnet-4-5"
+	}
+	return p
+}
+
+func providerReadyForCLI(p llm.Config) bool {
+	p = providerDefaultModel(p)
+	if p.Provider == "" || p.Provider == "mock" || p.Model == "" {
+		return false
+	}
+	if p.Provider == "llamacpp" || p.Provider == "ollama" {
+		return probeLocalEndpoint(p.BaseURL, 80*time.Millisecond)
+	}
+	if p.Provider == llm.DoubaoCLIProvider {
+		return true
+	}
+	if p.Provider == "qoder" && p.APIKey == "" {
+		if saved, ok := llm.LocalQoder(); ok && saved.APIKey != "" {
+			return true
+		}
+	}
+	return p.APIKey != ""
+}
+
+func pickBestCLIProvider(providers []llm.Config) (llm.Config, bool) {
+	// 优先选择带默认/明确模型且连通就绪的 Provider（qoder 默认排在空模型云端之前）
+	for _, p := range providers {
+		cand := llm.ApplyDefaults(p)
+		if cand.Model != "" && providerReadyForCLI(cand) {
+			return cand, true
+		}
+	}
+	for _, p := range providers {
+		cand := providerDefaultModel(p)
+		if providerReadyForCLI(cand) {
+			return cand, true
+		}
+	}
+	return llm.Config{}, false
 }
 
 func validDir(p string) bool {
@@ -455,8 +549,24 @@ func applyCLIModel(mgr *agent.Manager, id, want string) error {
 		return nil
 	}
 	list := mgr.Providers()
+	// 支持直接传 provider/model（例如 qoder/Ultimate 或 deepseek/deepseek-reasoner）
+	if slash := strings.IndexByte(want, '/'); slash > 0 {
+		prov := strings.TrimSpace(want[:slash])
+		mod := strings.TrimSpace(want[slash+1:])
+		if prov != "" && mod != "" {
+			for _, c := range list {
+				if c.Provider == prov {
+					cfg := llm.ApplyDefaults(c)
+					cfg.Model = mod
+					return mgr.SetAgentLLM(id, cfg)
+				}
+			}
+		}
+	}
+
 	labels := make([]string, 0, len(list))
 	for i, c := range list {
+		c = providerDefaultModel(c)
 		label := c.Provider
 		if c.Model != "" {
 			label = c.Provider + "/" + c.Model
@@ -464,17 +574,20 @@ func applyCLIModel(mgr *agent.Manager, id, want string) error {
 		labels = append(labels, fmt.Sprintf("%d:%s", i+1, label))
 	}
 	for i, c := range list {
-		label := c.Provider
+		rawLabel := c.Provider
 		if c.Model != "" {
-			label = c.Provider + "/" + c.Model
+			rawLabel = c.Provider + "/" + c.Model
 		}
-		if want == fmt.Sprint(i+1) || want == c.Provider || want == c.Model || want == label {
-			if c.Model == "" && c.Provider != llm.DoubaoCLIProvider {
-				// 本地 / 云端连接都可能没填模型；loop 会把空 Model 当成"没选模型"，
-				// 在 CLI 入口就把话说清楚，比跑到一半报错强。
+		filled := providerDefaultModel(c)
+		filledLabel := filled.Provider
+		if filled.Model != "" {
+			filledLabel = filled.Provider + "/" + filled.Model
+		}
+		if want == fmt.Sprint(i+1) || want == c.Provider || want == c.Model || want == rawLabel || want == filledLabel {
+			if filled.Model == "" && filled.Provider != llm.DoubaoCLIProvider {
 				return fmt.Errorf("%s 这条连接没有填模型，先补一个（-m %s/<模型>）", c.Provider, c.Provider)
 			}
-			return mgr.SetAgentLLM(id, c)
+			return mgr.SetAgentLLM(id, filled)
 		}
 	}
 	if len(labels) == 0 {

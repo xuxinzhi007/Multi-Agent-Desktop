@@ -161,7 +161,11 @@ func runSpawn(ctx context.Context, m *Manager, opts spawnOpts) (string, error) {
 		if t.Mode == spawnModeRead {
 			// 轻路径：不建常驻会话、不开工作树。agent 只是个带名字的桩，
 			// 真正的执行体是 runTransientRead 里的临时 loop，跑完即丢。
-			stub := &Agent{Name: name, Role: strings.TrimSpace(t.Role)}
+			stub := &Agent{
+				ID:   fmt.Sprintf("subread-%d-%d", time.Now().UnixNano(), i+1),
+				Name: name,
+				Role: strings.TrimSpace(t.Role),
+			}
 			kids = append(kids, spawnResult{
 				agent:    stub,
 				task:     t,
@@ -206,36 +210,55 @@ func runSpawn(ctx context.Context, m *Manager, opts spawnOpts) (string, error) {
 	m.goSave()
 
 	names := make([]string, 0, len(kids))
+	batchID := fmt.Sprintf("subbatch-%d", time.Now().UnixNano())
+	subItems := make([]any, 0, len(kids))
 	for _, k := range kids {
 		names = append(names, k.agent.Name)
+		subItems = append(subItems, map[string]any{
+			"childId":  k.agent.ID,
+			"name":     k.agent.Name,
+			"role":     k.task.Role,
+			"mode":     k.task.Mode,
+			"branch":   k.branch,
+			"status":   "running",
+			"activity": "正在分析子任务…",
+		})
 	}
 	m.emit("agent.tool", map[string]any{
 		"id": parent.ID, "tool": "delegate", "phase": "end", "status": "ok",
 		"content": fmt.Sprintf("派给 %d 个子任务：%s", len(kids), strings.Join(names, "、")),
 	})
+	m.emit("agent.subtask", map[string]any{
+		"parentId": parent.ID,
+		"batchId":  batchID,
+		"phase":    "batch_start",
+		"items":    subItems,
+	})
 
 	// write 子会话用独立 Background ctx：父停止只断等待，不砍正在跑的子任务。
 	// read 临时运行挂在父 ctx 上：父停止时子任务跟着取消，不留野 goroutine。
 	type outcome struct {
-		idx int
-		out string
-		err error
+		idx   int
+		out   string
+		err   error
+		durMS int64
 	}
 	ch := make(chan outcome, len(kids))
 	for i, k := range kids {
 		go func(i int, k spawnResult) {
+			started := time.Now()
 			if k.readOnly {
 				childCtx, cancel := context.WithTimeout(ctx, delegateChildWallMS*time.Millisecond)
 				defer cancel()
-				out, err := m.runTransientRead(childCtx, parent, k.task, k.agent.Name)
-				ch <- outcome{idx: i, out: out, err: err}
+				out, err := m.runTransientRead(childCtx, parent, k.task, k.agent.Name, batchID, k.agent.ID)
+				ch <- outcome{idx: i, out: out, err: err, durMS: time.Since(started).Milliseconds()}
 				return
 			}
 			m.noteRoute(parent.ID, k.agent.ID)
 			childCtx, cancel := context.WithTimeout(context.Background(), delegateChildWallMS*time.Millisecond)
 			defer cancel()
 			out, err := m.RunPrompt(childCtx, k.agent.ID, spawnBrief(k.task, k.branch, k.iso))
-			ch <- outcome{idx: i, out: out, err: err}
+			ch <- outcome{idx: i, out: out, err: err, durMS: time.Since(started).Milliseconds()}
 		}(i, k)
 	}
 
@@ -255,19 +278,37 @@ func runSpawn(ctx context.Context, m *Manager, opts spawnOpts) (string, error) {
 		case o := <-ch:
 			results[o.idx] = kids[o.idx]
 			results[o.idx].text = o.out
+			st := "ok"
+			sumLine := firstMeaningfulLine(o.out)
 			if o.err != nil {
+				st = "error"
 				results[o.idx].err = errText(o.err)
+				sumLine = results[o.idx].err
 				// 已有产出就保留，标成 partial 而不是整块丢掉
 				results[o.idx].partial = strings.TrimSpace(o.out) != ""
 				if !results[o.idx].partial {
 					results[o.idx].text = ""
 				}
 			}
+			m.emit("agent.subtask", map[string]any{
+				"parentId":   parent.ID,
+				"batchId":    batchID,
+				"phase":      "child_done",
+				"childId":    kids[o.idx].agent.ID,
+				"status":     st,
+				"durationMs": o.durMS,
+				"summary":    sumLine,
+			})
 			filled[o.idx] = true
 		}
 	}
 
 summarize:
+	m.emit("agent.subtask", map[string]any{
+		"parentId": parent.ID,
+		"batchId":  batchID,
+		"phase":    "batch_done",
+	})
 	if ctx.Err() != nil {
 		// 用户主动停止：子任务照旧留着，只是这一轮不再等。
 		return "", ctx.Err()
@@ -467,7 +508,7 @@ func readOnlyRegistry(workDir string, extra []string) *tool.Registry {
 //   - 只把最终文本回给父级，回填通道与 write 子任务一致（spawnResult.text）。
 //
 // 生命周期：挂在传入的父 ctx 上，父停止即取消；另叠一层墙钟看门狗防挂死。
-func (m *Manager) runTransientRead(ctx context.Context, parent *Agent, t spawnTask, name string) (string, error) {
+func (m *Manager) runTransientRead(ctx context.Context, parent *Agent, t spawnTask, name string, batchInfo ...string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -477,6 +518,11 @@ func (m *Manager) runTransientRead(ctx context.Context, parent *Agent, t spawnTa
 	}
 	extra := parent.EffectiveExtraDirs()
 	a := m.newTransientAgent(parent, name, strings.TrimSpace(t.Role), workDir, extra)
+	var batchID string
+	if len(batchInfo) >= 2 && batchInfo[1] != "" {
+		batchID = batchInfo[0]
+		a.ID = batchInfo[1]
+	}
 
 	// 全局并发名额与常驻会话同一把锁，避免临时运行把机器并发顶满。
 	req := PromptRequest{AgentID: a.ID, Ctx: ctx}
@@ -497,7 +543,7 @@ func (m *Manager) runTransientRead(ctx context.Context, parent *Agent, t spawnTa
 	if cfg.Provider == "" || cfg.Model == "" {
 		return "", spawnError{"这个会话还没有模型"}
 	}
-	return m.runTransientLoop(ctx, a, brief, cfg)
+	return m.runTransientLoop(ctx, parent.ID, batchID, a, brief, cfg)
 }
 
 // runTransientMock 是内置示例模型的直通路径：不经过 loop 治理，只把 mock 流收集成文本。
@@ -523,9 +569,46 @@ func runTransientMock(ctx context.Context, m *Manager, a *Agent, brief string) (
 	return strings.TrimSpace(full.String()), nil
 }
 
+type transientSubtaskEmitter struct {
+	m        *Manager
+	parentID string
+	batchID  string
+	childID  string
+}
+
+func (e transientSubtaskEmitter) Emit(ev loop.Event) {
+	if e.m == nil || e.parentID == "" || e.childID == "" {
+		return
+	}
+	if ev.Kind == "tool.start" && ev.Call != nil {
+		e.m.emit("agent.subtask", map[string]any{
+			"parentId": e.parentID,
+			"batchId":  e.batchID,
+			"phase":    "step",
+			"childId":  e.childID,
+			"tool":     ev.Call.Name,
+			"input":    string(ev.Call.Input),
+		})
+	}
+}
+
+func firstMeaningfulLine(s string) string {
+	for _, ln := range strings.Split(strings.TrimSpace(s), "\n") {
+		ln = strings.TrimSpace(strings.TrimLeft(ln, "#*-•> "))
+		if ln != "" {
+			if len([]rune(ln)) > 72 {
+				rs := []rune(ln)
+				return string(rs[:72]) + "…"
+			}
+			return ln
+		}
+	}
+	return ""
+}
+
 // runTransientLoop 用独立 loop 跑一轮临时会话：内存状态、无检查点落盘、无后置
 // 摘要 / 学习 / 画像副作用（那些只属于常驻会话）。
-func (m *Manager) runTransientLoop(ctx context.Context, a *Agent, brief string, cfg llm.Config) (string, error) {
+func (m *Manager) runTransientLoop(ctx context.Context, parentID, batchID string, a *Agent, brief string, cfg llm.Config) (string, error) {
 	workDir := a.EffectiveWorkDir(m)
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
@@ -547,6 +630,7 @@ func (m *Manager) runTransientLoop(ctx context.Context, a *Agent, brief string, 
 	runner := &loop.Runner{
 		Model:        llm.NewChatModel(cfg),
 		Tools:        reg,
+		Emitter:      transientSubtaskEmitter{m: m, parentID: parentID, batchID: batchID, childID: a.ID},
 		System:       system,
 		ContextLimit: llm.ContextLimit(cfg),
 		Summarize:    compactSummarizer(cfg),

@@ -181,8 +181,9 @@ type Manager struct {
 
 	// testModel / testTools 仅测试用：替换进程内 loop 的模型调用器并追加测试工具。
 	// 生产路径恒为 nil，外部不得设置。
-	testModel loop.Model
-	testTools []tool.Tool
+	testModel   loop.Model
+	testTools   []tool.Tool
+	pluginTools func(workDir, agentID string) []tool.Tool
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。
@@ -210,6 +211,13 @@ func NewManager(cfg llm.Config, emit Emitter) *Manager {
 func (m *Manager) SetWorkDir(dir string) {
 	m.mu.Lock()
 	m.workDir = dir
+	m.mu.Unlock()
+}
+
+// SetPluginTools 注入外部可执行插件提供的动态工具表。
+func (m *Manager) SetPluginTools(fn func(workDir, agentID string) []tool.Tool) {
+	m.mu.Lock()
+	m.pluginTools = fn
 	m.mu.Unlock()
 }
 
