@@ -206,10 +206,11 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		return "", errors.New("没有会话内核")
 	}
 	if id != "" {
-		if _, ok := mgr.Get(id); !ok {
+		a, ok := mgr.Get(id)
+		if !ok {
 			return "", fmt.Errorf("没有这个会话：%s", id)
 		}
-		if cwd != "" {
+		if cur := a.EffectiveWorkDir(mgr); !validDir(cur) && cwd != "" {
 			if err := mgr.SetAgentWorkDir(id, cwd); err != nil {
 				return "", err
 			}
@@ -221,8 +222,9 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		if len(list) == 0 {
 			return "", errors.New("还没有会话可接")
 		}
-		id = list[0].ID
-		if cwd != "" {
+		a := list[0]
+		id = a.ID
+		if cur := a.EffectiveWorkDir(mgr); !validDir(cur) && cwd != "" {
 			if err := mgr.SetAgentWorkDir(id, cwd); err != nil {
 				return "", err
 			}
@@ -237,6 +239,14 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		}
 	}
 	return a.ID, nil
+}
+
+func validDir(p string) bool {
+	if strings.TrimSpace(p) == "" {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
 }
 
 func headlessTerminal(h *headlessIO) bool {
@@ -274,7 +284,7 @@ func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cl
 	}
 
 	if headlessTerminal(h) {
-		return runTermUI(ctx, h, mgr, args.AgentID, cwd, args.Resume)
+		return runTermUI(ctx, h, mgr, args.AgentID, cwd, args.Resume, args.Model)
 	}
 	if err := ctx.Err(); err != nil {
 		return err

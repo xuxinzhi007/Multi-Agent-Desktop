@@ -102,7 +102,7 @@ multi-agent-desktop-app -headless -resume               # 接着最近的会话
 multi-agent-desktop-app -headless -h                    # 全部参数
 ```
 
-会话内：`/new`（建会话，默认当前目录）、`/cd <路径>`（切目录）、`/model`（换模型）、`/resume`、`/stop`、`/quit`。TUI 的进程日志落在 `$TMPDIR/mad-cli.log`，不插进画面。
+会话内：`/new`（建会话，默认当前目录）、`/cd <路径>`（切主目录）、`/add-dir <路径>`（加附加工作区根）、`/mode ask|auto|readonly`（审批模式）、`/model`（换模型）、`/resume`（恢复已有会话，自动校验原目录）、`/tools` 或 `Ctrl+O`（查看工具入参/输出/完整 diff）、`/copy [序号]`（复制回复或代码段）、`/clear`、`/stop`（或 `Esc`）、`/quit`。多行编辑支持 `Alt+Enter`/`Ctrl+J` 换行与 `↑/↓` 历史；写操作审批弹按键卡片（`y`/`a`/`n` 或方向键确认）。TUI 进程日志落在 `$TMPDIR/mad-cli.log`，不插进画面。
 
 ---
 
@@ -336,5 +336,6 @@ multi-agent-desktop/
 
 ## License
 
-TBD —— 参考的 Tempest / Berd / Goose 均为 Apache 2.0。
+Apache License 2.0（见根目录 `LICENSE`）。
+终端界面组件 `internal/clitui` 部分改编自 `oschina/mothx`（MIT，见 `internal/clitui/THIRD_PARTY_NOTICES.md`）。
 小鲸鱼素材来自 `dsh-deepseek-pet`，授权见其 `ASSET_LICENSE.md`。

@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"multi-agent-desktop/internal/agent"
+	"multi-agent-desktop/internal/approval"
 	"multi-agent-desktop/internal/llm"
+	"multi-agent-desktop/internal/tool"
 )
 
 func TestParseCLIArgsTakesCwdByDefault(t *testing.T) {
@@ -21,13 +25,11 @@ func TestParseCLIArgsTakesCwdByDefault(t *testing.T) {
 		t.Fatalf("args = %+v workDir=%q want %q", got, got.workDir(), cwd)
 	}
 
-	// 位置参数等价于 -C：`app -headless ~/proj`
 	got = parseCLIArgs([]string{"-headless", cwd})
 	if got.workDir() != cwd {
 		t.Fatalf("位置参数没当目录：%+v", got)
 	}
 
-	// 不带任何目录时退回进程当前目录。
 	got = parseCLIArgs([]string{"-headless"})
 	if got.workDir() == "" {
 		t.Fatal("没给目录时应当是当前目录，不是空")
@@ -61,7 +63,6 @@ func TestEnsureCLIAgentCreatesOneInCwd(t *testing.T) {
 	if got := a.EffectiveWorkDir(mgr); got != cwd {
 		t.Fatalf("会话目录 = %q，want %q", got, cwd)
 	}
-	// 不应该把 history 里的老会话抓过来。
 	if len(mgr.List()) != 1 {
 		t.Fatalf("只该有 1 个会话，实际 %d", len(mgr.List()))
 	}
@@ -72,7 +73,7 @@ func TestEnsureCLIAgentResumesExisting(t *testing.T) {
 	t.Cleanup(mgr.Shutdown)
 	old := mgr.Create("agent-old", "旧会话", "后端")
 
-	id, err := ensureCLIAgent(mgr, "", t.TempDir(), true)
+	id, err := ensureCLIAgent(mgr, "", testWorkDir(t), true)
 	if err != nil {
 		t.Fatalf("ensureCLIAgent: %v", err)
 	}
@@ -87,8 +88,8 @@ func TestCLIModelNewCarriesWorkDir(t *testing.T) {
 	t.Cleanup(mgr.Shutdown)
 
 	m := newCLIModel(context.Background(), mgr, "", cwd, false)
-	if !strings.Contains(m.body.String(), cwd) && !strings.Contains(m.body.String(), "~") {
-		t.Fatalf("开场没写当前目录：%q", m.body.String())
+	if !strings.Contains(m.plainTranscript(), cwd) && !strings.Contains(m.plainTranscript(), "~") {
+		t.Fatalf("开场没写当前目录：%q", m.plainTranscript())
 	}
 	a, ok := mgr.Get(m.agentID)
 	if !ok {
@@ -111,15 +112,14 @@ func TestCLIModelNewCarriesWorkDir(t *testing.T) {
 	}
 }
 
-// 只敲一个 "/" 回车，应该是"看清单"，不能是"未知指令"再糊一遍全表。
 func TestSlashAloneShowsHelp(t *testing.T) {
 	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
 	t.Cleanup(mgr.Shutdown)
-	m := newCLIModel(context.Background(), mgr, "", t.TempDir(), false)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
 
-	before := m.body.String()
+	before := m.plainTranscript()
 	_, _ = m.submit("/")
-	after := m.body.String()
+	after := m.plainTranscript()
 	if strings.Contains(after[len(before):], "未知指令") {
 		t.Fatalf("打了「未知指令」：%q", after[len(before):])
 	}
@@ -131,11 +131,11 @@ func TestSlashAloneShowsHelp(t *testing.T) {
 func TestUnknownSlashIsOneLine(t *testing.T) {
 	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
 	t.Cleanup(mgr.Shutdown)
-	m := newCLIModel(context.Background(), mgr, "", t.TempDir(), false)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
 
-	before := len(m.body.String())
+	before := len(m.plainTranscript())
 	_, _ = m.execSlash("/不存在", "")
-	added := m.body.String()[before:]
+	added := m.plainTranscript()[before:]
 	if strings.Count(added, "\n") > 2 {
 		t.Fatalf("未知指令打了多行：%q", added)
 	}
@@ -179,7 +179,7 @@ func TestRenderDiffColorsAndCaps(t *testing.T) {
 	}
 
 	long := strings.Repeat("+加一行\n", 40)
-	got = renderDiff(long, 40, 20)
+	got = renderDiff(long, 60, 20)
 	if !strings.Contains(got, "还有 20 行") {
 		t.Fatalf("超长 diff 没截断提示：%q", got)
 	}
@@ -200,8 +200,6 @@ func TestHumanDuration(t *testing.T) {
 	}
 }
 
-// testWorkDir 用 /tmp 下的短目录：t.TempDir() 的路径太长，
-// 会被状态栏的 fitWidth(40) 截断，断言"目录显示出来"就不可靠。
 func testWorkDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "mad-cli")
@@ -240,9 +238,7 @@ func TestApplyCLIModelMatchesProviderName(t *testing.T) {
 	}
 }
 
-// View 的总行数必须等于终端高度：多一行 alt-screen 就会把底部推上去，
-// 表现就是状态栏和输入框叠在一起。
-func TestViewFitsTerminalHeight(t *testing.T) {
+func TestViewHeightMatchesTerminal(t *testing.T) {
 	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
 	t.Cleanup(mgr.Shutdown)
 	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
@@ -250,15 +246,8 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 	for _, size := range []struct{ w, h int }{{80, 24}, {100, 30}, {60, 16}} {
 		m.width = size.w
 		m.height = size.h
-		m.input.SetWidth(size.w)
 		m.layout()
 		body := m.View()
-		t.Logf("%dx%d: vp=%d input=%d status=%d body=%d",
-			size.w, size.h,
-			strings.Count(m.vp.View(), "\n")+1,
-			strings.Count(m.input.View(), "\n")+1,
-			strings.Count(m.statusLine(), "\n")+1,
-			strings.Count(body, "\n")+1)
 		lines := strings.Count(body, "\n") + 1
 		if lines != size.h {
 			t.Fatalf("%dx%d 的 View 有 %d 行（want %d）\n%s", size.w, size.h, lines, size.h, body)
@@ -269,20 +258,12 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 			}
 		}
 	}
-}
 
-// 菜单展开时也要正好占满高度（菜单多 8 行，viewport 要相应变矮）。
-func TestViewFitsWithMenuOpen(t *testing.T) {
-	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
-	t.Cleanup(mgr.Shutdown)
-	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
 	m.width, m.height = 80, 24
-	m.input.SetValue("/")
-	m.refreshMenu()
-	m.layout()
-
-	if !m.menuOn {
-		t.Fatal("打 / 之后菜单应当展开")
+	m.input = m.input.SetValue("/")
+	m.suggest = m.suggest.Update("/")
+	if !m.suggest.Visible() {
+		t.Fatal("打 / 之后补全菜单应当展开")
 	}
 	if lines := strings.Count(m.View(), "\n") + 1; lines != 24 {
 		t.Fatalf("菜单展开时 View 有 %d 行（want 24）", lines)
@@ -302,5 +283,186 @@ func TestStatusLineShowsDirAndShortModel(t *testing.T) {
 	}
 	if lipgloss.Width(line) > m.width {
 		t.Fatalf("状态栏宽 %d > %d：%q", lipgloss.Width(line), m.width, line)
+	}
+}
+
+func TestCLIApprovalCardDecides(t *testing.T) {
+	var m *cliModel
+	center := approval.New(func(ev string, data any) {
+		if m != nil {
+			m.onEvent(cliMsg{event: ev, data: data})
+		}
+	})
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	mgr.SetApprovals(center)
+	t.Cleanup(mgr.Shutdown)
+
+	m = newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	done := make(chan bool, 1)
+	go func() {
+		allowed, _ := center.Approver(m.agentID, "Agent").Approve(context.Background(), tool.Call{
+			Name:  "bash",
+			Input: []byte(`{"command":"echo ok"}`),
+		})
+		done <- allowed
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(center.Pending()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !m.approvals.Active() {
+		t.Fatal("TUI 未收到审批卡片")
+	}
+	if lines := strings.Count(m.View(), "\n") + 1; lines != m.height {
+		t.Fatalf("审批展开时高度不对：%d != %d", lines, m.height)
+	}
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	select {
+	case allowed := <-done:
+		if !allowed {
+			t.Fatal("按 y 后审批结果应为 allowed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("按键决定没有解开阻塞的审批")
+	}
+}
+
+func TestCLIToolModalShowsOutputAndDiff(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 90, 26
+
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id": m.agentID, "callId": "call-1", "tool": "edit_file",
+			"phase": "start", "content": "main.go", "input": `{"path":"main.go"}`,
+		},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id": m.agentID, "callId": "call-1", "tool": "edit_file",
+			"phase": "end", "status": "ok", "path": "main.go",
+			"output": "edited main.go", "diff": "--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n",
+			"durationMs": 42,
+		},
+	})
+
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	if !m.toolModal.Open() {
+		t.Fatal("Ctrl+O 应当打开工具详情弹层")
+	}
+	view := m.View()
+	if lines := strings.Count(view, "\n") + 1; lines != 26 {
+		t.Fatalf("弹层打开时 View 行数 = %d, want 26", lines)
+	}
+	for _, want := range []string{"edit_file", "main.go", "+new"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("弹层少了 %q：\n%s", want, view)
+		}
+	}
+	_, _ = m.onKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.toolModal.Open() {
+		t.Fatal("Esc 应当关闭工具详情弹层")
+	}
+}
+
+func TestCLIAddDirAndModeCommands(t *testing.T) {
+	cwd := testWorkDir(t)
+	extra := testWorkDir(t)
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	mgr.SetApprovals(approval.New(func(string, any) {}))
+	t.Cleanup(mgr.Shutdown)
+
+	m := newCLIModel(context.Background(), mgr, "", cwd, false)
+	out := m.cmdAddDir(extra)
+	if !strings.Contains(out, "已添加") {
+		t.Fatalf("/add-dir 输出异常：%q", out)
+	}
+	a, _ := mgr.Get(m.agentID)
+	if dirs := a.EffectiveExtraDirs(); len(dirs) != 1 || dirs[0] != extra {
+		t.Fatalf("附加目录未落到会话：%#v", dirs)
+	}
+	_ = m.cmdAddDir("clear")
+	if dirs := a.EffectiveExtraDirs(); len(dirs) != 0 {
+		t.Fatalf("clear 后仍残留目录：%#v", dirs)
+	}
+
+	if got := m.cmdMode("auto"); !strings.Contains(got, "auto") {
+		t.Fatalf("/mode auto 输出异常：%q", got)
+	}
+	if mode := mgr.Approvals().ModeOf(m.agentID); mode != approval.ModeAuto {
+		t.Fatalf("审批模式未切为 auto：%q", mode)
+	}
+}
+
+func TestCLIResumePreservesValidWorkDir(t *testing.T) {
+	origDir := testWorkDir(t)
+	launchDir := testWorkDir(t)
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+
+	old := mgr.Create("agent-keep", "老项目", "")
+	if err := mgr.SetAgentWorkDir(old.ID, origDir); err != nil {
+		t.Fatalf("SetAgentWorkDir: %v", err)
+	}
+
+	m := newCLIModel(context.Background(), mgr, "", launchDir, true)
+	if m.agentID != old.ID {
+		t.Fatalf("resume 没选中老会话：%s", m.agentID)
+	}
+	if got := old.EffectiveWorkDir(mgr); got != origDir {
+		t.Fatalf("有效原目录被启动目录覆盖：got %q, want %q", got, origDir)
+	}
+
+	gone := filepath.Join(testWorkDir(t), "deleted-sub")
+	_ = os.MkdirAll(gone, 0o755)
+	stale := mgr.Create("agent-stale", "已删目录会话", "")
+	if err := mgr.SetAgentWorkDir(stale.ID, gone); err != nil {
+		t.Fatalf("SetAgentWorkDir stale: %v", err)
+	}
+	_ = os.RemoveAll(gone)
+
+	m.cwd = launchDir
+	res := m.cmdResume(stale.ID)
+	if !strings.Contains(res, "已不存在") {
+		t.Fatalf("原目录被删时未提示回退：%q", res)
+	}
+	if got := stale.EffectiveWorkDir(mgr); got != launchDir {
+		t.Fatalf("缺失目录未回退到当前目录：got %q, want %q", got, launchDir)
+	}
+}
+
+func TestCLICopyExtractsCodeBlock(t *testing.T) {
+	var copied string
+	old := writeClipboard
+	writeClipboard = func(s string) error {
+		copied = s
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = old })
+
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.onEvent(cliMsg{
+		event: "agent.message",
+		data: map[string]any{
+			"id": m.agentID,
+			"message": llm.Message{
+				Role:    "assistant",
+				Content: "看这段：\n```go\nfmt.Println(42)\n```\n完成。",
+			},
+		},
+	})
+	if out := m.cmdCopy("1"); !strings.Contains(out, "第 1 段代码") {
+		t.Fatalf("/copy 1 输出异常：%q", out)
+	}
+	if strings.TrimSpace(copied) != "fmt.Println(42)" {
+		t.Fatalf("复制内容 = %q", copied)
 	}
 }
