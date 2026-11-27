@@ -193,18 +193,25 @@ func (m VScroll) Update(msg tea.Msg) (VScroll, tea.Cmd) {
 		}
 		if msg.Action == tea.MouseActionRelease && m.selDragging {
 			m.selDragging = false
-			if m.selActive {
-				txt := m.selectedPlainText()
-				m.selActive = false
-				if strings.TrimSpace(txt) != "" {
-					return m, func() tea.Msg { return SelectionCopiedMsg{Text: txt} }
-				}
-			}
-			m.selActive = false
+			// 保持 m.selActive 高亮选区不消失，交由用户显式复制或点击空白/Esc取消
 			return m, nil
 		}
 	}
 	return m, nil
+}
+
+func (m VScroll) HasSelection() bool {
+	return m.selActive
+}
+
+func (m VScroll) SelectedText() string {
+	return m.selectedPlainText()
+}
+
+func (m VScroll) ClearSelection() VScroll {
+	m.selDragging = false
+	m.selActive = false
+	return m
 }
 
 func (m VScroll) normalizedSelection() (sLine, sCol, eLine, eCol int) {

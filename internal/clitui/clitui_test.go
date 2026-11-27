@@ -250,3 +250,33 @@ func TestBannerRenderWideAndNarrow(t *testing.T) {
 		t.Fatalf("narrow banner missing core info:\n%s", narrow)
 	}
 }
+
+func TestEditorInsertTextAndAtomicImageTagBackspace(t *testing.T) {
+	th := DefaultTheme()
+	ed := NewEditor(80, th)
+
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("请看图：")})
+	ed = ed.InsertText("[Image #1] ")
+	if ed.Value() != "请看图：[Image #1] " {
+		t.Fatalf("InsertText 应在光标处插入标签，got %q", ed.Value())
+	}
+
+	// 按一次 Backspace 应整块删除 `[Image #1] `，而不是只删掉一个空格或 `]`
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if ed.Value() != "请看图：" {
+		t.Fatalf("一次 Backspace 应整块删除 [Image #1] 标签，got %q", ed.Value())
+	}
+
+	// 在文字中间插入标签，移动光标到标签后按一次 Backspace 同样整块删除
+	ed = ed.Reset().SetValue("前缀 后缀")
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	ed = ed.InsertText("[Image #12] ")
+	if ed.Value() != "前缀 [Image #12] 后缀" {
+		t.Fatalf("中间插入标签结果异常，got %q", ed.Value())
+	}
+	ed, _ = ed.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if ed.Value() != "前缀 后缀" {
+		t.Fatalf("中间位置一次 Backspace 应整块删除 [Image #12] ，got %q", ed.Value())
+	}
+}

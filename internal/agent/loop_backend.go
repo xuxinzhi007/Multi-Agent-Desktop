@@ -202,8 +202,10 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	if mem := m.Memory(); mem != nil {
 		reg.Register(memory.NewSearchTool(mem))
 	}
+	if len(m.ListSkillsFor(workDir)) > 0 || m.Skills() != nil {
+		reg.Register(&readSkillTool{m: m, workDir: workDir})
+	}
 	if m.Skills() != nil {
-		reg.Register(&readSkillTool{m: m})
 		reg.Register(&saveSkillTool{m: m})
 	}
 
@@ -245,8 +247,11 @@ func prepareNativeLoop(m *Manager, a *Agent, runCtx context.Context, text, chann
 	if block := learnBlock(learnAt, learnText, learnSource(history)); block != "" {
 		dynamicParts = append(dynamicParts, block)
 	}
-	if cat := m.skillCatalog(); cat != "" {
+	if cat := m.skillCatalogFor(workDir); cat != "" {
 		dynamicParts = append(dynamicParts, cat)
+	}
+	if guideFile, guideBody := LoadWorkspaceGuide(workDir); guideBody != "" {
+		dynamicParts = append(dynamicParts, fmt.Sprintf("项目规范（来自工作区 %s）：\n%s", guideFile, guideBody))
 	}
 	dynamicParts = append(dynamicParts, loopSystemPromptDynamic(workDir, a.EffectiveExtraDirs(), m.FeishuOn()))
 

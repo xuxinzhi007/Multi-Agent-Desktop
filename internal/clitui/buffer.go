@@ -128,8 +128,12 @@ func (b *buffer) DeleteBack() {
 	b.clampCursor()
 	if b.cursorCol > 0 {
 		runes := []rune(b.lines[b.cursorLine])
-		b.lines[b.cursorLine] = string(append(runes[:b.cursorCol-1], runes[b.cursorCol:]...))
-		b.cursorCol--
+		delN := atomicImageTagLenBefore(runes[:b.cursorCol])
+		if delN < 1 {
+			delN = 1
+		}
+		b.lines[b.cursorLine] = string(append(runes[:b.cursorCol-delN], runes[b.cursorCol:]...))
+		b.cursorCol -= delN
 		b.preferredCol = b.cursorCol
 	} else if b.cursorLine > 0 {
 		prev := b.lines[b.cursorLine-1]
@@ -140,6 +144,42 @@ func (b *buffer) DeleteBack() {
 		b.cursorLine--
 		b.preferredCol = b.cursorCol
 	}
+}
+
+func atomicImageTagLenBefore(before []rune) int {
+	end := len(before)
+	if end == 0 {
+		return 0
+	}
+	trailingSpace := 0
+	if before[end-1] == ' ' {
+		trailingSpace = 1
+		end--
+	}
+	if end < len("[Image #1]") || before[end-1] != ']' {
+		return 0
+	}
+	i := end - 2
+	digits := 0
+	for i >= 0 && before[i] >= '0' && before[i] <= '9' {
+		digits++
+		i--
+	}
+	if digits == 0 {
+		return 0
+	}
+	const prefix = "[Image #"
+	prefRunes := []rune(prefix)
+	start := i - len(prefRunes) + 1
+	if start < 0 {
+		return 0
+	}
+	for k, pr := range prefRunes {
+		if before[start+k] != pr {
+			return 0
+		}
+	}
+	return (end - start) + trailingSpace
 }
 
 func (b *buffer) DeleteForward() {

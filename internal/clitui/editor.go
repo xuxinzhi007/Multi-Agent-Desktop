@@ -59,6 +59,14 @@ func (m Editor) SetValue(text string) Editor {
 	return m
 }
 
+func (m Editor) InsertText(text string) Editor {
+	if text == "" {
+		return m
+	}
+	m.buf.InsertString(text)
+	return m
+}
+
 func (m Editor) Reset() Editor {
 	m.buf.Reset()
 	m.histIdx = -1

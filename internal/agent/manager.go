@@ -181,9 +181,10 @@ type Manager struct {
 
 	// testModel / testTools 仅测试用：替换进程内 loop 的模型调用器并追加测试工具。
 	// 生产路径恒为 nil，外部不得设置。
-	testModel   loop.Model
-	testTools   []tool.Tool
-	pluginTools func(workDir, agentID string) []tool.Tool
+	testModel      loop.Model
+	testTools      []tool.Tool
+	pluginTools    func(workDir, agentID string) []tool.Tool
+	externalSkills bool
 
 	// saveMu 串行化落盘：Create/SetAgent*/Delete 都会 go m.Save()，
 	// 并发写同一个文件会互相截断产生损坏的 JSON。

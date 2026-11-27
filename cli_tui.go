@@ -6,11 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -30,11 +27,6 @@ import (
 
 var writeClipboard = clipboard.WriteAll
 var readClipboardImage = defaultReadClipboardImage
-
-type draftImage struct {
-	mime string
-	data []byte
-}
 
 type cliMsg struct {
 	event string
@@ -56,6 +48,18 @@ type slashCmd struct {
 func cliSlashCommands() []slashCmd {
 	return []slashCmd{
 		{Name: "/help", Hint: "列出指令与快捷键"},
+		{Name: "/status", Hint: "查看工作区、Git、会话、上下文与生态状态"},
+		{Name: "/context", Hint: "查看上下文窗口占用拆解、AGENTS.md 与挂载能力"},
+		{Name: "/compact", Args: "[保留重点]", Hint: "智能压缩历史消息以释放上下文窗口"},
+		{Name: "/undo", Hint: "撤回上一轮用户提问与助手回复"},
+		{Name: "/diff", Args: "[git参数]", Hint: "查看当前 Git 工作区变更统计"},
+		{Name: "/review", Args: "[范围]", Hint: "对当前改动执行严格代码审查"},
+		{Name: "/init", Hint: "扫描当前仓库自动生成或更新 AGENTS.md"},
+		{Name: "/skills", Args: "[reload|<技能名>]", Hint: "查看开放目录 SKILL.md 技能或按名激活"},
+		{Name: "/mcp", Hint: "查看已连接 MCP 服务、状态与工具列表"},
+		{Name: "/doctor", Hint: "自检模型连通性、工具链、规则与 MCP/Skills"},
+		{Name: "/cost", Hint: "查看当前会话 Token 消耗与窗口统计"},
+		{Name: "/export", Args: "[路径.md]", Hint: "将当前会话导出为 Markdown 文件"},
 		{Name: "/new", Args: "[名字]", Hint: "在当前目录新建会话"},
 		{Name: "/resume", Args: "[名字|ID]", Hint: "列出或切换到已有会话"},
 		{Name: "/session", Hint: "查看当前会话、模型与工作区根"},
@@ -63,7 +67,7 @@ func cliSlashCommands() []slashCmd {
 		{Name: "/model", Args: "[provider/model]", Hint: "交互式切换提供商与模型（同 Ctrl+K）"},
 		{Name: "/cd", Args: "[目录]", Hint: "切换主工作目录"},
 		{Name: "/add-dir", Args: "[目录|-|clear]", Hint: "管理附加工作区根"},
-		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式"},
+		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式（同 Shift+Tab）"},
 		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态"},
 		{Name: "/logs", Args: "[status|auth <token>|查询条件]", Hint: "查询 ACK 服务日志或管理 devops.x2robot.com 凭证"},
 		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件"},
@@ -79,7 +83,7 @@ func cliSlashCommands() []slashCmd {
 
 func slashHelp(cmds []slashCmd) string {
 	var b strings.Builder
-	b.WriteString("指令\n")
+	b.WriteString("指令（支持 `!<命令>` 直跑本地 Shell · `/<技能名>` 直接激活 SKILL.md）\n")
 	for _, c := range cmds {
 		label := c.Name
 		if c.Args != "" {
@@ -87,7 +91,7 @@ func slashHelp(cmds []slashCmd) string {
 		}
 		fmt.Fprintf(&b, "  %-24s %s\n", label, c.Hint)
 	}
-	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · Ctrl+V 贴图/粘贴 · 鼠标滚轮/PgUp/PgDn 滚输出 · ↑/↓ 输入历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
+	b.WriteString("\n快捷键  Enter 发送 · !<cmd> 本地命令 · Shift+Tab 切权限 · Ctrl+K 切模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · 拖拽划词后 Ctrl+C/y 复制 · Esc 停止/取消选中")
 	return b.String()
 }
 
@@ -175,8 +179,10 @@ type cliModel struct {
 	cwd             string
 	lastErr         string
 	draftImages     []draftImage
+	nextImageID     int
 	copyNotice      string
 	copyNoticeUntil time.Time
+	ctxStats        agent.ContextStats
 }
 
 func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) *cliModel {
@@ -186,7 +192,7 @@ func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, r
 	if mgr != nil {
 		mgr.SetPluginTools(plugMgr.Tools)
 	}
-	cmds := buildAllSlashCommands(plugMgr)
+	cmds := buildAllSlashCommands(plugMgr, mgr, cwd)
 	items := make([]clitui.SuggestItem, 0, len(cmds))
 	for _, c := range cmds {
 		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
@@ -232,6 +238,7 @@ func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, r
 		m.agentID = ""
 		m.pushSystem("没有这个会话。用 /resume 选择，或 /new 新建。")
 	}
+	m.refreshContextStats()
 	m.layout()
 	return m
 }
@@ -336,6 +343,7 @@ func (m *cliModel) syncAgentState(a *agent.Agent, banner bool) {
 			}
 		}
 	}
+	m.refreshContextStats()
 	m.rebuildViewport(true)
 }
 
@@ -994,10 +1002,7 @@ func (m *cliModel) layout() {
 	if m.busy {
 		activityH = 1
 	}
-	draftImgH := 0
-	if len(m.draftImages) > 0 {
-		draftImgH = 1
-	}
+	draftImgH := m.draftImagesHeight()
 
 	inputH := m.input.Height()
 	overlayH := m.suggest.Height()
@@ -1055,6 +1060,9 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyNoticeUntil = time.Now().Add(3 * time.Second)
 		}
 		return m, nil
+	case cliBangResultMsg:
+		m.onBangResult(msg)
+		return m, nil
 	case cliMsg:
 		m.onEvent(msg)
 		m.layout()
@@ -1062,6 +1070,7 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cliTurnDone:
 		m.finishLiveCells()
 		m.busy = false
+		m.refreshContextStats()
 		if msg.err != nil && msg.err.Error() != m.lastErr {
 			m.lastErr = msg.err.Error()
 			m.pushError(msg.err.Error())
@@ -1075,6 +1084,9 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m.submit(line)
 	case tea.MouseMsg:
+		if m.handleDraftAttachmentMouse(msg) {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
@@ -1115,9 +1127,49 @@ func (m *cliModel) toggleThinkExpanded() {
 	m.rebuildViewport(false)
 }
 
+func (m *cliModel) copyActiveSelection() bool {
+	if !m.vp.HasSelection() {
+		return false
+	}
+	txt := m.vp.SelectedText()
+	m.vp = m.vp.ClearSelection()
+	if strings.TrimSpace(txt) == "" {
+		return true
+	}
+	if err := copyToClipboardWithOSC52(txt); err != nil {
+		m.copyNotice = "复制失败: " + firstLine(err.Error())
+	} else {
+		m.copyNotice = fmt.Sprintf("✓ 已复制 (%d 字)", utf8.RuneCountInString(txt))
+	}
+	m.copyNoticeUntil = time.Now().Add(3 * time.Second)
+	return true
+}
+
 func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
+		if m.copyActiveSelection() {
+			m.layout()
+			return m, nil
+		}
 		return m, tea.Quit
+	}
+	if m.vp.HasSelection() {
+		switch msg.String() {
+		case "ctrl+y":
+			m.copyActiveSelection()
+			m.layout()
+			return m, nil
+		case "y":
+			if strings.TrimSpace(m.input.Value()) == "" {
+				m.copyActiveSelection()
+				m.layout()
+				return m, nil
+			}
+		case "esc":
+			m.vp = m.vp.ClearSelection()
+			m.layout()
+			return m, nil
+		}
 	}
 	if m.bannerFrame < clitui.BannerMaxFrame {
 		m.settleBanner()
@@ -1142,6 +1194,11 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.String() == "ctrl+k" {
 		m.openModelPicker()
+		m.layout()
+		return m, nil
+	}
+	if msg.String() == "shift+tab" {
+		m.cyclePermissionMode()
 		m.layout()
 		return m, nil
 	}
@@ -1233,8 +1290,13 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
 	}
+	if m.interceptKeyPasteImagePaths(msg) {
+		m.layout()
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.syncDraftImagesWithInput()
 	curVal := m.input.Value()
 	if curVal == "/resume " || curVal == "/model " || curVal == "/mode " {
 		slashName := strings.TrimSpace(curVal)
@@ -1291,6 +1353,9 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if strings.HasPrefix(line, "!") {
+		return m.execBangCommand(line)
+	}
 	if strings.HasPrefix(line, "/") {
 		name, arg := splitSlash(line)
 		return m.execSlash(name, arg)
@@ -1315,19 +1380,24 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.attachDraggedImageIfPath(&line)
-	blocks, imgErr := m.consumeDraftImages()
+	m.extractInlineImagePaths(&line)
+	blocks, imgPaths, imgErr := m.consumeDraftImages()
 	if imgErr != nil {
 		m.pushError("图片保存失败：" + imgErr.Error())
 		m.layout()
 		return m, nil
 	}
-	if line == "" && len(blocks) > 0 {
-		line = "请结合附图分析"
+	promptText := line
+	if stripOnlyImageTags(promptText) == "" && len(blocks) > 0 {
+		promptText = "请结合附图分析"
 	}
-	userLabel := line
+	userLabel := promptText
 	if len(blocks) > 0 {
-		userLabel = fmt.Sprintf("[附图 ×%d] %s", len(blocks), line)
+		if len(imgPaths) > 0 {
+			userLabel = fmt.Sprintf("[附图 ×%d · %s] %s", len(blocks), strings.Join(imgPaths, ", "), promptText)
+		} else {
+			userLabel = fmt.Sprintf("[附图 ×%d] %s", len(blocks), promptText)
+		}
 	}
 
 	m.busy = true
@@ -1348,9 +1418,9 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		var err error
 		if len(blocks) > 0 {
-			_, err = mgr.RunBlocks(ctx, id, line, blocks)
+			_, err = mgr.RunBlocks(ctx, id, promptText, blocks)
 		} else {
-			_, err = mgr.RunPrompt(ctx, id, line)
+			_, err = mgr.RunPrompt(ctx, id, promptText)
 		}
 		return cliTurnDone{err: err}
 	}
@@ -1370,7 +1440,40 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	case "/quit", "/exit":
 		return m, tea.Quit
 	case "/help":
-		m.pushSystem(slashHelp(m.cmds))
+		m.pushSystem(slashHelp(cliSlashCommands()))
+	case "/status":
+		m.pushSystem(m.cmdStatus())
+	case "/context":
+		m.pushSystem(m.cmdContext())
+	case "/compact":
+		m.pushSystem(m.cmdCompact(arg))
+	case "/undo":
+		m.pushSystem(m.cmdUndo())
+	case "/diff":
+		m.pushSystem(m.cmdDiff(arg))
+	case "/review":
+		m.layout()
+		return m.submit(m.cmdReview(arg))
+	case "/init":
+		m.layout()
+		return m.submit(m.cmdInitRepo())
+	case "/skills":
+		out, prompt := m.cmdSkills(arg)
+		if out != "" {
+			m.pushSystem(out)
+		}
+		if prompt != "" {
+			m.layout()
+			return m.submit(prompt)
+		}
+	case "/mcp":
+		m.pushSystem(m.cmdMCP())
+	case "/doctor":
+		m.pushSystem(m.cmdDoctor())
+	case "/cost":
+		m.pushSystem(m.cmdCost())
+	case "/export":
+		m.pushSystem(m.cmdExport(arg))
 	case "/new":
 		m.pushSystem(m.cmdNew(arg))
 	case "/resume":
@@ -1456,7 +1559,11 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 			m.layout()
 			return m, nil
 		}
-		m.pushSystem("未知指令 " + name + "，/help 看全部，或用 /plugins init <名> 创建自定义插件指令")
+		if prompt, ok := m.tryInvokeSkillSlash(name, arg); ok {
+			m.layout()
+			return m.submit(prompt)
+		}
+		m.pushSystem("未知指令 " + name + "，/help 看系统命令，/skills 看已发现技能，或用 /plugins init <名> 创建插件")
 	}
 	m.layout()
 	return m, nil
@@ -1497,34 +1604,66 @@ func (m *cliModel) cmdCD(arg string) string {
 		}
 	}
 	m.reloadPlugins()
+	m.refreshContextStats()
 	return "目录 " + shortPath(abs)
 }
 
-func buildAllSlashCommands(pm *plugin.Manager) []slashCmd {
+func buildAllSlashCommands(pm *plugin.Manager, mgr *agent.Manager, cwd string) []slashCmd {
 	base := cliSlashCommands()
-	if pm == nil {
-		return base
-	}
 	existing := make(map[string]bool, len(base))
 	for _, c := range base {
 		existing[c.Name] = true
 	}
-	for _, bc := range pm.Commands() {
-		if existing[bc.Spec.Name] {
-			continue
+	if pm != nil {
+		for _, bc := range pm.Commands() {
+			if existing[bc.Spec.Name] {
+				continue
+			}
+			hint := bc.Spec.Hint
+			if hint == "" {
+				hint = "自定义插件命令"
+			}
+			hint += " [" + bc.PluginName + "]"
+			existing[bc.Spec.Name] = true
+			base = append(base, slashCmd{
+				Name: bc.Spec.Name,
+				Args: bc.Spec.Args,
+				Hint: hint,
+			})
 		}
-		hint := bc.Spec.Hint
-		if hint == "" {
-			hint = "自定义插件命令"
+	}
+	if mgr != nil {
+		for _, sk := range mgr.ListSkillsFor(cwd) {
+			if !isSafeSlashSkillName(sk.Name) {
+				continue
+			}
+			slash := "/" + sk.Name
+			if existing[slash] {
+				continue
+			}
+			existing[slash] = true
+			hint := sk.Description
+			if hint == "" {
+				hint = "开放技能 (SKILL.md)"
+			}
+			if sk.Scope == "workspace" {
+				hint = "[工作区技能] " + hint
+			} else {
+				hint = "[技能] " + hint
+			}
+			base = append(base, slashCmd{
+				Name: slash,
+				Args: "[任务说明]",
+				Hint: hint,
+			})
 		}
-		hint += " [" + bc.PluginName + "]"
-		base = append(base, slashCmd{
-			Name: bc.Spec.Name,
-			Args: bc.Spec.Args,
-			Hint: hint,
-		})
 	}
 	return base
+}
+
+func (m *cliModel) reloadSkillsAndPlugins() {
+	_ = m.reloadPlugins()
+	m.refreshContextStats()
 }
 
 func (m *cliModel) reloadPlugins() error {
@@ -1532,7 +1671,7 @@ func (m *cliModel) reloadPlugins() error {
 		m.plugins = plugin.NewManager()
 	}
 	err := m.plugins.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(m.cwd))
-	m.cmds = buildAllSlashCommands(m.plugins)
+	m.cmds = buildAllSlashCommands(m.plugins, m.mgr, m.cwd)
 	items := make([]clitui.SuggestItem, 0, len(m.cmds))
 	for _, c := range m.cmds {
 		items = append(items, clitui.SuggestItem{Name: c.Name, Args: c.Args, Hint: c.Hint})
@@ -2240,7 +2379,7 @@ func (m *cliModel) View() string {
 		}
 	}
 	if len(m.draftImages) > 0 {
-		parts = append(parts, m.draftImagesLine())
+		parts = append(parts, m.draftImagesView())
 	}
 	parts = append(parts, m.input.View(), status)
 	out := strings.Join(parts, "\n")
@@ -2347,17 +2486,17 @@ func (m *cliModel) statusLine() string {
 	if mode != "" {
 		parts = append(parts, mode)
 	}
+	parts = append(parts, m.formatContextStatusBadge())
 	if subCnt := m.activeSubAgentCount(); subCnt > 0 {
 		parts = append(parts, fmt.Sprintf("%d sub-agents", subCnt))
 	}
 	if totalTok := m.tokensIn + m.tokensOut; totalTok > 0 {
-		if totalTok >= 1000 {
-			parts = append(parts, fmt.Sprintf("%.1fk tok", float64(totalTok)/1000.0))
-		} else {
-			parts = append(parts, fmt.Sprintf("%d tok", totalTok))
-		}
+		parts = append(parts, fmt.Sprintf("耗 %s tok", formatCompactTokens(totalTok)))
 	}
-	if m.copyNotice != "" && time.Now().Before(m.copyNoticeUntil) {
+	if m.vp.HasSelection() {
+		selTxt := m.vp.SelectedText()
+		parts = append([]string{fmt.Sprintf("已选中 %d 字（Ctrl+C / y 复制 · Esc 取消）", utf8.RuneCountInString(selTxt))}, parts...)
+	} else if m.copyNotice != "" && time.Now().Before(m.copyNoticeUntil) {
 		parts = append([]string{m.copyNotice}, parts...)
 	}
 	left := strings.Join(parts, "  ·  ")
@@ -3059,203 +3198,4 @@ func redirectCLILog() {
 		return
 	}
 	log.SetOutput(f)
-}
-
-func (m *cliModel) handleCtrlVPaste() {
-	raw, mime, err := readClipboardImage()
-	if err == nil && len(raw) > 0 {
-		if len(m.draftImages) >= 8 {
-			m.pushError("一次最多附加 8 张图片（/paste clear 可清空）。")
-			return
-		}
-		m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
-		return
-	}
-	if txt, terr := clipboard.ReadAll(); terr == nil && txt != "" {
-		cur := m.input.Value()
-		m.input = m.input.SetValue(cur + txt)
-		m.suggest = m.suggest.Update(m.input.Value())
-	}
-}
-
-func (m *cliModel) cmdPaste(arg string) string {
-	arg = strings.TrimSpace(arg)
-	if arg == "clear" || arg == "-" {
-		n := len(m.draftImages)
-		m.draftImages = nil
-		return fmt.Sprintf("已清空 %d 张草稿图片。", n)
-	}
-	if arg != "" {
-		raw, mime, err := readLocalImageFile(arg, m.cwd)
-		if err != nil {
-			return "读取图片失败：" + err.Error()
-		}
-		if len(m.draftImages) >= 8 {
-			return "一次最多附加 8 张图片。"
-		}
-		m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
-		return fmt.Sprintf("已附加图片 #%d（%s，%d KB）", len(m.draftImages), mime, max(1, len(raw)/1024))
-	}
-	raw, mime, err := readClipboardImage()
-	if err != nil {
-		return "剪贴板中没有可用图片（支持截图后按 Ctrl+V，或 /paste <图片路径>）。"
-	}
-	if len(m.draftImages) >= 8 {
-		return "一次最多附加 8 张图片。"
-	}
-	m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
-	return fmt.Sprintf("已从剪贴板附加图片 #%d（%s，%d KB）", len(m.draftImages), mime, max(1, len(raw)/1024))
-}
-
-func (m *cliModel) draftImagesLine() string {
-	var tags []string
-	for i, img := range m.draftImages {
-		tags = append(tags, fmt.Sprintf("[图片 #%d · %dKB]", i+1, max(1, len(img.data)/1024)))
-	}
-	plain := " 附件: " + strings.Join(tags, " ") + "  (/paste clear 移除)"
-	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(fitWidth(plain, m.width))
-	pad := max(0, m.width-lipgloss.Width(styled))
-	return styled + strings.Repeat(" ", pad)
-}
-
-func (m *cliModel) consumeDraftImages() ([]llm.Block, error) {
-	if len(m.draftImages) == 0 {
-		return nil, nil
-	}
-	imgDir := ""
-	if m.mgr != nil {
-		imgDir = m.mgr.ImageDir()
-	}
-	if imgDir == "" {
-		imgDir = filepath.Join(os.TempDir(), "mad-cli-images")
-	}
-	blocks := make([]llm.Block, 0, len(m.draftImages))
-	for _, img := range m.draftImages {
-		id, err := llm.SaveImage(imgDir, img.mime, img.data)
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, llm.Block{
-			ID:   id,
-			MIME: img.mime,
-			Data: append([]byte(nil), img.data...),
-		})
-	}
-	m.draftImages = nil
-	return blocks, nil
-}
-
-func (m *cliModel) attachDraggedImageIfPath(line *string) {
-	if line == nil || len(m.draftImages) >= 8 {
-		return
-	}
-	cand := strings.TrimSpace(*line)
-	cand = strings.Trim(cand, "'\"")
-	cand = strings.ReplaceAll(cand, `\ `, " ")
-	raw, mime, err := readLocalImageFile(cand, m.cwd)
-	if err != nil {
-		return
-	}
-	m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
-	*line = ""
-}
-
-func readLocalImageFile(p, cwd string) ([]byte, string, error) {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return nil, "", fmt.Errorf("路径为空")
-	}
-	if strings.HasPrefix(p, "~/") {
-		p = filepath.Join(mustHome(), p[2:])
-	} else if !filepath.IsAbs(p) && cwd != "" {
-		p = filepath.Join(cwd, p)
-	}
-	switch strings.ToLower(filepath.Ext(p)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
-	default:
-		return nil, "", fmt.Errorf("仅支持 png/jpg/gif/webp")
-	}
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		return nil, "", err
-	}
-	if len(raw) == 0 || len(raw) > 8<<20 {
-		return nil, "", fmt.Errorf("图片为空或超过 8MB")
-	}
-	mime := sniffCLIImageMIME(raw)
-	if mime == "" {
-		return nil, "", fmt.Errorf("不是有效的图片文件")
-	}
-	return raw, mime, nil
-}
-
-func sniffCLIImageMIME(raw []byte) string {
-	if len(raw) >= 12 && string(raw[:4]) == "RIFF" && string(raw[8:12]) == "WEBP" {
-		return "image/webp"
-	}
-	ct := http.DetectContentType(raw)
-	switch ct {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return ct
-	}
-	return ""
-}
-
-func defaultReadClipboardImage() ([]byte, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	switch runtime.GOOS {
-	case "darwin":
-		if p, err := exec.LookPath("pngpaste"); err == nil {
-			if out, rerr := exec.CommandContext(ctx, p, "-").Output(); rerr == nil {
-				if mime := sniffCLIImageMIME(out); mime != "" {
-					return out, mime, nil
-				}
-			}
-		}
-		tmp, err := os.CreateTemp("", "mad-clip-*.png")
-		if err == nil {
-			tmpPath := tmp.Name()
-			_ = tmp.Close()
-			defer os.Remove(tmpPath)
-			script := fmt.Sprintf(`try
-set imgData to the clipboard as «class PNGf»
-set fp to open for access POSIX file %q with write permission
-set eof fp to 0
-write imgData to fp
-close access fp
-return "OK"
-on error
-return "ERR"
-end try`, tmpPath)
-			if out, rerr := exec.CommandContext(ctx, "osascript", "-e", script).Output(); rerr == nil && strings.TrimSpace(string(out)) == "OK" {
-				if raw, ferr := os.ReadFile(tmpPath); ferr == nil {
-					if mime := sniffCLIImageMIME(raw); mime != "" {
-						return raw, mime, nil
-					}
-				}
-			}
-		}
-	case "linux":
-		for _, cmd := range [][]string{
-			{"wl-paste", "--no-newline", "--type", "image/png"},
-			{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"},
-		} {
-			if bin, err := exec.LookPath(cmd[0]); err == nil {
-				if out, rerr := exec.CommandContext(ctx, bin, cmd[1:]...).Output(); rerr == nil {
-					if mime := sniffCLIImageMIME(out); mime != "" {
-						return out, mime, nil
-					}
-				}
-			}
-		}
-	}
-
-	if txt, err := clipboard.ReadAll(); err == nil {
-		if raw, mime, ferr := readLocalImageFile(strings.Trim(strings.TrimSpace(txt), "'\""), ""); ferr == nil {
-			return raw, mime, nil
-		}
-	}
-	return nil, "", fmt.Errorf("clipboard has no image")
 }

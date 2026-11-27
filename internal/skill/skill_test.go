@@ -96,3 +96,51 @@ func TestSaveOverwritesSameName(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestDiscoverSkillMDAndFoldedYAMLFrontmatter(t *testing.T) {
+	wsDir := t.TempDir()
+	globalDir := t.TempDir()
+
+	// 工作区 .cursor/skills/tdd/SKILL.md（带多行 >- description）
+	wsSkillDir := filepath.Join(wsDir, ".cursor", "skills", "tdd")
+	if err := os.MkdirAll(wsSkillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsContent := "---\nname: tdd\ndescription: >-\n  Test-driven development.\n  Use when writing tests first.\n---\n\n# Workspace TDD Body\nRed-Green-Refactor."
+	if err := os.WriteFile(filepath.Join(wsSkillDir, "SKILL.md"), []byte(wsContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 全局目录同名 tdd（应被工作区覆盖）+ 独有 code-review
+	for _, item := range []struct{ slug, md string }{
+		{"tdd", "---\nname: tdd\ndescription: Global TDD\n---\nGlobal body"},
+		{"code-review", "---\nname: code-review\ndescription: \"Review branch diffs carefully\"\n---\nReview checklist body"},
+	} {
+		d := filepath.Join(globalDir, item.slug)
+		_ = os.MkdirAll(d, 0o755)
+		_ = os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(item.md), 0o644)
+	}
+
+	list := DiscoverSkills(wsDir, nil, []string{globalDir})
+	if len(list) != 2 {
+		t.Fatalf("expected 2 deduplicated skills, got %d: %+v", len(list), list)
+	}
+	byName := map[string]Skill{}
+	for _, sk := range list {
+		if sk.Body != "" {
+			t.Fatalf("DiscoverSkills should stay lazy and omit Body: %+v", sk)
+		}
+		byName[sk.Name] = sk
+	}
+	if !strings.Contains(byName["tdd"].Description, "Test-driven development.") {
+		t.Fatalf("folded YAML description parse failed: %+v", byName["tdd"])
+	}
+	if byName["code-review"].Description != "Review branch diffs carefully" {
+		t.Fatalf("quoted YAML description parse failed: %+v", byName["code-review"])
+	}
+
+	fullTDD, ok := ReadDiscoveredSkill("tdd", wsDir, nil, []string{globalDir})
+	if !ok || !strings.Contains(fullTDD.Body, "Workspace TDD Body") {
+		t.Fatalf("expected workspace skill override body, got ok=%v %+v", ok, fullTDD)
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -1723,7 +1722,8 @@ func main() {
 		// 所以不能阻塞启动；失败只记进状态，不影响应用起不来。
 		mcpMgr := mcp.NewManager()
 		mgr.SetMCP(mcpMgr)
-		mcpServers := withBuiltinMCPServers(toMCPServers(effective.MCP.Servers))
+		initWD, _ := os.Getwd()
+		mcpServers := discoverEcosystemMCPServers(initWD, toMCPServers(effective.MCP.Servers))
 		if len(mcpServers) > 0 {
 			markDone := mcpMgr.BeginStart()
 			go func() {
@@ -1757,6 +1757,7 @@ func main() {
 		skillStore = sk
 		mgr.SetSkills(sk)
 	}
+	mgr.SetExternalSkills(true)
 	mgr.SetPluginTools(func(workDir, agentID string) []tool.Tool {
 		pm := plugin.NewManager()
 		_ = pm.Load(plugin.DefaultGlobalDir(), plugin.WorkspacePluginDir(workDir))
@@ -2140,36 +2141,109 @@ func toMCPServers(in []config.MCPServer) []mcp.ServerConfig {
 	return out
 }
 
-func resolveX2LogsMCPBinary() string {
-	candidates := []string{
-		filepath.Join(mustHome(), ".multi-agent-desktop", "bin", "x2-logs-mcp"),
-	}
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "x2-logs-mcp"))
-	}
-	for _, p := range candidates {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			return p
-		}
-	}
-	if p, err := exec.LookPath("x2-logs-mcp"); err == nil {
-		return p
-	}
-	return ""
-}
+func discoverEcosystemMCPServers(cwd string, base []mcp.ServerConfig) []mcp.ServerConfig {
+	out := make([]mcp.ServerConfig, 0, len(base)+4)
+	seenName := make(map[string]bool)
+	seenBin := make(map[string]bool)
 
-func withBuiltinMCPServers(in []mcp.ServerConfig) []mcp.ServerConfig {
-	for _, s := range in {
-		if s.Name == "x2-logs" || s.Name == "x2-logs-mcp" || strings.HasSuffix(s.Command, "x2-logs-mcp") {
-			return in
+	register := func(cfg mcp.ServerConfig) {
+		name := strings.TrimSpace(cfg.Name)
+		cmd := strings.TrimSpace(cfg.Command)
+		if name == "" || cmd == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		binBase := strings.ToLower(filepath.Base(cmd))
+		if seenName[key] {
+			return
+		}
+		if binBase != "uv" && binBase != "npx" && binBase != "node" && binBase != "python" && binBase != "python3" && seenBin[binBase] {
+			return
+		}
+		seenName[key] = true
+		seenBin[binBase] = true
+		if cfg.TimeoutMS <= 0 {
+			cfg.TimeoutMS = 20000
+		}
+		out = append(out, cfg)
+	}
+
+	for _, s := range base {
+		register(s)
+	}
+
+	if os.Getenv("MAD_DISABLE_EXTERNAL_MCP") == "1" {
+		return out
+	}
+
+	home := mustHome()
+	var jsonFiles []string
+	if strings.TrimSpace(cwd) != "" {
+		jsonFiles = append(jsonFiles,
+			filepath.Join(cwd, ".mcp.json"),
+			filepath.Join(cwd, ".cursor", "mcp.json"),
+		)
+	}
+	jsonFiles = append(jsonFiles,
+		filepath.Join(home, ".multi-agent-desktop", "mcp.json"),
+		filepath.Join(home, ".cursor", "mcp.json"),
+		filepath.Join(home, ".claude.json"),
+	)
+
+	for _, jf := range jsonFiles {
+		raw, err := os.ReadFile(jf)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		var doc struct {
+			MCPServers map[string]struct {
+				Command  string            `json:"command"`
+				Args     []string          `json:"args"`
+				Env      map[string]string `json:"env"`
+				Cwd      string            `json:"cwd"`
+				Disabled bool              `json:"disabled"`
+			} `json:"mcpServers"`
+		}
+		if json.Unmarshal(raw, &doc) != nil || len(doc.MCPServers) == 0 {
+			continue
+		}
+		for name, entry := range doc.MCPServers {
+			if entry.Disabled || strings.TrimSpace(entry.Command) == "" {
+				continue
+			}
+			register(mcp.ServerConfig{
+				Name:    name,
+				Command: entry.Command,
+				Args:    entry.Args,
+				Env:     entry.Env,
+				Dir:     entry.Cwd,
+			})
 		}
 	}
-	if bin := resolveX2LogsMCPBinary(); bin != "" {
-		return append(in, mcp.ServerConfig{
-			Name:      "x2-logs",
-			Command:   bin,
-			TimeoutMS: 20000,
-		})
+
+	for _, binDir := range []string{
+		filepath.Join(home, ".multi-agent-desktop", "bin"),
+		filepath.Join(home, "bin"),
+	} {
+		ents, err := os.ReadDir(binDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), "-mcp") {
+				continue
+			}
+			full := filepath.Join(binDir, e.Name())
+			fi, serr := os.Stat(full)
+			if serr != nil || fi.IsDir() || (fi.Mode()&0o111) == 0 {
+				continue
+			}
+			shortName := strings.TrimSuffix(e.Name(), "-mcp")
+			register(mcp.ServerConfig{
+				Name:    shortName,
+				Command: full,
+			})
+		}
 	}
-	return in
+	return out
 }

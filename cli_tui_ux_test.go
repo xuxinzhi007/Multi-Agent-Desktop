@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1083,16 +1084,29 @@ func TestMouseDragSelectAutoCopiesOutputText(t *testing.T) {
 	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 1})
 	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, X: 40, Y: 1})
 	_, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonNone, X: 40, Y: 1})
-	if cmd == nil {
-		t.Fatal("松开鼠标完成划选时应触发自动复制 Cmd")
+	if cmd != nil {
+		t.Fatal("松开鼠标时不应自动复制抢剪贴板，应保持选中状态等待用户手动复制")
 	}
-	ev := cmd()
-	_, _ = m.Update(ev)
+	if copied != "" {
+		t.Fatalf("松开鼠标时不应自动写入剪贴板，got %q", copied)
+	}
+	if !m.vp.HasSelection() {
+		t.Fatal("松开鼠标后应当保持高亮选中状态（不能立刻消失）")
+	}
+	if !strings.Contains(m.View(), "已选中") {
+		t.Fatalf("选中状态下底部状态栏应提示已选中字数与复制快捷键：\n%s", m.View())
+	}
+
+	// 有选中内容时按 Ctrl+C 执行复制且不退出程序
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if quitCmd != nil {
+		t.Fatal("有选中文本时按 Ctrl+C 应复制文本，不应触发退出 tea.Quit")
+	}
 	if !strings.Contains(copied, "hello_select_copy") {
-		t.Fatalf("选中松手后剪贴板未拿到预期文本，got %q", copied)
+		t.Fatalf("按 Ctrl+C 手动复制后剪贴板未拿到预期文本，got %q", copied)
 	}
 	if !strings.Contains(m.View(), "已复制") {
-		t.Fatalf("自动复制后状态栏应提示已复制：\n%s", m.View())
+		t.Fatalf("手动复制后状态栏应提示已复制：\n%s", m.View())
 	}
 }
 
@@ -1197,5 +1211,213 @@ func TestFileEditShowsNumberedDiffInTranscriptAndApprovalCard(t *testing.T) {
 	trView := m.View()
 	if !strings.Contains(trView, "92") || !strings.Contains(trView, "旧文案") || !strings.Contains(trView, "新文案") {
 		t.Fatalf("主对话流未按主流 CLI 风格展示带行号的 +/- 修改内容：\n%s", trView)
+	}
+}
+
+func TestMainstreamCLICommandsSkillsContextAndBangShell(t *testing.T) {
+	dir := testWorkDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Repo Guide\nAlways run go test.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skDir := filepath.Join(dir, ".agents", "skills", "my-tdd")
+	if err := os.MkdirAll(skDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skDir, "SKILL.md"), []byte("---\nname: my-tdd\ndescription: Red-Green-Refactor workflow\n---\nWrite failing test first!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", dir, false)
+	m.width, m.height = 120, 30
+	m.layout()
+
+	// 1. 底部状态栏应实时显示上下文占用百分比 (ctx)
+	if !strings.Contains(m.View(), "ctx ") {
+		t.Fatalf("状态栏未显示上下文窗口占用指标 ctx：\n%s", m.View())
+	}
+
+	// 2. /skills 应能自动扫描并列出 .cursor/skills/my-tdd/SKILL.md，且 / 自动补全包含 /my-tdd
+	_, _ = m.submit("/skills")
+	if !strings.Contains(m.plainTranscript(), "my-tdd") || !strings.Contains(m.plainTranscript(), "Red-Green-Refactor") {
+		t.Fatalf("/skills 未展示工作区 SKILL.md：\n%s", m.plainTranscript())
+	}
+	hasSkillSlash := false
+	for _, c := range m.cmds {
+		if c.Name == "/my-tdd" {
+			hasSkillSlash = true
+			break
+		}
+	}
+	if !hasSkillSlash {
+		t.Fatalf("技能未注册为直接可用的 /my-tdd 斜杠命令：%+v", m.cmds)
+	}
+
+	// 3. /context 与 /doctor 应能输出完整上下文拆解与环境诊断
+	_, _ = m.submit("/context")
+	if !strings.Contains(m.plainTranscript(), "AGENTS.md") {
+		t.Fatalf("/context 未识别工作区 AGENTS.md：\n%s", m.plainTranscript())
+	}
+	_, _ = m.submit("/doctor")
+	if !strings.Contains(m.plainTranscript(), "环境诊断") {
+		t.Fatalf("/doctor 未输出诊断报告：\n%s", m.plainTranscript())
+	}
+
+	// 4. !<cmd> 本地快捷命令直接执行，不消耗大模型轮次
+	_, bangCmd := m.submit("!echo bang_quick_shell_ok")
+	if bangCmd != nil {
+		ev := bangCmd()
+		_, _ = m.Update(ev)
+	}
+	if !strings.Contains(m.View(), "bang_quick_shell_ok") {
+		t.Fatalf("!<cmd> 快捷本地命令输出未展示在对话流中：\n%s", m.View())
+	}
+
+	// 5. /undo 与 /compact 在多轮历史下正常工作
+	if a, ok := mgr.Get(m.agentID); ok {
+		for i := 0; i < 8; i++ {
+			a.Messages = append(a.Messages,
+				llm.Message{Role: "user", Content: fmt.Sprintf("问题 %d", i)},
+				llm.Message{Role: "assistant", Content: fmt.Sprintf("回答 %d", i)},
+			)
+		}
+	}
+	_, _ = m.submit("/compact")
+	if !strings.Contains(m.plainTranscript(), "已压缩上下文") {
+		t.Fatalf("/compact 未成功压缩会话历史：\n%s", m.plainTranscript())
+	}
+	_, _ = m.submit("/undo")
+	if !strings.Contains(m.plainTranscript(), "已撤回") {
+		t.Fatalf("/undo 未成功撤回上一轮消息：\n%s", m.plainTranscript())
+	}
+}
+
+func TestCLIPasteImageTagAtomicBackspaceAndPathClick(t *testing.T) {
+	pngBytes := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+		0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}
+
+	tmpDir := t.TempDir()
+	oldPasteDir := cliPastedImageDir
+	cliPastedImageDir = func() string { return filepath.Join(tmpDir, "pasted") }
+	t.Cleanup(func() { cliPastedImageDir = oldPasteDir })
+
+	oldClipFile := readClipboardImageFile
+	readClipboardImageFile = func() (string, error) { return "", fmt.Errorf("no file") }
+	t.Cleanup(func() { readClipboardImageFile = oldClipFile })
+
+	oldClipImg := readClipboardImage
+	readClipboardImage = func() ([]byte, string, error) {
+		return pngBytes, "image/png", nil
+	}
+	t.Cleanup(func() { readClipboardImage = oldClipImg })
+
+	var copied string
+	oldWriteClip := writeClipboard
+	writeClipboard = func(s string) error {
+		copied = s
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = oldWriteClip })
+
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	mgr.SetImageDir(filepath.Join(tmpDir, "store"))
+	t.Cleanup(mgr.Shutdown)
+
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 180, 28
+	m.layout()
+
+	// 1. Ctrl+V 纯内存截图：应自动落盘生成真实文件路径，输入框插入 `[Image #1] `，附件栏显示完整路径
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if len(m.draftImages) != 1 {
+		t.Fatalf("Ctrl+V 应附加 1 张图片，got %d", len(m.draftImages))
+	}
+	savedPath := m.draftImages[0].path
+	if savedPath == "" {
+		t.Fatal("纯内存截图粘贴后应落盘生成真实文件路径")
+	}
+	if _, err := os.Stat(savedPath); err != nil {
+		t.Fatalf("生成的截图文件不存在 (%s): %v", savedPath, err)
+	}
+	if m.input.Value() != "[Image #1] " {
+		t.Fatalf("输入框应插入短标签 `[Image #1] `，got %q", m.input.Value())
+	}
+	if !strings.Contains(m.View(), savedPath) {
+		t.Fatalf("附件栏应展示真实图片完整路径 %q：\n%s", savedPath, m.View())
+	}
+
+	// 2. 按一次 Backspace：整块删掉 `[Image #1] ` 并自动同步移除草稿图片
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.input.Value() != "" {
+		t.Fatalf("一次 Backspace 后输入框应为空，got %q", m.input.Value())
+	}
+	if len(m.draftImages) != 0 {
+		t.Fatalf("删除输入框内的图片标签后，草稿附件应同步清空，got %d", len(m.draftImages))
+	}
+
+	// 3. 终端 Cmd+V / 拖拽带空格转义的真实截图路径：自动识别保留原路径并转为 `[Image #2] `
+	shotDir := filepath.Join(tmpDir, "my shots")
+	if err := os.MkdirAll(shotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realShot := filepath.Join(shotDir, "screen 01.png")
+	if err := os.WriteFile(realShot, pngBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	escapedPaste := strings.ReplaceAll(realShot, " ", `\ `)
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(escapedPaste), Paste: true})
+	if len(m.draftImages) != 1 || m.draftImages[0].path != realShot {
+		t.Fatalf("粘贴图片路径应识别并保留原真实路径 %q，got %+v", realShot, m.draftImages)
+	}
+	if !strings.Contains(m.input.Value(), "[Image #2]") {
+		t.Fatalf("粘贴图片路径应转为短标签 [Image #2]，got %q", m.input.Value())
+	}
+
+	// 4. 点击附件栏路径区域应直接复制完整路径；点击末尾 [×] 应一键删除该图片与输入框标签
+	attY := m.draftAttachmentStartY()
+	if attY < 0 {
+		t.Fatalf("应存在可点击的附件栏行号，got %d", attY)
+	}
+	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 12, Y: attY})
+	if copied != realShot {
+		t.Fatalf("点击附件栏路径应复制完整路径 %q，got %q", realShot, copied)
+	}
+	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: m.width - 2, Y: attY})
+	if len(m.draftImages) != 0 || strings.Contains(m.input.Value(), "[Image #2]") {
+		t.Fatalf("点击附件栏 [×] 应移除图片并清理输入框标签：draft=%d input=%q", len(m.draftImages), m.input.Value())
+	}
+
+	// 5. Finder/截图工具复制了真实图片文件引用 (readClipboardImageFile) 时，Ctrl+V 直接复用原真实路径不重复落盘
+	readClipboardImageFile = func() (string, error) { return realShot, nil }
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if len(m.draftImages) != 1 || m.draftImages[0].path != realShot {
+		t.Fatalf("剪贴板含图片文件引用时应直接复用原路径 %q，got %+v", realShot, m.draftImages)
+	}
+	if !strings.Contains(m.input.Value(), "[Image #3]") {
+		t.Fatalf("输入框应插入 [Image #3]，got %q", m.input.Value())
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+
+	// 6. 文本中直接混输无空格图片路径提交时，自动识别并作为视觉附件发送
+	inlineShot := filepath.Join(tmpDir, "inline-err.png")
+	if err := os.WriteFile(inlineShot, pngBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, submitCmd := m.submit("帮我看下报错 " + inlineShot + " 怎么修")
+	if submitCmd == nil {
+		t.Fatal("混输图片路径提交应返回异步执行 Cmd")
+	}
+	if !strings.Contains(m.plainTranscript(), inlineShot) {
+		t.Fatalf("发送后的用户消息应保留图片真实路径提示：\n%s", m.plainTranscript())
 	}
 }

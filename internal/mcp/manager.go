@@ -195,6 +195,20 @@ func (m *Manager) Status() []ServerStatus {
 	return out
 }
 
+// ToolsByServer 返回每个已就绪 server 暴露的原始工具名列表。
+func (m *Manager) ToolsByServer() map[string][]string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string][]string)
+	for _, t := range m.tools {
+		out[t.server] = append(out[t.server], t.rawName)
+	}
+	return out
+}
+
 // Close 结束所有连接。应用退出时调用。
 func (m *Manager) Close() {
 	if m == nil {

@@ -17,10 +17,17 @@ type SkillStore interface {
 	Save(name, description, body string) (skill.Skill, error)
 }
 
-// SetSkills 注入技能库。nil 表示这个部署没有技能。
+// SetSkills 注入技能库。nil 表示这个部署没有应用私有技能目录。
 func (m *Manager) SetSkills(s SkillStore) {
 	m.mu.Lock()
 	m.skills = s
+	m.mu.Unlock()
+}
+
+// SetExternalSkills 控制是否自动扫描用户全局标准技能目录（~/.agents/skills、~/.cursor/skills、~/.claude/skills 等）。
+func (m *Manager) SetExternalSkills(on bool) {
+	m.mu.Lock()
+	m.externalSkills = on
 	m.mu.Unlock()
 }
 
@@ -31,20 +38,54 @@ func (m *Manager) Skills() SkillStore {
 	return m.skills
 }
 
-// skillCatalog 是给这一轮系统提示用的清单。只有名字和描述。
-func (m *Manager) skillCatalog() string {
-	s := m.Skills()
-	if s == nil {
-		return ""
+// ListSkillsFor 返回指定工作区下可见的全部技能（工作区 SKILL.md > 应用存储 > 全局标准技能目录）。
+func (m *Manager) ListSkillsFor(workDir string) []skill.Skill {
+	m.mu.RLock()
+	primary := m.skills
+	ext := m.externalSkills
+	m.mu.RUnlock()
+
+	var globals []string
+	if !ext {
+		globals = []string{} // 单测未开启全局目录时保持隔离，仅扫描工作区与 primary
 	}
-	return skill.Catalog(s.List(), 20)
+	if primary == nil && !ext && strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	return skill.DiscoverSkills(workDir, primary, globals)
 }
 
-type readSkillTool struct{ m *Manager }
+// ReadSkillFor 按名称或 ID 读取指定工作区下可见的最高优先级技能全文。
+func (m *Manager) ReadSkillFor(workDir, idOrName string) (skill.Skill, bool) {
+	m.mu.RLock()
+	primary := m.skills
+	ext := m.externalSkills
+	m.mu.RUnlock()
+
+	var globals []string
+	if !ext {
+		globals = []string{}
+	}
+	return skill.ReadDiscoveredSkill(idOrName, workDir, primary, globals)
+}
+
+// skillCatalogFor 是给这一轮系统提示用的清单。只有名字和描述，零正文膨胀。
+func (m *Manager) skillCatalogFor(workDir string) string {
+	list := m.ListSkillsFor(workDir)
+	if len(list) == 0 {
+		return ""
+	}
+	return skill.Catalog(list, 40)
+}
+
+type readSkillTool struct {
+	m       *Manager
+	workDir string
+}
 
 func (*readSkillTool) Name() string { return "read_skill" }
 func (*readSkillTool) Description() string {
-	return "取一条技能的全文。技能是「怎么做某类事」的步骤说明，系统提示里只给了名字和描述，" +
+	return "取一条技能（SKILL.md）的全文。技能是「怎么做某类事」的步骤说明，系统提示里只给了名字和描述，" +
 		"要按它做事就先用这个取全文，别凭名字猜。参数 name（技能名或 id）。"
 }
 func (*readSkillTool) Writes() bool { return false }
@@ -64,18 +105,18 @@ func (t *readSkillTool) Execute(_ context.Context, raw json.RawMessage) tool.Res
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return tool.Fail("参数无法解析：%v", err)
 	}
-	s := t.m.Skills()
-	if s == nil {
-		return tool.Fail("这个部署还没有技能库")
-	}
-	sk, ok := s.Read(in.Name)
+	sk, ok := t.m.ReadSkillFor(t.workDir, in.Name)
 	if !ok {
-		names := make([]string, 0, 8)
-		for _, x := range s.List() {
+		list := t.m.ListSkillsFor(t.workDir)
+		names := make([]string, 0, min(16, len(list)))
+		for i, x := range list {
+			if i >= 16 {
+				break
+			}
 			names = append(names, x.Name)
 		}
 		if len(names) == 0 {
-			return tool.Fail("还没有任何技能。可以先用 save_skill 沉淀一条。")
+			return tool.Fail("还没有任何技能。可以先用 save_skill 沉淀一条，或在 .cursor/skills/<name>/SKILL.md 添加。")
 		}
 		return tool.Fail("没有叫 %s 的技能。现有：%s", in.Name, strings.Join(names, "、"))
 	}
@@ -115,7 +156,7 @@ func (t *saveSkillTool) Execute(_ context.Context, raw json.RawMessage) tool.Res
 	}
 	s := t.m.Skills()
 	if s == nil {
-		return tool.Fail("这个部署还没有技能库")
+		return tool.Fail("这个部署还没有可写技能目录")
 	}
 	sk, err := s.Save(in.Name, in.Description, in.Body)
 	if err != nil {
