@@ -90,10 +90,16 @@ export default function StatusBar({ running, approvals, queue, gateway, onOpenAp
         {gw.text}
       </span>
 
-      <span style={statStyle} className={`c-status-stat ${running > 0 ? 'is-live' : ''}`} title="正在执行任务的会话数">
-        <span className="c-status-stat__pulse" aria-hidden />
-        运行中 <b style={numStyle}>{running}</b>
-      </span>
+      {running > 0 || queue > 0 || approvals > 0 ? (
+        <span style={statStyle} className={`c-status-stat ${running > 0 ? 'is-live' : ''}`} title="正在执行任务的会话数">
+          <span className="c-status-stat__pulse" aria-hidden />
+          运行中 <b style={numStyle}>{running}</b>
+        </span>
+      ) : (
+        <span style={statStyle} className="c-status-stat" title="所有任务已完成">
+          全部完成 <b style={numStyle}>✓</b>
+        </span>
+      )
 
       <button
         type="button"

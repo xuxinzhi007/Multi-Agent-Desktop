@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -286,6 +288,10 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 	// verify 连续失败次数。它在"改完不验"的产品里是唯一的硬约束：
 	// 模型可以嘴上说完成，但 verify 的红是它自己跑出来的证据。
 	verifyFails := 0
+	toolsInvokedThisRun := 0
+	dirtyCodeEdit := false
+	nudgedDirtyVerify := false
+	nudgedUngrounded := false
 
 	for {
 		// ── 1. 停止信号。放在最前面，保证任何阶段被打断都能立刻退出。
@@ -396,8 +402,32 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			})
 		}
 
-		// ── 6. 没有工具调用 = 任务结束
+		// ── 6. 没有工具调用 = 检查治理门禁后再决定是否结束
 		if len(turn.Calls) == 0 {
+			if toolsInvokedThisRun == 0 && !nudgedUngrounded && r.Tools != nil && r.Tools.Len() > 0 && claimsUngroundedMeasurement(turn.Text) {
+				nudgedUngrounded = true
+				if n := len(st.Messages); n > 0 && st.Messages[n-1].Role == "assistant" {
+					st.Messages[n-1].Content = "（本轮尚未调用工具核实，先通过工具读取真实代码与运行状态。）"
+				}
+				st.Messages = append(st.Messages, llm.Message{
+					Role: "system",
+					Content: "[治理拦截] 本轮尚未调用任何工具（UsedToolCalls = 0），严禁声称「实测 / 全栈实测 / 已扫描 / 已验证」或编造耗时、文件数等数据。" +
+						"请立即调用只读工具（read_file / grep / glob / repo_map / web_fetch）核实真实源码与运行状态后再作答。",
+					Timestamp: time.Now().Unix(),
+				})
+				r.checkpoint(runCtx, st)
+				continue
+			}
+			if dirtyCodeEdit && !nudgedDirtyVerify && r.Tools != nil && r.Tools.Has("verify") {
+				nudgedDirtyVerify = true
+				st.Messages = append(st.Messages, llm.Message{
+					Role:      "system",
+					Content:   "[治理拦截] 本轮已修改代码文件，但在收尾前尚未调用 verify。请立即调用 verify 验证编译与类型检查通过后再声称完成。",
+					Timestamp: time.Now().Unix(),
+				})
+				r.checkpoint(runCtx, st)
+				continue
+			}
 			st.Phase = PhaseDone
 			st.FinalText = turn.Text
 			r.emit(Event{Kind: "done", Phase: st.Phase, Iter: st.Iteration, Text: turn.Text})
@@ -466,8 +496,15 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				continue
 			}
 			res := outcomes[i].res
+			toolsInvokedThisRun++
 			if res.Status == tool.StatusOK || res.Status == tool.StatusTruncated {
 				anySuccess = true
+				if isCodeWriteCall(c, res) {
+					dirtyCodeEdit = true
+				}
+			}
+			if c.Name == "verify" {
+				dirtyCodeEdit = false
 			}
 			if !res.Meta.BadArgs {
 				allBadArgs = false
@@ -849,12 +886,65 @@ func toolMessage(c tool.Call, res tool.Result, save func([]byte) (string, error)
 	if err != nil || id == "" {
 		return msg
 	}
+	mime := detectImageMIME(res.Image)
 	msg.Blocks = []llm.Block{{
 		ID:   id,
-		MIME: "image/png",
+		MIME: mime,
 		Data: append([]byte(nil), res.Image...),
 	}}
 	return msg
+}
+
+func detectImageMIME(raw []byte) string {
+	ct := http.DetectContentType(raw)
+	switch ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return ct
+	}
+	return "image/png"
+}
+
+func claimsUngroundedMeasurement(text string) bool {
+	if len(text) < 40 {
+		return false
+	}
+	for _, kw := range []string{
+		"全栈实测", "全部实测", "实测定位", "实测数据", "实测证据",
+		"实测耗时", "已实测验证", "基于实测", "全景扫描", "files searched",
+	} {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+var codeExtensions = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
+	".mjs": true, ".cjs": true, ".py": true, ".rs": true, ".c": true,
+	".cc": true, ".cpp": true, ".h": true, ".java": true, ".kt": true,
+	".swift": true, ".vue": true, ".svelte": true, ".css": true,
+}
+
+func isCodeWriteCall(c tool.Call, res tool.Result) bool {
+	switch c.Name {
+	case "write_file", "edit_file", "apply_patch":
+	default:
+		return false
+	}
+	p := strings.TrimSpace(res.Meta.Path)
+	if p == "" {
+		var in map[string]any
+		if json.Unmarshal(c.Input, &in) == nil {
+			if s, ok := in["path"].(string); ok {
+				p = s
+			}
+		}
+	}
+	if p == "" {
+		return c.Name == "apply_patch"
+	}
+	return codeExtensions[strings.ToLower(filepath.Ext(p))]
 }
 
 func keepLatestImage(msgs []llm.Message) {

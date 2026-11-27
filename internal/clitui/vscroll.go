@@ -6,9 +6,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 )
 
 const wheelStep = 3
+
+type SelectionCopiedMsg struct {
+	Text string
+}
 
 type VScroll struct {
 	items        []string
@@ -17,6 +22,13 @@ type VScroll struct {
 	height       int
 	offset       int
 	followBottom bool
+
+	selDragging  bool
+	selActive    bool
+	selStartLine int
+	selStartCol  int
+	selEndLine   int
+	selEndCol    int
 }
 
 func NewVScroll(width, height int) VScroll {
@@ -99,13 +111,17 @@ func (m VScroll) AtBottom() bool {
 	return m.offset >= m.maxOffset()
 }
 
+func (m VScroll) effectiveOffset() int {
+	if m.followBottom {
+		return max(0, len(m.lines)-m.height)
+	}
+	return m.offset
+}
+
 func (m VScroll) ScrollInfo() (offset, visible, total int) {
 	total = len(m.lines)
 	visible = m.height
-	offset = m.offset
-	if m.followBottom {
-		offset = max(0, total-m.height)
-	}
+	offset = m.effectiveOffset()
 	return offset, visible, total
 }
 
@@ -129,23 +145,177 @@ func (m VScroll) Update(msg tea.Msg) (VScroll, tea.Cmd) {
 			m = m.GotoBottom()
 		}
 	case tea.MouseMsg:
-		if msg.Action != tea.MouseActionPress {
-			break
-		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.followBottom = false
-			m.offset -= wheelStep
-			m.clamp()
-		case tea.MouseButtonWheelDown:
-			m.offset += wheelStep
-			m.clamp()
-			if m.AtBottom() {
-				m.followBottom = true
+		if msg.Action == tea.MouseActionPress {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.followBottom = false
+				m.offset = m.effectiveOffset() - wheelStep
+				m.clamp()
+				return m, nil
+			case tea.MouseButtonWheelDown:
+				m.offset = m.effectiveOffset() + wheelStep
+				m.clamp()
+				if m.AtBottom() {
+					m.followBottom = true
+				}
+				return m, nil
+			case tea.MouseButtonLeft:
+				if msg.Y >= 0 && msg.Y < m.height {
+					off := m.effectiveOffset()
+					m.selDragging = true
+					m.selActive = false
+					m.selStartLine = off + msg.Y
+					m.selStartCol = max(0, msg.X)
+					m.selEndLine = m.selStartLine
+					m.selEndCol = m.selStartCol
+				} else {
+					m.selDragging = false
+					m.selActive = false
+				}
+				return m, nil
 			}
+		}
+		if msg.Action == tea.MouseActionMotion && m.selDragging {
+			if msg.Y <= 0 && m.effectiveOffset() > 0 {
+				m.followBottom = false
+				m.offset = m.effectiveOffset() - 1
+				m.clamp()
+			} else if msg.Y >= m.height-1 && !m.AtBottom() {
+				m.followBottom = false
+				m.offset = m.effectiveOffset() + 1
+				m.clamp()
+			}
+			row := min(max(0, msg.Y), max(0, m.height-1))
+			m.selEndLine = m.effectiveOffset() + row
+			m.selEndCol = max(0, msg.X)
+			m.selActive = m.selStartLine != m.selEndLine || m.selStartCol != m.selEndCol
+			return m, nil
+		}
+		if msg.Action == tea.MouseActionRelease && m.selDragging {
+			m.selDragging = false
+			if m.selActive {
+				txt := m.selectedPlainText()
+				m.selActive = false
+				if strings.TrimSpace(txt) != "" {
+					return m, func() tea.Msg { return SelectionCopiedMsg{Text: txt} }
+				}
+			}
+			m.selActive = false
+			return m, nil
 		}
 	}
 	return m, nil
+}
+
+func (m VScroll) normalizedSelection() (sLine, sCol, eLine, eCol int) {
+	sLine, sCol = m.selStartLine, m.selStartCol
+	eLine, eCol = m.selEndLine, m.selEndCol
+	if sLine > eLine || (sLine == eLine && sCol > eCol) {
+		sLine, sCol, eLine, eCol = eLine, eCol, sLine, sCol
+	}
+	return sLine, sCol, eLine, eCol
+}
+
+func (m VScroll) selectedPlainText() string {
+	if !m.selActive || len(m.lines) == 0 {
+		return ""
+	}
+	sLine, sCol, eLine, eCol := m.normalizedSelection()
+	if sLine >= len(m.lines) {
+		return ""
+	}
+	if sLine < 0 {
+		sLine = 0
+		sCol = 0
+	}
+	if eLine >= len(m.lines) {
+		eLine = len(m.lines) - 1
+		eCol = m.width
+	}
+
+	var out []string
+	for lineIdx := sLine; lineIdx <= eLine; lineIdx++ {
+		plain := xansi.Strip(m.lines[lineIdx])
+		c0, c1 := 0, runewidth.StringWidth(plain)+1
+		if lineIdx == sLine {
+			c0 = sCol
+		}
+		if lineIdx == eLine {
+			c1 = eCol
+		}
+		seg := sliceVisualCols(plain, c0, c1)
+		if c0 <= 2 {
+			seg = stripQuoteRailPrefix(seg)
+		}
+		out = append(out, strings.TrimRight(seg, " "))
+	}
+	return strings.Trim(strings.Join(out, "\n"), "\n")
+}
+
+func stripQuoteRailPrefix(s string) string {
+	for _, p := range []string{"▎ ", "    │ ", "  │ ", "│ "} {
+		if strings.HasPrefix(s, p) {
+			return strings.TrimPrefix(s, p)
+		}
+	}
+	return s
+}
+
+func sliceVisualCols(plain string, c0, c1 int) string {
+	if c1 <= c0 {
+		return ""
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range plain {
+		rw := runewidth.RuneWidth(r)
+		if rw <= 0 {
+			rw = 1
+		}
+		if col+rw > c0 && col < c1 {
+			b.WriteRune(r)
+		}
+		col += rw
+		if col >= c1 {
+			break
+		}
+	}
+	return b.String()
+}
+
+func renderSelectedLine(plain string, c0, c1, width int) string {
+	const selOn = "\x1b[48;5;24;38;5;255m"
+	const selOff = "\x1b[0m"
+
+	var b strings.Builder
+	col := 0
+	inSel := false
+	for _, r := range plain {
+		rw := runewidth.RuneWidth(r)
+		if rw <= 0 {
+			rw = 1
+		}
+		if col+rw > width {
+			break
+		}
+		wantSel := col+rw > c0 && col < c1
+		if wantSel && !inSel {
+			b.WriteString(selOn)
+			inSel = true
+		} else if !wantSel && inSel {
+			b.WriteString(selOff)
+			inSel = false
+		}
+		b.WriteRune(r)
+		col += rw
+	}
+	if inSel {
+		b.WriteString(selOff)
+	}
+	if col < width {
+		b.WriteString(strings.Repeat(" ", width-col))
+	}
+	return b.String()
 }
 
 func (m VScroll) View() string {
@@ -153,10 +323,7 @@ func (m VScroll) View() string {
 		return ""
 	}
 	lines := m.lines
-	offset := m.offset
-	if m.followBottom {
-		offset = max(0, len(lines)-m.height)
-	}
+	offset := m.effectiveOffset()
 	var vis []string
 	if offset < len(lines) {
 		end := offset + m.height
@@ -165,6 +332,8 @@ func (m VScroll) View() string {
 		}
 		vis = lines[offset:end]
 	}
+	sLine, sCol, eLine, eCol := m.normalizedSelection()
+
 	var b strings.Builder
 	b.Grow(m.height * (m.width + 16))
 	for i := 0; i < m.height; i++ {
@@ -174,6 +343,19 @@ func (m VScroll) View() string {
 		var ln string
 		if i < len(vis) {
 			ln = vis[i]
+		}
+		absIdx := offset + i
+		if m.selActive && absIdx >= sLine && absIdx <= eLine {
+			plain := xansi.Strip(ln)
+			c0, c1 := 0, m.width
+			if absIdx == sLine {
+				c0 = sCol
+			}
+			if absIdx == eLine {
+				c1 = eCol
+			}
+			b.WriteString(renderSelectedLine(plain, c0, c1, m.width))
+			continue
 		}
 		b.WriteString(fitCell(ln, m.width))
 	}

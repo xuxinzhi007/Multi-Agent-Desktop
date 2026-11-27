@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,6 +28,12 @@ import (
 )
 
 var writeClipboard = clipboard.WriteAll
+var readClipboardImage = defaultReadClipboardImage
+
+type draftImage struct {
+	mime string
+	data []byte
+}
 
 type cliMsg struct {
 	event string
@@ -54,6 +65,7 @@ func cliSlashCommands() []slashCmd {
 		{Name: "/mode", Args: "[ask|auto|readonly]", Hint: "交互式切换写操作审批模式"},
 		{Name: "/agents", Hint: "查看当前主对话协助的子智能体状态"},
 		{Name: "/plugins", Args: "[reload|init <名>]", Hint: "查看、热重载或新建可执行插件"},
+		{Name: "/paste", Args: "[图片路径|clear]", Hint: "粘贴剪贴板截图或本地图片为视觉附件（同 Ctrl+V）"},
 		{Name: "/think", Hint: "展开或折叠思考过程全文（同 Ctrl+T）"},
 		{Name: "/tools", Hint: "打开工具与改动详情（同 Ctrl+O）"},
 		{Name: "/copy", Args: "[序号]", Hint: "复制最近回复或第 N 段代码"},
@@ -73,7 +85,7 @@ func slashHelp(cmds []slashCmd) string {
 		}
 		fmt.Fprintf(&b, "  %-24s %s\n", label, c.Hint)
 	}
-	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · 鼠标滚轮/PgUp/PgDn 滚输出 · ↑/↓ 输入历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
+	b.WriteString("\n快捷键  Enter 发送 · Alt+Enter/Ctrl+J 换行 · Ctrl+V 贴图/粘贴 · 鼠标滚轮/PgUp/PgDn 滚输出 · ↑/↓ 输入历史 · Ctrl+K 切换模型 · Ctrl+T 展开思考 · Ctrl+O 工具详情 · Esc 停止 · Ctrl+C 退出")
 	return b.String()
 }
 
@@ -129,37 +141,40 @@ const maxInitialTranscriptMsgs = 120
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type cliModel struct {
-	mgr         *agent.Manager
-	plugins     *plugin.Manager
-	agentID     string
-	ctx         context.Context
-	theme       clitui.Theme
-	vp          clitui.VScroll
-	input       clitui.Editor
-	suggest     clitui.Suggest
-	picker      clitui.Picker
-	approvals   clitui.ApprovalBar
-	toolModal   clitui.ToolModal
-	cmds        []slashCmd
-	cells       []transcriptCell
-	tools       []clitui.ToolRecord
-	liveIdx     int
-	thinkIdx    int
-	width       int
-	height      int
-	lastRenderW int
-	busy        bool
-	turnStart   time.Time
-	phase       string // waiting | thinking | tool | streaming
-	round       int
-	prepHint    string
-	expandThink bool
-	bannerFrame int
-	spin        int
-	tokensIn    int
-	tokensOut   int
-	cwd         string
-	lastErr     string
+	mgr             *agent.Manager
+	plugins         *plugin.Manager
+	agentID         string
+	ctx             context.Context
+	theme           clitui.Theme
+	vp              clitui.VScroll
+	input           clitui.Editor
+	suggest         clitui.Suggest
+	picker          clitui.Picker
+	approvals       clitui.ApprovalBar
+	toolModal       clitui.ToolModal
+	cmds            []slashCmd
+	cells           []transcriptCell
+	tools           []clitui.ToolRecord
+	liveIdx         int
+	thinkIdx        int
+	width           int
+	height          int
+	lastRenderW     int
+	busy            bool
+	turnStart       time.Time
+	phase           string // waiting | thinking | tool | streaming
+	round           int
+	prepHint        string
+	expandThink     bool
+	bannerFrame     int
+	spin            int
+	tokensIn        int
+	tokensOut       int
+	cwd             string
+	lastErr         string
+	draftImages     []draftImage
+	copyNotice      string
+	copyNoticeUntil time.Time
 }
 
 func newCLIModel(ctx context.Context, mgr *agent.Manager, agentID, cwd string, resume bool, wantModel ...string) *cliModel {
@@ -233,37 +248,202 @@ func (m *cliModel) syncAgentState(a *agent.Agent, banner bool) {
 		m.bannerFrame = 0
 		m.cells = append(m.cells, transcriptCell{kind: cellBanner})
 	}
-	var visible []struct {
-		role string
-		text string
+
+	type storedToolOut struct {
+		status string
+		body   string
 	}
+	toolResults := make(map[string]storedToolOut)
 	for _, msg := range sn.Messages {
-		text := strings.TrimSpace(msg.Content)
-		if text == "" || (msg.Role != "user" && msg.Role != "assistant") {
+		if msg.Role == "tool" && msg.ToolID != "" {
+			st, body := parseStoredToolMsg(msg.Content)
+			toolResults[msg.ToolID] = storedToolOut{status: st, body: body}
+		}
+	}
+
+	var turns []llm.Message
+	for _, msg := range sn.Messages {
+		if msg.Role != "user" && msg.Role != "assistant" {
 			continue
 		}
-		visible = append(visible, struct {
-			role string
-			text string
-		}{role: msg.Role, text: msg.Content})
+		if strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.Reasoning) == "" && len(msg.ToolCalls) == 0 {
+			continue
+		}
+		turns = append(turns, msg)
 	}
-	if omitted := len(visible) - maxInitialTranscriptMsgs; omitted > 0 {
+	if omitted := len(turns) - maxInitialTranscriptMsgs; omitted > 0 {
 		m.cells = append(m.cells, transcriptCell{
 			kind: cellSystem,
 			raw:  fmt.Sprintf("已省略更早的 %d 条可见消息以保证终端流畅（会话完整上下文仍保留在磁盘中）", omitted),
 			done: true,
 		})
-		visible = visible[omitted:]
+		turns = turns[omitted:]
 	}
-	for _, msg := range visible {
-		switch msg.role {
+	for _, msg := range turns {
+		switch msg.Role {
 		case "user":
-			m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: msg.text, done: true})
+			m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: msg.Content, done: true})
 		case "assistant":
-			m.cells = append(m.cells, transcriptCell{kind: cellAssistant, role: sn.Name, raw: msg.text, done: true})
+			reasoning := msg.Reasoning
+			content := msg.Content
+			if strings.TrimSpace(reasoning) == "" && strings.Contains(content, "<think>") {
+				reasoning, content = splitInlineThinkTags(content)
+			}
+			if strings.TrimSpace(reasoning) != "" {
+				m.cells = append(m.cells, transcriptCell{
+					kind: cellThink,
+					raw:  reasoning,
+					done: true,
+				})
+			}
+			for _, tc := range msg.ToolCalls {
+				rawIn := strings.TrimSpace(string(tc.Input))
+				p, synthDiff := synthesizeInputDiff(tc.Name, rawIn)
+				tr := toolResults[tc.ID]
+				st := tr.status
+				if st == "" {
+					st = "ok"
+				}
+				callKey := tc.ID
+				if callKey == "" {
+					callKey = tc.Name
+				}
+				m.cells = append(m.cells, transcriptCell{
+					kind:   cellTool,
+					callID: callKey,
+					tool:   tc.Name,
+					path:   p,
+					input:  rawIn,
+					output: tr.body,
+					status: st,
+					diff:   synthDiff,
+					done:   true,
+				})
+				m.tools = append(m.tools, clitui.ToolRecord{
+					CallID: callKey,
+					Tool:   tc.Name,
+					Path:   p,
+					Status: st,
+					Input:  rawIn,
+					Output: tr.body,
+					Diff:   synthDiff,
+				})
+			}
+			if strings.TrimSpace(content) != "" {
+				m.cells = append(m.cells, transcriptCell{kind: cellAssistant, role: sn.Name, raw: content, done: true})
+			}
 		}
 	}
 	m.rebuildViewport(true)
+}
+
+func parseStoredToolMsg(raw string) (status, body string) {
+	s := strings.TrimSpace(raw)
+	status = "ok"
+	if strings.HasPrefix(s, "<tool_output") {
+		if idx := strings.IndexByte(s, '>'); idx > 0 {
+			head := s[:idx]
+			if k := strings.Index(head, `status="`); k >= 0 {
+				rest := head[k+len(`status="`):]
+				if q := strings.IndexByte(rest, '"'); q >= 0 {
+					status = rest[:q]
+				}
+			}
+			s = s[idx+1:]
+			s = strings.TrimSuffix(strings.TrimSpace(s), "</tool_output>")
+		}
+	}
+	return status, strings.TrimSpace(s)
+}
+
+func splitInlineThinkTags(content string) (think, clean string) {
+	var thinks []string
+	rest := content
+	for {
+		start := strings.Index(rest, "<think>")
+		if start < 0 {
+			break
+		}
+		afterStart := rest[start+len("<think>"):]
+		end := strings.Index(afterStart, "</think>")
+		if end < 0 {
+			thinks = append(thinks, strings.TrimSpace(afterStart))
+			rest = rest[:start]
+			break
+		}
+		if blk := strings.TrimSpace(afterStart[:end]); blk != "" {
+			thinks = append(thinks, blk)
+		}
+		rest = rest[:start] + afterStart[end+len("</think>"):]
+	}
+	return strings.Join(thinks, "\n"), strings.TrimSpace(rest)
+}
+
+func synthesizeInputDiff(toolName, rawInput string) (path, diff string) {
+	if rawInput == "" {
+		return "", ""
+	}
+	var in map[string]any
+	if err := json.Unmarshal([]byte(rawInput), &in); err != nil {
+		return "", ""
+	}
+	getStr := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := in[k].(string); ok && s != "" {
+				return s
+			}
+		}
+		return ""
+	}
+	path = strings.TrimSpace(getStr("path", "file_path"))
+	switch toolName {
+	case "edit_file":
+		oldTxt := getStr("oldText", "old_string", "old")
+		newTxt := getStr("newText", "new_string", "new")
+		if oldTxt == "" && newTxt == "" {
+			return path, ""
+		}
+		var b strings.Builder
+		if oldTxt != "" {
+			for _, ln := range strings.Split(strings.TrimRight(oldTxt, "\n"), "\n") {
+				b.WriteString("-" + ln + "\n")
+			}
+		}
+		if newTxt != "" {
+			for _, ln := range strings.Split(strings.TrimRight(newTxt, "\n"), "\n") {
+				b.WriteString("+" + ln + "\n")
+			}
+		}
+		return path, strings.TrimRight(b.String(), "\n")
+	case "apply_patch":
+		patch := getStr("patch", "diff")
+		if path == "" && patch != "" {
+			for _, ln := range strings.Split(patch, "\n") {
+				if strings.HasPrefix(ln, "*** Update File: ") {
+					path = strings.TrimSpace(strings.TrimPrefix(ln, "*** Update File: "))
+					break
+				}
+				if strings.HasPrefix(ln, "+++ b/") {
+					path = strings.TrimSpace(strings.TrimPrefix(ln, "+++ b/"))
+					break
+				}
+			}
+		}
+		return path, patch
+	case "write_file":
+		content := getStr("content")
+		if content == "" {
+			return path, ""
+		}
+		lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+		var b strings.Builder
+		limit := min(len(lines), 30)
+		for i := 0; i < limit; i++ {
+			b.WriteString("+" + lines[i] + "\n")
+		}
+		return path, strings.TrimRight(b.String(), "\n")
+	}
+	return path, ""
 }
 
 func (m *cliModel) Init() tea.Cmd {
@@ -513,15 +693,25 @@ func (m *cliModel) renderThinkCell(c transcriptCell, w int) string {
 	}
 
 	if !m.expandThink {
-		lastLine := ""
-		if len(wrapped) > 0 {
-			lastLine = " · " + clitui.FitWidth(wrapped[len(wrapped)-1], max(12, w-30))
+		var head string
+		if len(wrapped) > 4 {
+			head = fmt.Sprintf("  💭 已思考%s（省略前 %d 行 · Ctrl+T 展开）", durTag, len(wrapped)-4)
+		} else {
+			head = fmt.Sprintf("  💭 已思考%s（%d 行 · Ctrl+T 展开）", durTag, max(1, len(wrapped)))
 		}
-		summary := fmt.Sprintf("  ◌ 已思考%s（%d 行 · Ctrl+T 展开）%s", durTag, max(1, len(wrapped)), lastLine)
-		return m.theme.ThinkBar.Render(summary)
+		lines := []string{m.theme.ThinkBar.Render(head)}
+		tail := wrapped
+		if len(tail) > 4 {
+			tail = tail[len(tail)-4:]
+		}
+		bar := m.theme.ThinkBar.Render("    │ ")
+		for _, ln := range tail {
+			lines = append(lines, bar+m.theme.ThinkText.Render(ln))
+		}
+		return strings.Join(lines, "\n")
 	}
 
-	head := fmt.Sprintf("  ▾ 思考过程%s（%d 行 · Ctrl+T 收起）", durTag, len(wrapped))
+	head := fmt.Sprintf("  💭 思考过程%s（%d 行 · Ctrl+T 收起）", durTag, len(wrapped))
 	lines := []string{m.theme.ThinkBar.Render(head)}
 	bar := m.theme.ThinkBar.Render("    │ ")
 	for _, ln := range wrapped {
@@ -558,16 +748,21 @@ func (m *cliModel) renderToolCell(c transcriptCell, w int) string {
 	var rows []string
 	rows = append(rows, line)
 
+	effCell := c
+	if effCell.diff == "" {
+		_, effCell.diff = synthesizeInputDiff(c.tool, c.input)
+	}
+
 	if c.done {
-		if sub := summarizeToolOutcome(c); sub != "" {
+		if sub := summarizeToolOutcome(effCell); sub != "" {
 			style := m.theme.Muted
 			if c.status != "" && c.status != "ok" && c.status != "truncated" {
 				style = m.theme.Err
 			}
 			rows = append(rows, "    "+m.theme.Border.Render("⎿  ")+style.Render(clitui.FitWidth(sub, max(12, w-8))))
 		}
-		if c.diff != "" {
-			if db := clitui.RenderDiffBlock(c.diff, m.width, 12, m.theme); db != "" {
+		if effCell.diff != "" {
+			if db := clitui.RenderDiffBlock(effCell.diff, m.width, 20, m.theme); db != "" {
 				rows = append(rows, db)
 			}
 		}
@@ -797,6 +992,10 @@ func (m *cliModel) layout() {
 	if m.busy {
 		activityH = 1
 	}
+	draftImgH := 0
+	if len(m.draftImages) > 0 {
+		draftImgH = 1
+	}
 
 	inputH := m.input.Height()
 	overlayH := m.suggest.Height()
@@ -805,11 +1004,11 @@ func (m *cliModel) layout() {
 	} else if m.picker.Active() {
 		overlayH = m.picker.Height()
 	}
-	maxBottom := m.height - statusH - activityH - 2
+	maxBottom := m.height - statusH - activityH - draftImgH - 2
 	if inputH+overlayH > maxBottom {
 		overlayH = max(0, maxBottom-inputH)
 	}
-	vpH := max(1, m.height-statusH-activityH-inputH-overlayH)
+	vpH := max(1, m.height-statusH-activityH-draftImgH-inputH-overlayH)
 	if m.lastRenderW != m.width || m.vp.ItemCount() != len(m.cells) {
 		m.rebuildViewport(false)
 	}
@@ -837,10 +1036,23 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spin++
 			dirty = true
 		}
+		if m.copyNotice != "" && time.Now().After(m.copyNoticeUntil) {
+			m.copyNotice = ""
+		}
 		if dirty {
 			m.refreshActiveCells()
 		}
 		return m, cliTick()
+	case clitui.SelectionCopiedMsg:
+		if strings.TrimSpace(msg.Text) != "" {
+			if err := copyToClipboardWithOSC52(msg.Text); err != nil {
+				m.copyNotice = "复制失败: " + firstLine(err.Error())
+			} else {
+				m.copyNotice = fmt.Sprintf("✓ 已复制 (%d 字)", utf8.RuneCountInString(msg.Text))
+			}
+			m.copyNoticeUntil = time.Now().Add(3 * time.Second)
+		}
+		return m, nil
 	case cliMsg:
 		m.onEvent(msg)
 		m.layout()
@@ -928,6 +1140,11 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.String() == "ctrl+k" {
 		m.openModelPicker()
+		m.layout()
+		return m, nil
+	}
+	if msg.String() == "ctrl+v" {
+		m.handleCtrlVPaste()
 		m.layout()
 		return m, nil
 	}
@@ -1061,7 +1278,7 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 	}
-	if line == "" {
+	if line == "" && len(m.draftImages) == 0 {
 		return m, nil
 	}
 	if m.approvals.Active() {
@@ -1095,6 +1312,22 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 	}
+
+	m.attachDraggedImageIfPath(&line)
+	blocks, imgErr := m.consumeDraftImages()
+	if imgErr != nil {
+		m.pushError("图片保存失败：" + imgErr.Error())
+		m.layout()
+		return m, nil
+	}
+	if line == "" && len(blocks) > 0 {
+		line = "请结合附图分析"
+	}
+	userLabel := line
+	if len(blocks) > 0 {
+		userLabel = fmt.Sprintf("[附图 ×%d] %s", len(blocks), line)
+	}
+
 	m.busy = true
 	m.turnStart = time.Now()
 	m.phase = "waiting"
@@ -1103,7 +1336,7 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 	m.liveIdx = -1
 	m.thinkIdx = -1
 	m.lastErr = ""
-	m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: line, done: true})
+	m.cells = append(m.cells, transcriptCell{kind: cellUser, role: "你", raw: userLabel, done: true})
 	m.rebuildViewport(true)
 	m.layout()
 
@@ -1111,7 +1344,12 @@ func (m *cliModel) submit(line string) (tea.Model, tea.Cmd) {
 	mgr := m.mgr
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		_, err := mgr.RunPrompt(ctx, id, line)
+		var err error
+		if len(blocks) > 0 {
+			_, err = mgr.RunBlocks(ctx, id, line, blocks)
+		} else {
+			_, err = mgr.RunPrompt(ctx, id, line)
+		}
 		return cliTurnDone{err: err}
 	}
 }
@@ -1169,6 +1407,8 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 		m.pushSystem(m.cmdAgents())
 	case "/plugins":
 		m.pushSystem(m.cmdPlugins(arg))
+	case "/paste":
+		m.pushSystem(m.cmdPaste(arg))
 	case "/think":
 		m.toggleThinkExpanded()
 		if m.expandThink {
@@ -1423,10 +1663,20 @@ func (m *cliModel) cmdCopy(arg string) string {
 		target = blocks[n-1]
 		label = fmt.Sprintf("第 %d 段代码", n)
 	}
-	if err := writeClipboard(target); err != nil {
+	if err := copyToClipboardWithOSC52(target); err != nil {
 		return "写入剪贴板失败：" + err.Error()
 	}
 	return fmt.Sprintf("已复制%s（%d 字节）", label, len(target))
+}
+
+func copyToClipboardWithOSC52(text string) error {
+	sysErr := writeClipboard(text)
+	// 同时兼容终端 OSC-52 剪贴板透传（iTerm2 / Ghostty / WezTerm / Cursor 终端 / SSH）
+	if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 && len(text) <= 74994 {
+		b64 := base64.StdEncoding.EncodeToString([]byte(text))
+		_, _ = fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\x07", b64)
+	}
+	return sysErr
 }
 
 func (m *cliModel) cmdNew(name string) string {
@@ -1488,6 +1738,7 @@ func (m *cliModel) cmdResume(arg string) string {
 					_ = m.mgr.SetAgentWorkDir(sn.ID, m.cwd)
 				}
 			}
+			ensureAgentModelReady(m.mgr, a)
 			m.syncAgentState(a, false)
 			return "切到 " + sn.Name + "  " + sn.ID + "（" + shortPath(m.cwd) + "）" + note
 		}
@@ -1678,9 +1929,19 @@ func (m *cliModel) onEvent(msg cliMsg) {
 			m.tokensIn += v.TokensIn
 			m.tokensOut += v.TokensOut
 		}
+		msgContent := v.Message.Content
+		inlineThink := ""
+		if strings.Contains(msgContent, "<think>") {
+			inlineThink, msgContent = splitInlineThinkTags(msgContent)
+		}
 		if m.liveIdx >= 0 && m.liveIdx < len(m.cells) {
-			if v.Message.Content != "" && m.cells[m.liveIdx].raw == "" {
-				m.cells[m.liveIdx].raw = v.Message.Content
+			if inlineThink != "" && (m.liveIdx == 0 || m.cells[m.liveIdx-1].kind != cellThink) {
+				thinkCell := transcriptCell{kind: cellThink, raw: inlineThink, done: true}
+				m.cells = append(m.cells[:m.liveIdx], append([]transcriptCell{thinkCell}, m.cells[m.liveIdx:]...)...)
+				m.liveIdx++
+			}
+			if msgContent != "" {
+				m.cells[m.liveIdx].raw = msgContent
 			}
 			m.cells[m.liveIdx].done = true
 			m.cells[m.liveIdx].cacheWidth = 0
@@ -1689,11 +1950,21 @@ func (m *cliModel) onEvent(msg cliMsg) {
 			m.rebuildViewport(true)
 			return
 		}
-		if v.Message.Content != "" {
+		if v.Message.Reasoning != "" || inlineThink != "" {
+			hasThink := len(m.cells) > 0 && m.cells[len(m.cells)-1].kind == cellThink
+			if !hasThink {
+				th := v.Message.Reasoning
+				if th == "" {
+					th = inlineThink
+				}
+				m.cells = append(m.cells, transcriptCell{kind: cellThink, raw: th, done: true})
+			}
+		}
+		if msgContent != "" {
 			m.cells = append(m.cells, transcriptCell{
 				kind: cellAssistant,
 				role: m.currentAgentName(),
-				raw:  v.Message.Content,
+				raw:  msgContent,
 				done: true,
 			})
 			m.rebuildViewport(true)
@@ -1835,6 +2106,9 @@ func (m *cliModel) onToolEvent(data any) {
 				}
 				if v.Diff != "" {
 					c.diff = v.Diff
+				} else if c.diff == "" {
+					_, c.diff = synthesizeInputDiff(c.tool, c.input)
+					v.Diff = c.diff
 				}
 				matched = true
 				break
@@ -1954,6 +2228,9 @@ func (m *cliModel) View() string {
 			parts = append(parts, sv)
 		}
 	}
+	if len(m.draftImages) > 0 {
+		parts = append(parts, m.draftImagesLine())
+	}
 	parts = append(parts, m.input.View(), status)
 	out := strings.Join(parts, "\n")
 	lines := strings.Split(out, "\n")
@@ -2068,6 +2345,9 @@ func (m *cliModel) statusLine() string {
 		} else {
 			parts = append(parts, fmt.Sprintf("%d tok", totalTok))
 		}
+	}
+	if m.copyNotice != "" && time.Now().Before(m.copyNoticeUntil) {
+		parts = append([]string{m.copyNotice}, parts...)
 	}
 	left := strings.Join(parts, "  ·  ")
 
@@ -2729,4 +3009,203 @@ func redirectCLILog() {
 		return
 	}
 	log.SetOutput(f)
+}
+
+func (m *cliModel) handleCtrlVPaste() {
+	raw, mime, err := readClipboardImage()
+	if err == nil && len(raw) > 0 {
+		if len(m.draftImages) >= 8 {
+			m.pushError("一次最多附加 8 张图片（/paste clear 可清空）。")
+			return
+		}
+		m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
+		return
+	}
+	if txt, terr := clipboard.ReadAll(); terr == nil && txt != "" {
+		cur := m.input.Value()
+		m.input = m.input.SetValue(cur + txt)
+		m.suggest = m.suggest.Update(m.input.Value())
+	}
+}
+
+func (m *cliModel) cmdPaste(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg == "clear" || arg == "-" {
+		n := len(m.draftImages)
+		m.draftImages = nil
+		return fmt.Sprintf("已清空 %d 张草稿图片。", n)
+	}
+	if arg != "" {
+		raw, mime, err := readLocalImageFile(arg, m.cwd)
+		if err != nil {
+			return "读取图片失败：" + err.Error()
+		}
+		if len(m.draftImages) >= 8 {
+			return "一次最多附加 8 张图片。"
+		}
+		m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
+		return fmt.Sprintf("已附加图片 #%d（%s，%d KB）", len(m.draftImages), mime, max(1, len(raw)/1024))
+	}
+	raw, mime, err := readClipboardImage()
+	if err != nil {
+		return "剪贴板中没有可用图片（支持截图后按 Ctrl+V，或 /paste <图片路径>）。"
+	}
+	if len(m.draftImages) >= 8 {
+		return "一次最多附加 8 张图片。"
+	}
+	m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
+	return fmt.Sprintf("已从剪贴板附加图片 #%d（%s，%d KB）", len(m.draftImages), mime, max(1, len(raw)/1024))
+}
+
+func (m *cliModel) draftImagesLine() string {
+	var tags []string
+	for i, img := range m.draftImages {
+		tags = append(tags, fmt.Sprintf("[图片 #%d · %dKB]", i+1, max(1, len(img.data)/1024)))
+	}
+	plain := " 附件: " + strings.Join(tags, " ") + "  (/paste clear 移除)"
+	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(fitWidth(plain, m.width))
+	pad := max(0, m.width-lipgloss.Width(styled))
+	return styled + strings.Repeat(" ", pad)
+}
+
+func (m *cliModel) consumeDraftImages() ([]llm.Block, error) {
+	if len(m.draftImages) == 0 {
+		return nil, nil
+	}
+	imgDir := ""
+	if m.mgr != nil {
+		imgDir = m.mgr.ImageDir()
+	}
+	if imgDir == "" {
+		imgDir = filepath.Join(os.TempDir(), "mad-cli-images")
+	}
+	blocks := make([]llm.Block, 0, len(m.draftImages))
+	for _, img := range m.draftImages {
+		id, err := llm.SaveImage(imgDir, img.mime, img.data)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, llm.Block{
+			ID:   id,
+			MIME: img.mime,
+			Data: append([]byte(nil), img.data...),
+		})
+	}
+	m.draftImages = nil
+	return blocks, nil
+}
+
+func (m *cliModel) attachDraggedImageIfPath(line *string) {
+	if line == nil || len(m.draftImages) >= 8 {
+		return
+	}
+	cand := strings.TrimSpace(*line)
+	cand = strings.Trim(cand, "'\"")
+	cand = strings.ReplaceAll(cand, `\ `, " ")
+	raw, mime, err := readLocalImageFile(cand, m.cwd)
+	if err != nil {
+		return
+	}
+	m.draftImages = append(m.draftImages, draftImage{mime: mime, data: raw})
+	*line = ""
+}
+
+func readLocalImageFile(p, cwd string) ([]byte, string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return nil, "", fmt.Errorf("路径为空")
+	}
+	if strings.HasPrefix(p, "~/") {
+		p = filepath.Join(mustHome(), p[2:])
+	} else if !filepath.IsAbs(p) && cwd != "" {
+		p = filepath.Join(cwd, p)
+	}
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+	default:
+		return nil, "", fmt.Errorf("仅支持 png/jpg/gif/webp")
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(raw) == 0 || len(raw) > 8<<20 {
+		return nil, "", fmt.Errorf("图片为空或超过 8MB")
+	}
+	mime := sniffCLIImageMIME(raw)
+	if mime == "" {
+		return nil, "", fmt.Errorf("不是有效的图片文件")
+	}
+	return raw, mime, nil
+}
+
+func sniffCLIImageMIME(raw []byte) string {
+	if len(raw) >= 12 && string(raw[:4]) == "RIFF" && string(raw[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	ct := http.DetectContentType(raw)
+	switch ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return ct
+	}
+	return ""
+}
+
+func defaultReadClipboardImage() ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	switch runtime.GOOS {
+	case "darwin":
+		if p, err := exec.LookPath("pngpaste"); err == nil {
+			if out, rerr := exec.CommandContext(ctx, p, "-").Output(); rerr == nil {
+				if mime := sniffCLIImageMIME(out); mime != "" {
+					return out, mime, nil
+				}
+			}
+		}
+		tmp, err := os.CreateTemp("", "mad-clip-*.png")
+		if err == nil {
+			tmpPath := tmp.Name()
+			_ = tmp.Close()
+			defer os.Remove(tmpPath)
+			script := fmt.Sprintf(`try
+set imgData to the clipboard as «class PNGf»
+set fp to open for access POSIX file %q with write permission
+set eof fp to 0
+write imgData to fp
+close access fp
+return "OK"
+on error
+return "ERR"
+end try`, tmpPath)
+			if out, rerr := exec.CommandContext(ctx, "osascript", "-e", script).Output(); rerr == nil && strings.TrimSpace(string(out)) == "OK" {
+				if raw, ferr := os.ReadFile(tmpPath); ferr == nil {
+					if mime := sniffCLIImageMIME(raw); mime != "" {
+						return raw, mime, nil
+					}
+				}
+			}
+		}
+	case "linux":
+		for _, cmd := range [][]string{
+			{"wl-paste", "--no-newline", "--type", "image/png"},
+			{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"},
+		} {
+			if bin, err := exec.LookPath(cmd[0]); err == nil {
+				if out, rerr := exec.CommandContext(ctx, bin, cmd[1:]...).Output(); rerr == nil {
+					if mime := sniffCLIImageMIME(out); mime != "" {
+						return out, mime, nil
+					}
+				}
+			}
+		}
+	}
+
+	if txt, err := clipboard.ReadAll(); err == nil {
+		if raw, mime, ferr := readLocalImageFile(strings.Trim(strings.TrimSpace(txt), "'\""), ""); ferr == nil {
+			return raw, mime, nil
+		}
+	}
+	return nil, "", fmt.Errorf("clipboard has no image")
 }

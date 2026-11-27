@@ -8,12 +8,12 @@ package tool
 
 import (
 	"context"
-	"log"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -179,6 +179,25 @@ func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
+}
+
+func (r *Registry) Has(name string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.tools[name]
+	return ok
+}
+
+func (r *Registry) Len() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.tools)
 }
 
 // ConcurrencySafe 报告名为 name 的工具是否可在同一轮内与其它调用并发执行。

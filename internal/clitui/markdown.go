@@ -2,6 +2,7 @@ package clitui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -406,33 +407,120 @@ func PrefixBlock(bar, body string) string {
 }
 
 func RenderDiffBlock(diff string, width, maxLines int, th Theme) string {
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	if len(lines) == 0 || strings.TrimSpace(diff) == "" {
-		return ""
-	}
-	w := max(10, width-4)
 	bar := th.Border.Render("  │ ")
-	var b strings.Builder
-	for i, ln := range lines {
+	rows := RenderDiffRows(diff, max(10, width-4), maxLines, bar, "…（还有 %d 行，Ctrl+O 看完整改动）", true, th)
+	return strings.Join(rows, "\n")
+}
+
+func RenderDiffRows(diff string, innerW, maxLines int, prefix, moreFmt string, showHunkHeader bool, th Theme) []string {
+	rawLines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	if len(rawLines) == 0 || strings.TrimSpace(diff) == "" {
+		return nil
+	}
+	type diffEntry struct {
+		kind byte
+		text string
+	}
+	var entries []diffEntry
+	oldLine, newLine := 0, 0
+	hasNums := false
+
+	for _, ln := range rawLines {
+		switch {
+		case strings.HasPrefix(ln, "diff --git "),
+			strings.HasPrefix(ln, "index "),
+			strings.HasPrefix(ln, "--- "),
+			strings.HasPrefix(ln, "+++ "),
+			strings.HasPrefix(ln, `\ No newline`):
+			continue
+		case strings.HasPrefix(ln, "@@"):
+			if o, n, ok := parseHunkStart(ln); ok {
+				if showHunkHeader {
+					entries = append(entries, diffEntry{kind: '~', text: ln})
+				} else if len(entries) > 0 {
+					entries = append(entries, diffEntry{kind: '~', text: "   ⋮"})
+				}
+				oldLine, newLine, hasNums = o, n, true
+			} else {
+				entries = append(entries, diffEntry{kind: '~', text: ln})
+			}
+		case strings.HasPrefix(ln, "-"):
+			if hasNums {
+				entries = append(entries, diffEntry{kind: '-', text: fmt.Sprintf("%4d %s", oldLine, ln)})
+				oldLine++
+			} else {
+				entries = append(entries, diffEntry{kind: '-', text: "  " + ln})
+			}
+		case strings.HasPrefix(ln, "+"):
+			if hasNums {
+				entries = append(entries, diffEntry{kind: '+', text: fmt.Sprintf("%4d %s", newLine, ln)})
+				newLine++
+			} else {
+				entries = append(entries, diffEntry{kind: '+', text: "  " + ln})
+			}
+		default:
+			body := strings.TrimPrefix(ln, " ")
+			if hasNums {
+				entries = append(entries, diffEntry{kind: ' ', text: fmt.Sprintf("%4d  %s", newLine, body)})
+				oldLine++
+				newLine++
+			} else {
+				entries = append(entries, diffEntry{kind: ' ', text: "   " + body})
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	var out []string
+	for i, e := range entries {
 		if maxLines > 0 && i >= maxLines {
-			fmt.Fprintf(&b, "%s%s\n", bar, th.Muted.Render(fmt.Sprintf("…（还有 %d 行，Ctrl+O 看完整改动）", len(lines)-i)))
+			if moreFmt != "" {
+				out = append(out, prefix+th.Muted.Render(fmt.Sprintf(moreFmt, len(entries)-i)))
+			}
 			break
 		}
-		cut := FitWidth(ln, w)
-		switch {
-		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
-			b.WriteString(bar + th.Muted.Render(cut) + "\n")
-		case strings.HasPrefix(ln, "+"):
-			b.WriteString(bar + th.DiffAdd.Render(cut) + "\n")
-		case strings.HasPrefix(ln, "-"):
-			b.WriteString(bar + th.DiffDel.Render(cut) + "\n")
-		case strings.HasPrefix(ln, "@@"):
-			b.WriteString(bar + th.DiffHunk.Render(cut) + "\n")
+		cut := FitWidth(e.text, max(8, innerW))
+		switch e.kind {
+		case '+':
+			out = append(out, prefix+th.DiffAdd.Render(cut))
+		case '-':
+			out = append(out, prefix+th.DiffDel.Render(cut))
+		case '~':
+			out = append(out, prefix+th.DiffHunk.Render(cut))
 		default:
-			b.WriteString(bar + th.Text.Render(cut) + "\n")
+			out = append(out, prefix+th.Muted.Render(cut))
 		}
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return out
+}
+
+func parseHunkStart(ln string) (oldStart, newStart int, ok bool) {
+	// @@ -91,4 +91,5 @@ optional heading
+	rest := strings.TrimSpace(strings.TrimPrefix(ln, "@@"))
+	end := strings.Index(rest, "@@")
+	if end >= 0 {
+		rest = strings.TrimSpace(rest[:end])
+	}
+	parts := strings.Fields(rest)
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "-") || !strings.HasPrefix(parts[1], "+") {
+		return 0, 0, false
+	}
+	parseNum := func(tok string) (int, bool) {
+		tok = strings.TrimLeft(tok, "-+")
+		if comma := strings.IndexByte(tok, ','); comma >= 0 {
+			tok = tok[:comma]
+		}
+		n, err := strconv.Atoi(tok)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	o, ok1 := parseNum(parts[0])
+	n, ok2 := parseNum(parts[1])
+	return o, n, ok1 && ok2
 }
 
 func FitWidth(s string, maxCols int) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -263,9 +264,11 @@ type ReadFile struct {
 	Scope string
 }
 
-func (*ReadFile) Name() string        { return "read_file" }
-func (*ReadFile) Writes() bool        { return false }
-func (*ReadFile) Description() string { return "Read a text file. Returns content with line numbers." }
+func (*ReadFile) Name() string { return "read_file" }
+func (*ReadFile) Writes() bool { return false }
+func (*ReadFile) Description() string {
+	return "Read a text file (with line numbers) or an image file (png/jpeg/gif/webp, returned visually to multimodal models)."
+}
 
 // ConcurrencySafe 显式声明：文件本身只读，版本表由互斥锁保护，可在同一轮并发执行。
 func (*ReadFile) ConcurrencySafe() bool { return true }
@@ -303,6 +306,15 @@ func (r *ReadFile) Execute(ctx context.Context, raw json.RawMessage) tool.Result
 			return tool.Fail("file not found: %s", in.Path)
 		}
 		return tool.Fail("cannot read %s: %v", in.Path, err)
+	}
+	if mime := detectSupportedImage(abs, data); mime != "" {
+		if len(data) > 8<<20 {
+			return tool.Fail("image %s exceeds 8MB limit (%d bytes)", in.Path, len(data))
+		}
+		res := tool.OK(fmt.Sprintf("image %s (%s, %d bytes)", in.Path, mime, len(data)))
+		res.Image = data
+		res.Meta.Path = displayPath(in.Path)
+		return res
 	}
 	if bytes.IndexByte(data[:min(len(data), 512)], 0) >= 0 {
 		return tool.Fail("%s looks like a binary file; use bash with an appropriate tool", in.Path)
@@ -569,4 +581,23 @@ func RegisterRootsScoped(r *tool.Registry, workDir string, extra []string, scope
 	r.Register(&Changeset{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&WorktreeMerge{WorkDir: workDir, ExtraDirs: extra})
 	r.Register(&RestoreObservation{ObservDir: observDir})
+	r.Register(&WebFetch{})
+}
+
+func detectSupportedImage(path string, data []byte) string {
+	if len(data) < 8 {
+		return ""
+	}
+	ct := http.DetectContentType(data)
+	switch ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return ct
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		if bytes.HasPrefix(data, []byte("RIFF")) && len(data) >= 12 && string(data[8:12]) == "WEBP" {
+			return "image/webp"
+		}
+	}
+	return ""
 }

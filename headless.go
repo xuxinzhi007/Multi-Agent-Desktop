@@ -259,6 +259,22 @@ func (h *headlessIO) readLineLocked() (string, error) {
 	return strings.TrimRight(s, "\r\n"), nil
 }
 
+func ensureAgentModelReady(mgr *agent.Manager, a *agent.Agent) {
+	if mgr == nil || a == nil {
+		return
+	}
+	rawCur := a.EffectiveLLM(mgr)
+	cur := llm.ApplyDefaults(rawCur)
+	curReady := cur.Model != "" && providerReadyForCLI(cur)
+	if !curReady {
+		if best, ok := pickBestCLIProvider(mgr.Providers()); ok {
+			_ = mgr.SetAgentLLM(a.ID, best)
+		}
+	} else if cur.Model != rawCur.Model {
+		_ = mgr.SetAgentLLM(a.ID, cur)
+	}
+}
+
 // ensureCLIAgent 保证 CLI 有一个能跑的会话。
 //
 // 默认**新建**一个（目录就是 cwd），而不是抓 list[0]——CLI 最怕一启动就接进
@@ -277,6 +293,7 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 				return "", err
 			}
 		}
+		ensureAgentModelReady(mgr, a)
 		return id, nil
 	}
 	if resume {
@@ -300,6 +317,7 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 				return "", err
 			}
 		}
+		ensureAgentModelReady(mgr, picked)
 		return id, nil
 	}
 
@@ -310,16 +328,7 @@ func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, er
 		}
 	}
 	a := mgr.CreateInheriting(leadName, "主对话", "")
-	rawCur := a.EffectiveLLM(mgr)
-	cur := llm.ApplyDefaults(rawCur)
-	curReady := cur.Model != "" && providerReadyForCLI(cur)
-	if !curReady {
-		if best, ok := pickBestCLIProvider(mgr.Providers()); ok {
-			_ = mgr.SetAgentLLM(a.ID, best)
-		}
-	} else if cur.Model != rawCur.Model {
-		_ = mgr.SetAgentLLM(a.ID, cur)
-	}
+	ensureAgentModelReady(mgr, a)
 	if cwd != "" {
 		if err := mgr.SetAgentWorkDir(a.ID, cwd); err != nil {
 			return "", err

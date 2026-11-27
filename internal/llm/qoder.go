@@ -60,15 +60,28 @@ var qoderModels = []qoderModel{
 	{id: "Kimi-K3", key: "kmodel_latest"},
 }
 
+var qoderAliases = map[string]string{
+	"deepseek-flash": "DeepSeek-V4-Flash",
+	"deepseek-pro":   "DeepSeek-V4-Pro",
+	"deepseek":       "DeepSeek-V4-Pro",
+	"qwen-max":       "Qwen3.7-Max",
+	"kimi":           "Kimi-K2.7-Code",
+}
+
 func qoderModelByID(id string) qoderModel {
+	id = strings.TrimSpace(id)
 	if id == "" {
 		id = DefaultQoderModel
+	}
+	if canonical, ok := qoderAliases[strings.ToLower(id)]; ok {
+		id = canonical
 	}
 	if m, ok := qoderCatalogLookup(id); ok {
 		return m
 	}
+	low := strings.ToLower(id)
 	for _, m := range qoderStatic() {
-		if m.id == id || m.key == id {
+		if m.id == id || m.key == id || strings.ToLower(m.id) == low || strings.ToLower(m.key) == low {
 			return m
 		}
 	}

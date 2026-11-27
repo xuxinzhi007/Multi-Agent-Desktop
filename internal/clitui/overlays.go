@@ -183,21 +183,7 @@ func (a ApprovalBar) View() string {
 		}
 	}
 	if cur.Diff != "" {
-		for i, ln := range strings.Split(strings.TrimRight(cur.Diff, "\n"), "\n") {
-			if i >= 4 {
-				body = append(body, a.theme.Muted.Render("   …（更多 diff 见转录）"))
-				break
-			}
-			cut := FitWidth(ln, innerW-3)
-			switch {
-			case strings.HasPrefix(ln, "+"):
-				body = append(body, "   "+a.theme.DiffAdd.Render(cut))
-			case strings.HasPrefix(ln, "-"):
-				body = append(body, "   "+a.theme.DiffDel.Render(cut))
-			default:
-				body = append(body, "   "+a.theme.Muted.Render(cut))
-			}
-		}
+		body = append(body, RenderDiffRows(cur.Diff, innerW-3, 8, "   ", "…（还有 %d 行改动）", false, a.theme)...)
 	}
 	opts := a.options()
 	var btns []string

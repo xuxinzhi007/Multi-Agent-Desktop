@@ -105,7 +105,14 @@ func ThinkingEnabled(cfg Config) bool {
 		}
 		return false
 	case "qoder":
-		return qoderModelByID(cfg.Model).reasoning
+		if qoderModelByID(cfg.Model).reasoning {
+			return true
+		}
+		t := strings.ToLower(strings.TrimSpace(cfg.Thinking))
+		return t != "" && t != "off"
+	case "claude":
+		t := strings.ToLower(strings.TrimSpace(cfg.Thinking))
+		return t != "off"
 	default:
 		return false
 	}

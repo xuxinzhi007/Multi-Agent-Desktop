@@ -495,6 +495,7 @@ func readOnlyRegistry(workDir string, extra []string) *tool.Registry {
 	reg.Register(&builtin.ReadFile{WorkDir: workDir, ExtraDirs: extra})
 	reg.Register(&builtin.Grep{WorkDir: workDir, ExtraDirs: extra})
 	reg.Register(&builtin.Glob{WorkDir: workDir, ExtraDirs: extra})
+	reg.Register(&builtin.WebFetch{})
 	reg.Register(web.New())
 	return reg
 }

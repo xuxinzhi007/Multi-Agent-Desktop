@@ -1013,3 +1013,189 @@ func TestSyncFeishuMCPStoreSharesUserCreds(t *testing.T) {
 		t.Fatalf("同步字段不匹配: %+v", acc)
 	}
 }
+
+func TestCLIPasteAttachesImageAndSubmitsBlocks(t *testing.T) {
+	pngBytes := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+		0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}
+	oldClipImg := readClipboardImage
+	readClipboardImage = func() ([]byte, string, error) {
+		return pngBytes, "image/png", nil
+	}
+	t.Cleanup(func() { readClipboardImage = oldClipImg })
+
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	mgr.SetImageDir(t.TempDir())
+	t.Cleanup(mgr.Shutdown)
+
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if len(m.draftImages) != 1 {
+		t.Fatalf("Ctrl+V 应粘贴剪贴板图片进草稿，got %d 张", len(m.draftImages))
+	}
+	if !strings.Contains(m.View(), "图片 #1") {
+		t.Fatalf("贴图后界面应显示草稿图片胶囊：\n%s", m.View())
+	}
+
+	_, cmd := m.submit("帮我看下这张截图")
+	if len(m.draftImages) != 0 {
+		t.Fatalf("提交后草稿图片列表应清空，got %d", len(m.draftImages))
+	}
+	if cmd == nil {
+		t.Fatal("带图提交应返回异步执行 Cmd")
+	}
+}
+
+func TestMouseDragSelectAutoCopiesOutputText(t *testing.T) {
+	var copied string
+	old := writeClipboard
+	writeClipboard = func(s string) error {
+		copied = s
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = old })
+
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.cells = nil
+	m.cells = append(m.cells, transcriptCell{
+		kind: cellAssistant,
+		role: "助手",
+		raw:  "第一行输出 hello_select_copy 完毕",
+		done: true,
+	})
+	m.width, m.height = 80, 14
+	m.rebuildViewport(true)
+	m.layout()
+
+	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 1})
+	_, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, X: 40, Y: 1})
+	_, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonNone, X: 40, Y: 1})
+	if cmd == nil {
+		t.Fatal("松开鼠标完成划选时应触发自动复制 Cmd")
+	}
+	ev := cmd()
+	_, _ = m.Update(ev)
+	if !strings.Contains(copied, "hello_select_copy") {
+		t.Fatalf("选中松手后剪贴板未拿到预期文本，got %q", copied)
+	}
+	if !strings.Contains(m.View(), "已复制") {
+		t.Fatalf("自动复制后状态栏应提示已复制：\n%s", m.View())
+	}
+}
+
+func TestThinkingStaysVisiblyRenderedAndRestoresFromHistory(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	dir := testWorkDir(t)
+	m := newCLIModel(context.Background(), mgr, "", dir, false)
+	m.width, m.height = 100, 28
+	m.layout()
+
+	m.onEvent(cliMsg{
+		event: "agent.reasoning",
+		data:  map[string]any{"id": m.agentID, "reasoning": "分析根因：先检查 ripgrep 快路径配置\n"},
+	})
+	m.onEvent(cliMsg{
+		event: "agent.delta",
+		data:  map[string]any{"id": m.agentID, "delta": "结论如下："},
+	})
+	m.layout()
+	view := m.View()
+	if !strings.Contains(view, "分析根因：先检查 ripgrep 快路径配置") {
+		t.Fatalf("输出正文后思考内容不应全部消失，关键思考行应直接可见：\n%s", view)
+	}
+
+	histAgent := mgr.Create("agent-hist", "后端会话", "")
+	_ = mgr.SetAgentWorkDir(histAgent.ID, dir)
+	histAgent.Messages = append(histAgent.Messages,
+		llm.Message{Role: "user", Content: "修一下入口"},
+		llm.Message{
+			Role:      "assistant",
+			Reasoning: "历史思考：定位到 main.go 第 42 行参数缺失",
+			ToolCalls: []llm.ToolCall{{
+				ID:    "tc1",
+				Name:  "edit_file",
+				Input: json.RawMessage(`{"path":"main.go","oldText":"runOld()","newText":"runNew()"}`),
+			}},
+		},
+		llm.Message{Role: "tool", ToolID: "tc1", Content: `<tool_output name="edit_file" status="ok">edited main.go</tool_output>`},
+		llm.Message{Role: "assistant", Content: "已经修好"},
+	)
+
+	_, _ = m.submit("/resume agent-hist")
+	resumedView := m.View()
+	if !strings.Contains(resumedView, "历史思考：定位到 main.go 第 42 行参数缺失") {
+		t.Fatalf("切换/恢复会话后未展示历史思考过程：\n%s", resumedView)
+	}
+	if !strings.Contains(resumedView, "runOld()") || !strings.Contains(resumedView, "runNew()") {
+		t.Fatalf("切换/恢复会话后未展示历史文件改动 diff：\n%s", resumedView)
+	}
+}
+
+func TestFileEditShowsNumberedDiffInTranscriptAndApprovalCard(t *testing.T) {
+	mgr := agent.NewManager(llm.Config{Provider: "mock", Model: "mock"}, func(string, any) {})
+	t.Cleanup(mgr.Shutdown)
+	m := newCLIModel(context.Background(), mgr, "", testWorkDir(t), false)
+	m.width, m.height = 100, 30
+	m.layout()
+
+	unifiedDiff := strings.Join([]string{
+		"--- a/src/StatusBar.tsx",
+		"+++ b/src/StatusBar.tsx",
+		"@@ -91,4 +91,5 @@",
+		"   <span>网关</span>",
+		"-  <span>旧文案</span>",
+		"+  <span>新文案</span>",
+		"+  <span>新增状态</span>",
+		" </header>",
+	}, "\n")
+
+	m.onEvent(cliMsg{
+		event: "tool.approval",
+		data: map[string]any{
+			"id":      "ap-1",
+			"agentId": m.agentID,
+			"tool":    "edit_file",
+			"title":   "编辑文件",
+			"detail":  "编辑 src/StatusBar.tsx",
+			"diff":    unifiedDiff,
+		},
+	})
+	m.layout()
+	apView := m.View()
+	if !strings.Contains(apView, "旧文案") || !strings.Contains(apView, "新文案") {
+		t.Fatalf("审批卡片截断了真正的 +/- 修改行（只显示了 ---/+++ 头）：\n%s", apView)
+	}
+
+	m.approvals = m.approvals.Clear()
+	m.onEvent(cliMsg{
+		event: "agent.tool",
+		data: map[string]any{
+			"id":     m.agentID,
+			"callId": "call-edit-1",
+			"tool":   "edit_file",
+			"phase":  "end",
+			"status": "ok",
+			"path":   "src/StatusBar.tsx",
+			"diff":   unifiedDiff,
+		},
+	})
+	m.layout()
+	trView := m.View()
+	if !strings.Contains(trView, "92") || !strings.Contains(trView, "旧文案") || !strings.Contains(trView, "新文案") {
+		t.Fatalf("主对话流未按主流 CLI 风格展示带行号的 +/- 修改内容：\n%s", trView)
+	}
+}
