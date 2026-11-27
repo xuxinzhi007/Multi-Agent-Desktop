@@ -75,11 +75,16 @@ export interface AgentStoppedEvent {
 /** AgentToolEvent 是一次 loop 内工具调用的开始或结束。 */
 export interface AgentToolEvent {
   id: string;
+  callId?: string;
   tool: string;
   /** start | end */
   phase: string;
   status?: string;
   content?: string;
+  /** DurationMS / Path / Diff 只有 end 阶段有：CLI 用它显示耗时与改动。 */
+  durationMs?: number;
+  path?: string;
+  diff?: string;
 }
 
 /**

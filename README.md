@@ -90,6 +90,20 @@ MyGo 不需要 cgo，**任意平台都能从任意机器编译**；只有签名�
 npm run verify       # tsc + go vet + go test -race + playwright
 ```
 
+### 命令行用法
+
+CLI 是同一个二进制，加 `-headless` 就是终端界面（Bubble Tea）。**目录语义按终端惯例**：在哪个目录启动就以哪个目录为准。
+
+```bash
+cd ~/proj && multi-agent-desktop-app -headless          # 在 ~/proj 开会话，直接聊
+multi-agent-desktop-app -headless -p "解释这个函数"        # 只问一次，打完退出（可进脚本）
+multi-agent-desktop-app -headless -C ~/proj -m 2        # 换目录、换第 2 个已保存模型
+multi-agent-desktop-app -headless -resume               # 接着最近的会话
+multi-agent-desktop-app -headless -h                    # 全部参数
+```
+
+会话内：`/new`（建会话，默认当前目录）、`/cd <路径>`（切目录）、`/model`（换模型）、`/resume`、`/stop`、`/quit`。TUI 的进程日志落在 `$TMPDIR/mad-cli.log`，不插进画面。
+
 ---
 
 ## 架构

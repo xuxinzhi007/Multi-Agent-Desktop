@@ -14,9 +14,9 @@ import (
 )
 
 func TestHeadlessSkipsWindow(t *testing.T) {
-	on, id := headlessFlags([]string{"-headless", "-agent", "agent-1"})
-	if !on || id != "agent-1" {
-		t.Fatalf("flags = %v %q", on, id)
+	args := parseCLIArgs([]string{"-headless", "-agent", "agent-1"})
+	if !args.Headless || args.AgentID != "agent-1" {
+		t.Fatalf("flags = %+v", args)
 	}
 
 	opened := 0
@@ -51,7 +51,7 @@ func TestHeadlessSkipsWindow(t *testing.T) {
 	mgr := agent.NewManager(llm.Config{}, func(string, any) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := runHeadless(ctx, nil, mgr, ""); err == nil {
+	if err := runHeadless(ctx, nil, mgr, cliArgs{}); err == nil {
 		t.Fatal("canceled context returned nil")
 	}
 	shutdownRuntime(nil, mgr, nil)
@@ -90,7 +90,7 @@ func TestHeadlessPromptPrintsDelta(t *testing.T) {
 	}
 	t.Cleanup(func() { newDesktopWindow = prev })
 
-	if err := runHeadless(context.Background(), h, mgr, a.ID); err != nil {
+	if err := runHeadless(context.Background(), h, mgr, cliArgs{AgentID: a.ID}); err != nil {
 		t.Fatalf("runHeadless: %v", err)
 	}
 	if opened != 0 {

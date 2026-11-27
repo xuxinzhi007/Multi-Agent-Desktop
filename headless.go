@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"multi-agent-desktop/internal/agent"
 	"multi-agent-desktop/internal/approval"
 	gwhost "multi-agent-desktop/internal/gateway/host"
+	"multi-agent-desktop/internal/llm"
 )
 
 var cliIO atomic.Pointer[headlessIO]
@@ -31,21 +33,73 @@ func continueDesktop(headless bool, api *API) *mygo.Window {
 	return newDesktopWindow(api)
 }
 
-func headlessFlags(args []string) (bool, string) {
-	on := false
-	id := ""
+// cliArgs 是 CLI 启动参数。
+//
+// 目录语义按终端工具惯例：**在哪个目录启动就以哪个目录为准**，只有显式
+// -C/--cd（或第一段位置参数）才切。这样 `cd ~/proj && app -headless` 就是
+// 最常规的用法，不需要先"新建会话再选目录"。
+type cliArgs struct {
+	Headless bool
+	Help     bool
+	AgentID  string
+	Dir      string
+	Prompt   string
+	Resume   bool
+	// Model 支持三种写法：序号(1)、provider 名(deepseek)、provider/model。
+	Model string
+}
+
+func parseCLIArgs(args []string) cliArgs {
+	var c cliArgs
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "-headless":
-			on = true
-		case "-agent":
+		case "-headless", "--headless":
+			c.Headless = true
+		case "-agent", "--agent":
 			if i+1 < len(args) {
 				i++
-				id = args[i]
+				c.AgentID = args[i]
+			}
+		case "-C", "--cd", "--dir":
+			if i+1 < len(args) {
+				i++
+				c.Dir = args[i]
+			}
+		case "-p", "--prompt":
+			if i+1 < len(args) {
+				i++
+				c.Prompt = args[i]
+			}
+		case "-m", "--model":
+			if i+1 < len(args) {
+				i++
+				c.Model = args[i]
+			}
+		case "-resume", "--resume":
+			c.Resume = true
+		case "-h", "--help":
+			c.Help = true
+		default:
+			// 位置参数当目录：`app -headless ~/proj` 与 `-C ~/proj` 等价。
+			if !strings.HasPrefix(args[i], "-") && c.Dir == "" {
+				c.Dir = args[i]
 			}
 		}
 	}
-	return on, id
+	return c
+}
+
+// workDir 把 -C / 位置参数 / 当前进程目录收敛成一个绝对路径。
+func (c cliArgs) workDir() string {
+	if c.Dir != "" {
+		if abs, err := filepath.Abs(c.Dir); err == nil {
+			return abs
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 type headlessIO struct {
@@ -143,7 +197,11 @@ func (h *headlessIO) readLineLocked() (string, error) {
 	return strings.TrimRight(s, "\r\n"), nil
 }
 
-func pickHeadlessAgent(mgr *agent.Manager, id string) (string, error) {
+// ensureCLIAgent 保证 CLI 有一个能跑的会话。
+//
+// 默认**新建**一个（目录就是 cwd），而不是抓 list[0]——CLI 最怕一启动就接进
+// 昨天的上下文。要接旧的显式用 -agent/-resume。
+func ensureCLIAgent(mgr *agent.Manager, id, cwd string, resume bool) (string, error) {
 	if mgr == nil {
 		return "", errors.New("没有会话内核")
 	}
@@ -151,13 +209,34 @@ func pickHeadlessAgent(mgr *agent.Manager, id string) (string, error) {
 		if _, ok := mgr.Get(id); !ok {
 			return "", fmt.Errorf("没有这个会话：%s", id)
 		}
+		if cwd != "" {
+			if err := mgr.SetAgentWorkDir(id, cwd); err != nil {
+				return "", err
+			}
+		}
 		return id, nil
 	}
-	list := mgr.List()
-	if len(list) == 0 {
-		return "", errors.New("还没有会话")
+	if resume {
+		list := mgr.List()
+		if len(list) == 0 {
+			return "", errors.New("还没有会话可接")
+		}
+		id = list[0].ID
+		if cwd != "" {
+			if err := mgr.SetAgentWorkDir(id, cwd); err != nil {
+				return "", err
+			}
+		}
+		return id, nil
 	}
-	return list[0].ID, nil
+
+	a := mgr.CreateInheriting("", "", "")
+	if cwd != "" {
+		if err := mgr.SetAgentWorkDir(a.ID, cwd); err != nil {
+			return "", err
+		}
+	}
+	return a.ID, nil
 }
 
 func headlessTerminal(h *headlessIO) bool {
@@ -171,22 +250,47 @@ func headlessTerminal(h *headlessIO) bool {
 	return isatty.IsTerminal(f.Fd())
 }
 
-func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, agentID string) error {
+func runHeadless(ctx context.Context, h *headlessIO, mgr *agent.Manager, args cliArgs) error {
+	cwd := args.workDir()
+	if mgr != nil && cwd != "" {
+		// 全局工作目录跟着启动目录走：子会话、审批根、shell cwd 都从这里派生。
+		mgr.SetWorkDir(cwd)
+	}
+
+	// -p：一次性提问，打印结果就退出，不进 TUI（对齐 claude -p / codex exec）。
+	if strings.TrimSpace(args.Prompt) != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		id, err := ensureCLIAgent(mgr, args.AgentID, cwd, args.Resume)
+		if err != nil {
+			return err
+		}
+		if err := applyCLIModel(mgr, id, args.Model); err != nil {
+			return err
+		}
+		_, err = mgr.RunPrompt(ctx, id, args.Prompt)
+		return err
+	}
+
 	if headlessTerminal(h) {
-		return runTermUI(ctx, h, mgr, agentID)
+		return runTermUI(ctx, h, mgr, args.AgentID, cwd, args.Resume)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	id, err := pickHeadlessAgent(mgr, agentID)
+	id, err := ensureCLIAgent(mgr, args.AgentID, cwd, args.Resume)
 	if err != nil {
+		return err
+	}
+	if err := applyCLIModel(mgr, id, args.Model); err != nil {
 		return err
 	}
 	out := io.Writer(io.Discard)
 	if h != nil && h.out != nil {
 		out = h.out
 	}
-	fmt.Fprintf(out, "会话 %s\n", id)
+	fmt.Fprintf(out, "会话 %s（%s）\n", id, shortPath(cwd))
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -252,4 +356,50 @@ func shutdownRuntime(api *API, mgr *agent.Manager, gw *gwhost.Host) {
 		}
 		mgr.Shutdown()
 	}
+}
+
+const cliUsage = `用法：
+  app -headless [目录]              在目录里开会话（默认当前目录）
+  app -headless -p "问题"            只问一次，打完结果退出
+  app -headless -resume             接着最近的会话
+  app -headless -agent <id>         指定会话
+  app -headless -m <模型>            序号 / provider / provider/model
+  app -headless -C <目录>            切目录（与位置参数等价）
+  app -headless -h                  看这段
+`
+
+// applyCLIModel 把 -m 的写法落到会话上。语义与 TUI 的 /model 一致，
+// 免得两个入口各认一套写法。
+func applyCLIModel(mgr *agent.Manager, id, want string) error {
+	want = strings.TrimSpace(want)
+	if want == "" || mgr == nil || id == "" {
+		return nil
+	}
+	list := mgr.Providers()
+	labels := make([]string, 0, len(list))
+	for i, c := range list {
+		label := c.Provider
+		if c.Model != "" {
+			label = c.Provider + "/" + c.Model
+		}
+		labels = append(labels, fmt.Sprintf("%d:%s", i+1, label))
+	}
+	for i, c := range list {
+		label := c.Provider
+		if c.Model != "" {
+			label = c.Provider + "/" + c.Model
+		}
+		if want == fmt.Sprint(i+1) || want == c.Provider || want == c.Model || want == label {
+			if c.Model == "" && c.Provider != llm.DoubaoCLIProvider {
+				// 本地 / 云端连接都可能没填模型；loop 会把空 Model 当成"没选模型"，
+				// 在 CLI 入口就把话说清楚，比跑到一半报错强。
+				return fmt.Errorf("%s 这条连接没有填模型，先补一个（-m %s/<模型>）", c.Provider, c.Provider)
+			}
+			return mgr.SetAgentLLM(id, c)
+		}
+	}
+	if len(labels) == 0 {
+		return fmt.Errorf("没有这个模型：%s（还没保存过任何模型，先去桌面端加一个）", want)
+	}
+	return fmt.Errorf("没有这个模型：%s（已保存：%s）", want, strings.Join(labels, "、"))
 }

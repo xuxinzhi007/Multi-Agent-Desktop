@@ -223,10 +223,15 @@ type FileIntentEvent struct {
 // AgentToolEvent 是一次 loop 内工具调用的开始或结束。
 type AgentToolEvent struct {
 	ID      string `json:"id"`
+	CallID  string `json:"callId,omitempty"`
 	Tool    string `json:"tool"`
 	Phase   string `json:"phase"` // start | end
 	Status  string `json:"status,omitempty"`
 	Content string `json:"content,omitempty"`
+	// DurationMS / Path / Diff 只有 end 阶段有：CLI 用它显示耗时与改动。
+	DurationMS int    `json:"durationMs,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Diff       string `json:"diff,omitempty"`
 }
 
 // AgentLoopEvent 是循环的一次结局（done / failed）。
@@ -1235,7 +1240,23 @@ func toAgentTool(data any) (AgentToolEvent, bool) {
 	}
 	status, _ := m["status"].(string)
 	content, _ := m["content"].(string)
-	return AgentToolEvent{ID: id, Tool: tool, Phase: phase, Status: status, Content: content}, true
+	callID, _ := m["callId"].(string)
+	path, _ := m["path"].(string)
+	diff, _ := m["diff"].(string)
+	duration := 0
+	switch v := m["durationMs"].(type) {
+	case float64:
+		duration = int(v)
+	case int:
+		duration = v
+	case int64:
+		duration = int(v)
+	}
+	return AgentToolEvent{
+		ID: id, CallID: callID, Tool: tool, Phase: phase,
+		Status: status, Content: content,
+		DurationMS: duration, Path: path, Diff: diff,
+	}, true
 }
 
 func toFileIntent(data any) (FileIntentEvent, bool) {
@@ -1788,21 +1809,25 @@ func main() {
 		planSvc.Start(context.Background(), 30*time.Second)
 	}
 
-	headless, cliAgent := headlessFlags(os.Args[1:])
-	if !headless {
+	cli := parseCLIArgs(os.Args[1:])
+	if cli.Help {
+		fmt.Print(cliUsage)
+		return
+	}
+	if !cli.Headless {
 		api.desk = browser.NewDesk()
 		api.desk.SetStatePath(filepath.Join(dataDir, "browser-page.json"))
 		browser.SetDesk(api.desk)
 	}
 
-	if headless {
+	if cli.Headless {
 		hio := &headlessIO{out: os.Stdout, in: bufio.NewReader(os.Stdin)}
 		if mgr != nil {
 			hio.center = mgr.Approvals()
 		}
 		cliIO.Store(hio)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		err := runHeadless(ctx, hio, mgr, cliAgent)
+		err := runHeadless(ctx, hio, mgr, cli)
 		stop()
 		shutdownRuntime(api, mgr, gwHost.Load())
 		if err != nil && !errors.Is(err, context.Canceled) {
