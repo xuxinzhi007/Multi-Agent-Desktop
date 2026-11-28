@@ -86,20 +86,3 @@ func TestAssistInheritsGlobalModelWhenParentHasNone(t *testing.T) {
 		t.Fatal("助手没有工作目录")
 	}
 }
-
-// 飞书协助是临时的手，不该再给自己建「协助的学习」占名额。
-func TestHelperDoesNotSpawnLearner(t *testing.T) {
-	m := newTestManager(t)
-	parent := m.Create("p", "测试工程师", "")
-	helper := m.create("h", "测试工程师的协助1", "协助「测试工程师」直接回答飞书里的一条消息。", parent.ID)
-	if !helper.isHelper() {
-		t.Fatal("应当识别为飞书协助")
-	}
-	name, _ := ensureLearner(m, helper)
-	if name != "" {
-		t.Fatalf("协助不该再建学习子会话，建了 %q", name)
-	}
-	if len(m.childAgents()) != 1 {
-		t.Fatalf("只该有助手自己，实际 %d 个子会话", len(m.childAgents()))
-	}
-}

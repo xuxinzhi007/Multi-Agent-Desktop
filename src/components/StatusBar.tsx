@@ -99,7 +99,7 @@ export default function StatusBar({ running, approvals, queue, gateway, onOpenAp
         <span style={statStyle} className="c-status-stat" title="所有任务已完成">
           全部完成 <b style={numStyle}>✓</b>
         </span>
-      )
+      )}
 
       <button
         type="button"

@@ -321,9 +321,14 @@ func TestEnterOnTrailingSpaceExecutes(t *testing.T) {
 	if !m.suggest.ExecutesOnEnter() {
 		t.Fatalf("mode=%v 下 Enter 应是执行而不是补全", m.suggest.Mode())
 	}
-	m, _ = enterKey(t, m)
+	m, cmd := enterKey(t, m)
 	if m.input.Value() != "" {
 		t.Fatalf("执行后输入应被清空，got %q（说明回车被当成补全吞掉了）", m.input.Value())
+	}
+	// /compact 在后台跑，跑完的结果要再送回界面。
+	if cmd != nil {
+		next, _ := m.Update(cmd())
+		m = next.(*cliModel)
 	}
 	if !strings.Contains(m.plainTranscript(), "压缩") {
 		t.Fatalf("回车没有真正执行 /compact：\n%s", m.plainTranscript())

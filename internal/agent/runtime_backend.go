@@ -101,6 +101,15 @@ func consumeRuntimeEvents(m *Manager, a *Agent, sess rt.Session, channelID strin
 		case rt.KindPermission:
 			handleRuntimePermission(m, a, sess, runCtx, ev.Permission)
 		case rt.KindNotice:
+			if step := ev.Meta["compact"]; step != "" && ev.Notice != nil {
+				m.emit("agent.compact", map[string]any{
+					"id":      a.ID,
+					"phase":   step, // start | done | failed
+					"text":    ev.Notice.Description,
+					"summary": ev.Text,
+				})
+				continue
+			}
 			if ev.Notice != nil && ev.Notice.Severity == "error" {
 				msg := ev.Notice.Title
 				if ev.Notice.Description != "" {

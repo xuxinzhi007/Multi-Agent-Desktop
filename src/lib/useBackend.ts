@@ -367,10 +367,7 @@ export function useBackend() {
                 name: a.name,
                 role: a.role,
                 proposal: a.proposal,
-                learnAt: a.learnAt,
-                learnTotal: a.learnTotal,
-                learnBy: a.learnBy,
-                learnBusy: a.learnBusy,
+                ctxCovered: a.ctxCovered,
               }
             : x,
         ),

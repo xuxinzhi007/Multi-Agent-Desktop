@@ -118,3 +118,56 @@ func TestDirtyCodeEditRequiresVerifyBeforeDone(t *testing.T) {
 		t.Fatalf("编辑代码文件后未跑 verify 就收尾应被拦截补跑 verify，实际 verify 次数 = %d", v.exe.Load())
 	}
 }
+
+// stubDelegateTool 模拟派活工具：自己不写文件，但回报「派出去的子任务改了代码」。
+type stubDelegateTool struct{ wroteCode bool }
+
+func (*stubDelegateTool) Name() string        { return "delegate" }
+func (*stubDelegateTool) Description() string { return "delegate" }
+func (*stubDelegateTool) Writes() bool        { return false }
+func (*stubDelegateTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
+func (s *stubDelegateTool) Execute(context.Context, json.RawMessage) tool.Result {
+	res := tool.OK("子任务已经跑完")
+	res.Meta.WroteCode = s.wroteCode
+	return res
+}
+
+// 子任务替父会话改了代码，父会话同样要在收尾前跑一次 verify：
+// 几个子任务并行改完，各自验过不等于合在一起是好的。
+func TestDelegatedCodeChangesRequireVerifyBeforeDone(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		wroteCode bool
+		want      int32
+	}{
+		{"子任务改了代码", true, 1},
+		{"子任务只做了调研", false, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			v := &scriptedVerify{red: 0}
+			reg := tool.NewRegistry()
+			reg.Register(&stubDelegateTool{wroteCode: c.wroteCode})
+			reg.Register(v)
+
+			m := &scriptedModel{turns: []llm.Turn{
+				{Calls: []tool.Call{{ID: "d1", Name: "delegate", Input: json.RawMessage(`{}`)}}},
+				{Text: "子任务都做完了。"},
+				{Calls: []tool.Call{verifyCall()}},
+				{Text: "verify 通过，做完了。"},
+			}}
+
+			r, _ := newRunner(m, reg)
+			st := r.Run(context.Background(), &State{
+				Messages: []llm.Message{{Role: "user", Content: "把这几处一起改了"}},
+			})
+			if st.Phase != PhaseDone {
+				t.Fatalf("phase = %s, reason = %s", st.Phase, st.StopReason)
+			}
+			if got := v.exe.Load(); got != c.want {
+				t.Fatalf("verify 次数 = %d，期望 %d", got, c.want)
+			}
+		})
+	}
+}

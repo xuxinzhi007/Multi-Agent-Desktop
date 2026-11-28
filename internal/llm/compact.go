@@ -4,39 +4,62 @@ import (
 	"strings"
 )
 
-// ContextLimit 返回这次请求应按多少 token 来收历史。
-// 显式配置优先。本地服务按常见的 8192 窗口，远程模型按更大的默认值。
+// ContextLimit 返回这个模型的上下文窗口有多少 token。
+//
+// 全项目只有这一张表：循环按它决定什么时候压缩，状态栏按它算百分比。
+// 以前两处各有一张，对同一个模型给出 8192 和 128000 两个答案——
+// 状态栏显示「才用了 4%」，循环那边其实早就在丢历史了。
+//
+// 显式配置优先。本地服务按 8192：真实窗口取决于服务怎么启动，猜大了会直接报错。
+// 远程模型按型号认；认不出的型号按 32768，宁可早一点压缩，也不要撑爆。
+// 估小了只是压缩得早；估大了服务端会拒绝，循环再把预算减半重试。
 func ContextLimit(cfg Config) int {
 	if cfg.ContextWindow > 0 {
 		return cfg.ContextWindow
 	}
 	switch cfg.Provider {
+	case "", "mock":
+		return 8192
 	case "llamacpp", "ollama":
 		return 8192
-	case "deepseek":
-		return 65536
 	case "qoder":
 		return 131072
-	case "openai", "claude":
-		m := strings.ToLower(cfg.Model)
-		if cfg.Provider == "openai" {
-			if strings.Contains(m, "gpt-4o") || strings.Contains(m, "gpt-4.1") || strings.Contains(m, "gpt-5") {
-				return 131072
-			}
-			if strings.Contains(m, "gpt-4-mini") || strings.Contains(m, "gpt-3.5") {
-				return 16384
-			}
-		} else {
-			if strings.Contains(m, "claude-3") || strings.Contains(m, "claude-4") ||
-				strings.Contains(m, "claude-opus") || strings.Contains(m, "claude-sonnet") ||
-				strings.Contains(m, "claude-haiku") {
-				return 200000
+	case DoubaoCLIProvider:
+		return 128000
+	}
+	m := strings.ToLower(cfg.Model)
+	has := func(keys ...string) bool {
+		for _, k := range keys {
+			if strings.Contains(m, k) {
+				return true
 			}
 		}
-		return 32768
-	default:
-		return 8192
+		return false
 	}
+	switch {
+	case has("claude", "opus", "sonnet", "haiku"):
+		return 200000
+	case has("gemini"):
+		return 1000000
+	case has("gpt-5", "gpt-4.1"):
+		return 200000
+	case has("gpt-4o"):
+		return 128000
+	case has("gpt-3.5", "gpt-4-mini"):
+		return 16384
+	case has("deepseek"):
+		return 65536
+	case has("qwen", "glm", "kimi", "moonshot", "doubao", "minimax", "grok"):
+		return 128000
+	}
+	switch cfg.Provider {
+	case "deepseek":
+		return 65536
+	case "doubao":
+		// 火山方舟的模型名常常是接入点 ID（ep-…），从名字认不出型号。
+		return 128000
+	}
+	return 32768
 }
 
 // EstTokens 粗估一段文本的 token。中文按一字一个，英文大约四字一个。
@@ -146,6 +169,34 @@ func CompactWith(msgs []Message, budget int, summarize Summarizer, previous stri
 		out = append(out, g...)
 	}
 	return out
+}
+
+// TailStart 算出「保留最近 tailBudget 个 token」时，尾巴从第几条消息开始。
+// 返回的下标之前的消息就是该收成摘要的那一段；返回 0 表示没有可收的。
+//
+// 按组切：带工具调用的 assistant 和它后面的 tool 结果是一组，要么整组留下，
+// 要么整组收走，否则发给模型的历史里会出现没有调用的结果，协议对不上。
+// 最近一组无条件留下，哪怕它自己就超了预算——那种情况由调用方再裁。
+func TailStart(msgs []Message, tailBudget int) int {
+	groups := groupTurns(msgs)
+	if len(groups) <= 1 {
+		return 0
+	}
+	start := len(groups)
+	used := 0
+	for i := len(groups) - 1; i >= 0; i-- {
+		cost := estMessages(groups[i])
+		if start != len(groups) && used+cost > tailBudget {
+			break
+		}
+		used += cost
+		start = i
+	}
+	n := 0
+	for _, g := range groups[:start] {
+		n += len(g)
+	}
+	return n
 }
 
 func splitLeadingSystem(msgs []Message) (systems, rest []Message) {

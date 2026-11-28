@@ -197,3 +197,44 @@ func TestWriteVersionStateIsIsolatedBetweenAgents(t *testing.T) {
 		t.Fatalf("B 覆盖了 A 的写入：%q", data)
 	}
 }
+
+// 临时子任务跑完要能把自己的记录清掉，而且只清自己的：
+// 别的作用域读过同一个文件，它的版本记录和过期保护都得原样留着。
+func TestForgetScopeDropsOnlyThatScope(t *testing.T) {
+	dir := tmpDir(t)
+	path := filepath.Join(dir, "shared.go")
+	if err := os.WriteFile(path, []byte("var X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{"sub-gone", "sub-kept"} {
+		if res := invoke(t, &ReadFile{WorkDir: dir, Scope: scope}, `{"path":"shared.go"}`); res.Status != tool.StatusOK {
+			t.Fatalf("%s read: %s", scope, res.Content)
+		}
+	}
+	if res := invoke(t, &EditFile{WorkDir: dir, Scope: "sub-gone"}, `{"path":"shared.go","oldText":"var X = 1","newText":"var X = 2"}`); res.Status != tool.StatusOK {
+		t.Fatalf("edit: %s", res.Content)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wroteInSession("sub-gone", abs) {
+		t.Fatalf("前提不成立：写入没有记到 sub-gone 名下")
+	}
+
+	ForgetScope("sub-gone")
+
+	if _, ok := remembered("sub-gone", abs); ok {
+		t.Fatalf("sub-gone 的读取记录还在")
+	}
+	if wroteInSession("sub-gone", abs) {
+		t.Fatalf("sub-gone 的写入记录还在")
+	}
+	if _, ok := remembered("sub-kept", abs); !ok {
+		t.Fatalf("sub-kept 的读取记录被一起清掉了")
+	}
+	res := invoke(t, &EditFile{WorkDir: dir, Scope: "sub-kept"}, `{"path":"shared.go","oldText":"var X = 2","newText":"var X = 3"}`)
+	if res.Status != tool.StatusError || !strings.Contains(res.Content, "STALE_WRITE") {
+		t.Fatalf("sub-kept 手里是旧版本，写入应该被拒：%q %s", res.Status, res.Content)
+	}
+}

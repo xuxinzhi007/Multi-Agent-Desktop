@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,15 @@ import (
 	"multi-agent-desktop/internal/llm"
 	"multi-agent-desktop/internal/skill"
 )
+
+// cliCompactDoneMsg 是 /compact 跑完的结果。压缩是一次真实的模型调用，
+// 在后台跑，跑完再回到界面。
+type cliCompactDoneMsg struct {
+	agentID string
+	res     agent.CompactResult
+	err     error
+	took    time.Duration
+}
 
 type cliBangResultMsg struct {
 	cmd      string
@@ -191,6 +201,15 @@ func (m *cliModel) cmdContext() string {
 	fmt.Fprintf(&b, "上下文窗口占用  %s %d%%（约 %s / %s tokens）\n",
 		bar, st.Percent, formatCompactTokens(st.EstimatedTok), formatCompactTokens(st.WindowLimitTok))
 	fmt.Fprintf(&b, "  历史消息    %d 条（可用 /compact 压缩，/undo 撤回上一轮，/clear 清屏）\n", st.Messages)
+	// 上面的占用只算真正会发给模型的部分，这里说清楚是哪一部分。
+	switch {
+	case st.Compacted > 0:
+		fmt.Fprintf(&b, "  发给模型    摘要 1 份 + 最近 %d 条原文（更早的 %d 条已压缩成摘要，对话记录里仍然保留）\n", st.SentMessages, st.Compacted)
+	case st.SentMessages < st.Messages:
+		fmt.Fprintf(&b, "  发给模型    最近 %d 条（更早的 %d 条这一轮带不上；/compact 可以把它们压成摘要带上）\n", st.SentMessages, st.Messages-st.SentMessages)
+	default:
+		fmt.Fprintf(&b, "  发给模型    全部 %d 条原文（占到窗口约四分之三时会自动压缩较早的部分）\n", st.SentMessages)
+	}
 	fmt.Fprintf(&b, "  项目规范    %s\n", guide)
 	fmt.Fprintf(&b, "  已挂载能力  技能 %d 项（仅索引头，按需懒加载正文） · MCP 工具 %d 个 · 插件工具 %d 个\n",
 		st.SkillCount, st.MCPToolCount, st.PluginToolCnt)
@@ -205,25 +224,82 @@ func (m *cliModel) cmdContext() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *cliModel) cmdCompact(arg string) string {
+// startCompact 发起 /compact。
+//
+// 压缩要问一次模型，长对话要几十秒。以前它在界面线程里同步跑，这段时间整个
+// 终端是卡死的；而且模型调用失败时会悄悄换成本地拼的几行字，所以「瞬间完成」
+// 的那几次其实根本没有问模型。现在放到后台跑，状态行显示进度，Esc 可以取消。
+func (m *cliModel) startCompact(arg string) (tea.Model, tea.Cmd) {
 	if m.mgr == nil || m.agentID == "" {
-		return "还没有当前会话"
+		m.pushSystem("没有压缩：还没有当前会话。")
+		m.layout()
+		return m, nil
 	}
-	before, after, summary, err := m.mgr.CompactSession(m.ctx, m.agentID, arg)
-	if err != nil {
-		return "压缩跳过：" + err.Error()
+	if m.busy {
+		m.pushSystem("这一轮还在运行，按 Esc 或输入 /stop 停止后再压缩。")
+		m.layout()
+		return m, nil
 	}
-	if a, ok := m.mgr.Get(m.agentID); ok {
-		m.cells = nil
-		m.liveIdx = -1
-		m.thinkIdx = -1
-		m.syncAgentState(a, false)
+	parent := m.ctx
+	if parent == nil {
+		parent = context.Background()
 	}
-	m.refreshContextStats()
-	return fmt.Sprintf("✓ 已压缩上下文：%d 条消息 → %d 条（当前窗口占用 %d%%）\n摘要预览：\n%s",
-		before, after, m.ctxStats.Percent, firstLine(summary))
+	ctx, cancel := context.WithCancel(parent)
+	m.compactCancel = cancel
+	m.compactAborted = false
+	m.busy = true
+	m.turnStart = time.Now()
+	m.phase = "waiting"
+	m.prepHint = "正在让模型把较早的对话写成摘要（Esc 取消，历史不会丢）…"
+	m.layout()
+
+	mgr, id, start := m.mgr, m.agentID, time.Now()
+	return m, func() tea.Msg {
+		res, err := mgr.CompactSession(ctx, id, arg)
+		return cliCompactDoneMsg{agentID: id, res: res, err: err, took: time.Since(start)}
+	}
 }
 
+func (m *cliModel) onCompactDone(msg cliCompactDoneMsg) {
+	if m.compactCancel != nil {
+		m.compactCancel()
+		m.compactCancel = nil
+	}
+	cancelled := msg.err != nil && (m.compactAborted || errors.Is(msg.err, context.Canceled))
+	m.compactAborted = false
+	m.busy = false
+	m.prepHint = ""
+	if msg.agentID != m.agentID {
+		// 压缩期间切到了别的会话：结果属于那个会话，这里不重画。
+		m.layout()
+		return
+	}
+	switch {
+	case cancelled:
+		m.pushSystem("已取消压缩，历史没有变化。")
+	case msg.err != nil:
+		m.pushSystem("没有压缩：" + msg.err.Error())
+	default:
+		if a, ok := m.mgr.Get(m.agentID); ok {
+			m.cells = nil
+			m.liveIdx = -1
+			m.thinkIdx = -1
+			m.syncAgentState(a, false)
+		}
+		m.refreshContextStats()
+		var b strings.Builder
+		fmt.Fprintf(&b, "✓ 已压缩上下文：%d 条消息 → 摘要 1 份 + 最近 %d 条原文（模型用时 %s，当前窗口占用 %d%%）\n",
+			msg.res.Before, msg.res.After-1, humanDuration(msg.took), m.ctxStats.Percent)
+		if msg.res.Backup != "" {
+			fmt.Fprintf(&b, "压缩前的完整记录已另存：%s\n", msg.res.Backup)
+		}
+		b.WriteString("摘要全文（之后模型就靠它接着做，写漏了可以直接告诉它补上）：\n")
+		b.WriteString(msg.res.Summary)
+		m.pushSystem(b.String())
+	}
+	m.refreshContextStats()
+	m.layout()
+}
 func (m *cliModel) cmdUndo() string {
 	if m.mgr == nil || m.agentID == "" {
 		return "还没有当前会话"

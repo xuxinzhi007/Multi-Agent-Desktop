@@ -285,7 +285,7 @@ func TestGrepRepoLatencyBenchmark(t *testing.T) {
 	start := time.Now()
 	res := invoke(t, g, `{"pattern":"compactSummarizer"}`)
 	elapsed := time.Since(start)
-	if res.Status != tool.StatusOK || !strings.Contains(res.Content, "summarize.go") {
+	if res.Status != tool.StatusOK || !strings.Contains(res.Content, "compaction.go") {
 		t.Fatalf("repo grep failed: %s", res.Content)
 	}
 	t.Logf("repo grep (rg=%v) completed in %v", findRipgrep() != "", elapsed)

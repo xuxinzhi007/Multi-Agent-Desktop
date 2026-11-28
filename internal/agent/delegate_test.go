@@ -23,7 +23,8 @@ func callDelegate(t *testing.T, m *Manager, fromID, channelID string, in any) to
 }
 
 // delegateInput 组装工具入参。mode 为空时不带顶层 mode，走工具面的兜底推断；
-// 断言 write 重路径（建常驻子会话）的用例显式传 "write"，避免被新推断改成 read。
+// 断言重路径（建常驻子会话 + 工作树）的用例显式传 "isolated"：
+// "write" 现在是临时子任务，在父会话目录里直接改，不建会话。
 func delegateInput(mode string, tasks ...map[string]string) map[string]any {
 	list := make([]map[string]string, 0, len(tasks))
 	list = append(list, tasks...)
@@ -42,7 +43,7 @@ func TestDelegateRunsTasksInParallel(t *testing.T) {
 	}
 	withChildBackend(t, "mock")
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput("write",
+	res := callDelegate(t, m, parent.ID, "", delegateInput("isolated",
 		map[string]string{"name": "查前端", "role": "前端", "task": "找出所有按钮组件"},
 		map[string]string{"name": "查后端", "role": "后端", "task": "找出所有 handler"},
 	))
@@ -275,7 +276,7 @@ func TestSpawnParentTimeoutKeepsChildRunning(t *testing.T) {
 		parent:   parent.Snapshot(),
 		tasks:    []spawnTask{{Name: "慢活", Task: "慢慢做"}},
 		baseDir:  parent.EffectiveWorkDir(m),
-		mode:     spawnModeWrite,
+		mode:     spawnModeIsolated,
 		budgetMS: 1,
 	})
 	_ = summary
@@ -340,8 +341,8 @@ func TestDelegateReadModeCreatesNoSessionOrWorktree(t *testing.T) {
 	}
 }
 
-// write 子任务：现状不变——仍建隔离子会话和独立工作树。
-func TestDelegateWriteModeStillSpawnsSessionAndWorktree(t *testing.T) {
+// isolated 子任务（旧的 write）：仍建隔离子会话和独立工作树。
+func TestDelegateIsolatedModeSpawnsSessionAndWorktree(t *testing.T) {
 	repo := gitRepo(t)
 	m := newTestManager(t)
 	parent := m.Create("", "主会话", "工程师")
@@ -357,14 +358,14 @@ func TestDelegateWriteModeStillSpawnsSessionAndWorktree(t *testing.T) {
 		}
 	})
 
-	res := callDelegate(t, m, parent.ID, "", delegateInput("write",
+	res := callDelegate(t, m, parent.ID, "", delegateInput("isolated",
 		map[string]string{"name": "改handler", "role": "后端", "task": "修改这个 handler，补一个参数"},
 	))
 	if res.Status != tool.StatusOK {
-		t.Fatalf("write 子任务失败：%s", res.Content)
+		t.Fatalf("isolated 子任务失败：%s", res.Content)
 	}
 	if got := len(m.List()); got != 2 {
-		t.Fatalf("write 子会话应当建出来，实际 %d", got)
+		t.Fatalf("isolated 子会话应当建出来，实际 %d", got)
 	}
 	for _, a := range m.List() {
 		if a.ID == parent.ID {
@@ -372,14 +373,14 @@ func TestDelegateWriteModeStillSpawnsSessionAndWorktree(t *testing.T) {
 		}
 		sn := a.Snapshot()
 		if sn.Worktree == "" || sn.WorktreeBranch == "" {
-			t.Fatalf("write 子会话 %s 没有独立工作树：%+v", sn.Name, sn)
+			t.Fatalf("isolated 子会话 %s 没有独立工作树：%+v", sn.Name, sn)
 		}
 		if sn.WorkDir != sn.Worktree {
 			t.Fatalf("子会话 WorkDir 应当指向工作树：%q vs %q", sn.WorkDir, sn.Worktree)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(repo), ".mad-worktrees")); err != nil {
-		t.Fatalf("write 模式应当建工作树目录：%v", err)
+		t.Fatalf("isolated 模式应当建工作树目录：%v", err)
 	}
 }
 
@@ -404,7 +405,7 @@ func TestInferSpawnModeClassifiesTypicalTasks(t *testing.T) {
 	}
 }
 
-// 形态优先级：任务显式 mode > 顶层 mode > 推断；旧调用方兜底 write。
+// 形态优先级：任务显式 mode > 顶层 mode > 推断；不带推断的调用方（Supervisor）兜底 isolated。
 func TestResolveSpawnModePrecedence(t *testing.T) {
 	opts := spawnOpts{mode: spawnModeWrite, inferMode: true}
 	if got := resolveSpawnMode(spawnTask{Task: "分析一下", Mode: spawnModeRead}, opts); got != spawnModeRead {
@@ -413,8 +414,11 @@ func TestResolveSpawnModePrecedence(t *testing.T) {
 	if got := resolveSpawnMode(spawnTask{Task: "分析一下"}, opts); got != spawnModeWrite {
 		t.Fatalf("顶层 write 应覆盖推断：%q", got)
 	}
-	if got := resolveSpawnMode(spawnTask{Task: "分析一下"}, spawnOpts{}); got != spawnModeWrite {
-		t.Fatalf("旧调用方（inferMode=false）应兜底 write：%q", got)
+	if got := resolveSpawnMode(spawnTask{Task: "分析一下"}, spawnOpts{}); got != spawnModeIsolated {
+		t.Fatalf("不带推断的调用方（inferMode=false）应兜底 isolated，保持建子会话的旧行为：%q", got)
+	}
+	if got := resolveSpawnMode(spawnTask{Task: "分析一下", Mode: spawnModeIsolated}, opts); got != spawnModeIsolated {
+		t.Fatalf("任务显式 isolated 应覆盖顶层 write：%q", got)
 	}
 }
 

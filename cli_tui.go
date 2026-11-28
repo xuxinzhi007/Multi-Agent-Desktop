@@ -169,6 +169,7 @@ type transcriptCell struct {
 	output     string
 	status     string
 	diff       string
+	via        string // 这次调用出自哪个子任务；主会话自己的调用为空
 	exitCode   *int
 	trunc      bool
 	subAgents  []subAgentItem
@@ -208,6 +209,8 @@ type cliModel struct {
 	phase           string // waiting | thinking | tool | streaming
 	round           int
 	prepHint        string
+	compactCancel   context.CancelFunc // /compact 正在后台跑时非空，Esc 用它取消
+	compactAborted  bool               // 用户按了 Esc：结果回来时按「已取消」说，不当成出错
 	expandThink     bool
 	bannerFrame     int
 	spin            int
@@ -670,10 +673,8 @@ func (m *cliModel) renderSubAgentCell(c transcriptCell, w int) string {
 			stIcon = m.theme.Err.Render("✗")
 		}
 		meta := ""
-		if it.Branch != "" {
-			meta = " [" + it.Branch + "]"
-		} else if it.Mode == "read" {
-			meta = " [只读检索]"
+		if l := subAgentModeLabel(it); l != "" {
+			meta = " [" + l + "]"
 		}
 		detail := it.Activity
 		if it.Status != "running" && it.Status != "" && it.Summary != "" {
@@ -791,6 +792,9 @@ func (m *cliModel) renderToolCell(c transcriptCell, w int) string {
 		}
 	} else if c.done && c.duration > 0 {
 		line += "  " + m.theme.Muted.Render(humanDuration(c.duration))
+	}
+	if c.via != "" {
+		line += "  " + m.theme.Muted.Render("· 子任务 "+c.via)
 	}
 
 	var rows []string
@@ -1101,6 +1105,9 @@ func (m *cliModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cliBangResultMsg:
 		m.onBangResult(msg)
 		return m, nil
+	case cliCompactDoneMsg:
+		m.onCompactDone(msg)
+		return m, nil
 	case cliMsg:
 		m.onEvent(msg)
 		m.layout()
@@ -1274,6 +1281,14 @@ func (m *cliModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyEsc {
 		if m.suggest.Visible() {
 			m.suggest = m.suggest.Close()
+			m.layout()
+			return m, nil
+		}
+		if m.compactCancel != nil {
+			// 取消后 CompactSession 会带着 ctx 错误返回，收尾在 onCompactDone 里做。
+			m.compactAborted = true
+			m.compactCancel()
+			m.prepHint = "正在取消压缩…"
 			m.layout()
 			return m, nil
 		}
@@ -1531,7 +1546,7 @@ func (m *cliModel) execSlash(name, arg string) (tea.Model, tea.Cmd) {
 	case "/context":
 		m.pushSystem(m.cmdContext())
 	case "/compact":
-		m.pushSystem(m.cmdCompact(arg))
+		return m.startCompact(arg)
 	case "/undo":
 		m.pushSystem(m.cmdUndo())
 	case "/diff":
@@ -2206,6 +2221,12 @@ func (m *cliModel) cmdStop() string {
 	if m.mgr == nil || m.agentID == "" {
 		return "还没有当前会话"
 	}
+	if m.compactCancel != nil {
+		// 正在跑的是 /compact，不是一轮对话。收尾在 onCompactDone 里做。
+		m.compactAborted = true
+		m.compactCancel()
+		return "正在取消压缩，历史不会变。"
+	}
 	if !m.mgr.Stop(m.agentID) {
 		return "没有正在跑的这一轮"
 	}
@@ -2227,6 +2248,26 @@ func (m *cliModel) currentAgentName() string {
 
 func (m *cliModel) onEvent(msg cliMsg) {
 	switch msg.event {
+	case "agent.compact":
+		// 一轮当中窗口快满了，循环自己压了一次。这是一次真实的模型调用，
+		// 开始时在状态行说一声，结束后把结果留在对话流里。
+		mp, ok := msg.data.(map[string]any)
+		if !ok {
+			return
+		}
+		if id, _ := mp["id"].(string); id != m.agentID {
+			return
+		}
+		text, _ := mp["text"].(string)
+		switch ph, _ := mp["phase"].(string); ph {
+		case "start":
+			m.prepHint = text
+		default:
+			m.prepHint = ""
+			m.pushSystem(text)
+			m.refreshContextStats()
+		}
+
 	case "agent.loop":
 		if mp, ok := msg.data.(map[string]any); ok {
 			id, _ := mp["id"].(string)
@@ -2415,6 +2456,8 @@ func (m *cliModel) onToolEvent(data any) {
 		outputStr = v.Content
 	}
 	trunc, _ := rawMap["truncated"].(bool)
+	// via 非空：这是临时子任务在主会话目录里写文件后转过来的结果，不是主会话自己的调用。
+	via, _ := rawMap["via"].(string)
 	var exitCode *int
 	if rawMap != nil {
 		switch ec := rawMap["exitCode"].(type) {
@@ -2515,6 +2558,7 @@ func (m *cliModel) onToolEvent(data any) {
 				output:   outputStr,
 				status:   v.Status,
 				diff:     v.Diff,
+				via:      via,
 				exitCode: exitCode,
 				trunc:    trunc,
 				duration: dur,
@@ -2522,7 +2566,8 @@ func (m *cliModel) onToolEvent(data any) {
 			})
 		}
 		m.upsertToolRecord(callKey, v, inputStr, outputStr, exitCode, dur, trunc)
-		if m.runningToolCount() == 0 {
+		// 子任务转来的写入不代表主会话这一步做完了：子任务还在跑，状态留给 batch_done 去改。
+		if via == "" && m.runningToolCount() == 0 {
 			m.phase = "analyzing"
 		}
 		m.rebuildViewport(true)
@@ -3220,6 +3265,20 @@ func (m *cliModel) cmdLogs(arg string) (string, string) {
 	return "", prompt
 }
 
+// subAgentModeLabel 说明一个子任务在哪儿干活：有分支的是独立工作树，
+// 没分支的要么只读，要么直接改主会话的目录。
+func subAgentModeLabel(it subAgentItem) string {
+	switch {
+	case it.Branch != "":
+		return it.Branch
+	case it.Mode == "read":
+		return "只读检索"
+	case it.Mode == "write":
+		return "就地修改"
+	}
+	return ""
+}
+
 func (m *cliModel) cmdAgents() string {
 	var all []subAgentItem
 	seen := make(map[string]bool)
@@ -3264,10 +3323,8 @@ func (m *cliModel) cmdAgents() string {
 			st = "running"
 		}
 		extra := ""
-		if it.Branch != "" {
-			extra = "  [" + it.Branch + "]"
-		} else if it.Mode == "read" {
-			extra = "  [只读检索]"
+		if l := subAgentModeLabel(it); l != "" {
+			extra = "  [" + l + "]"
 		}
 		detail := it.Summary
 		if detail == "" {

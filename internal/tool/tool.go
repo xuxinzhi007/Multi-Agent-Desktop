@@ -45,6 +45,10 @@ type Meta struct {
 	// 只在文件写工具上有值，用来给审批卡和检查器看"到底改了什么"。
 	Path string `json:"path,omitempty"`
 	Diff string `json:"diff,omitempty"`
+	// WroteCode 表示这次调用间接改了代码文件，但改动不是它自己写的
+	// （派出去的子任务替它改了）。循环据此在收尾前要求 verify，
+	// 和直接调用写文件工具同一个待遇。
+	WroteCode bool `json:"wroteCode,omitempty"`
 }
 
 // Preview 是执行前能给用户看的说明。

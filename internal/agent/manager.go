@@ -87,17 +87,11 @@ type Agent struct {
 	AllowedTools []string `json:"allowedTools,omitempty"`
 	// Proposal 是一轮结束后建议改成的简介。采用前不替换现在这一行。
 	Proposal string `json:"proposal,omitempty"`
-	// LearnAt 是已经写进摘要的消息条数。更早的对话由子会话整理后交给这里。
-	LearnAt int `json:"learnAt,omitempty"`
-	// LearnText 是交给下一轮的摘要。
-	LearnText string `json:"learnText,omitempty"`
-	// LearnBy 是写出这份摘要的子会话名字。空表示本会话自己整理的。
-	LearnBy string `json:"learnBy,omitempty"`
-	// LearnBusy 为真时，摘要还在写。不落盘。
-	LearnBusy bool `json:"-"`
-	// learnRole 标记这是学习助手。学习助手不会再给自己建学习助手。
-	// 从角色文本推导，不单存字段：重启后旧的套娃会话也能识别。
-	learnRole bool `json:"-"`
+	// CtxSummary 是窗口快满时自动压缩出来的摘要；CtxCovered 是它覆盖到第几条消息。
+	// 发给模型的是「CtxSummary + Messages[CtxCovered:]」，Messages 本身保持完整，
+	// 界面上的对话一条不少。手动 /compact 会直接改写 Messages，并把这两个字段清零。
+	CtxSummary string `json:"ctxSummary,omitempty"`
+	CtxCovered int    `json:"ctxCovered,omitempty"`
 
 	// 以下是运行时指标，不落盘（Save 时归零）
 	StartedAt  int64  `json:"-"` // 本轮开始的 Unix 秒
@@ -405,9 +399,8 @@ func (m *Manager) saveNow() error {
 				PermissionMode: a.PermissionMode,
 				AllowedTools:   append([]string(nil), a.AllowedTools...),
 				Proposal:       a.Proposal,
-				LearnAt:        a.LearnAt,
-				LearnText:      a.LearnText,
-				LearnBy:        a.LearnBy,
+				CtxSummary:     a.CtxSummary,
+				CtxCovered:     a.CtxCovered,
 				Knowledge:      append([]string(nil), a.Knowledge...),
 			})
 			a.mu.Unlock()
@@ -580,6 +573,9 @@ func (m *Manager) Load() error {
 		if _, exists := m.agents[saved.ID]; exists {
 			continue
 		}
+		if leftoverLearner(saved) {
+			continue
+		}
 		a := &Agent{
 			ID:             saved.ID,
 			Name:           saved.Name,
@@ -606,9 +602,8 @@ func (m *Manager) Load() error {
 			PermissionMode: saved.PermissionMode,
 			AllowedTools:   append([]string(nil), saved.AllowedTools...),
 			Proposal:       saved.Proposal,
-			LearnAt:        saved.LearnAt,
-			LearnText:      saved.LearnText,
-			LearnBy:        saved.LearnBy,
+			CtxSummary:     saved.CtxSummary,
+			CtxCovered:     saved.CtxCovered,
 			queue:          make(chan PromptRequest, 32),
 			done:           make(chan struct{}),
 		}
@@ -963,7 +958,7 @@ func (m *Manager) createWith(id, name, role, parentID string, inheritLLM bool) *
 	}
 	// 新会话直接继承当前选中的模型，不留在「没选模型」的空档。
 	// 空档下 EffectiveLLM 返回零值配置，会话跑不起来，用户还得手动再选一次。
-	// 只在用户显式新建时继承；程序内部建的子会话由调用方自己定（见 delegate / learn / create_agent）。
+	// 只在用户显式新建时继承；程序内部建的子会话由调用方自己定（见 delegate / create_agent）。
 	if inheritLLM {
 		if cfg := m.llmCfg; cfg.Provider != "" {
 			cfg = llm.ApplyDefaults(cfg)
@@ -2167,10 +2162,8 @@ func (a *Agent) Snapshot() *Agent {
 		PermissionMode: a.PermissionMode,
 		AllowedTools:   append([]string(nil), a.AllowedTools...),
 		Proposal:       a.Proposal,
-		LearnAt:        a.LearnAt,
-		LearnText:      a.LearnText,
-		LearnBy:        a.LearnBy,
-		LearnBusy:      a.LearnBusy,
+		CtxSummary:     a.CtxSummary,
+		CtxCovered:     a.CtxCovered,
 		StartedAt:      a.StartedAt,
 		QueuedAt:       a.QueuedAt,
 		LastTool:       a.LastTool,
@@ -2210,11 +2203,33 @@ func (a *Agent) viewMap() map[string]any {
 		"knowledge":      append([]string(nil), a.Knowledge...),
 		"blockedReason":  a.BlockedReason,
 		"proposal":       a.Proposal,
-		"learnAt":        a.LearnAt,
-		"learnTotal":     LearnEnd(len(a.Messages)),
-		"learnBy":        a.LearnBy,
-		"learnBusy":      a.LearnBusy,
+		"ctxCovered":     a.compactedLocked(),
 	}
+}
+
+// Compacted 返回已经收进摘要、不再原样发给模型的消息条数。
+func (a *Agent) Compacted() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.compactedLocked()
+}
+
+// compactedLocked 是 Compacted 的无锁版本。调用方持有 a.mu。
+func (a *Agent) compactedLocked() int {
+	if a.CtxCovered <= 0 || a.CtxCovered > len(a.Messages) || strings.TrimSpace(a.CtxSummary) == "" {
+		return 0
+	}
+	return a.CtxCovered
+}
+
+// leftoverLearner 认出旧版本留下的「X的学习」子会话。
+//
+// 旧版本每个会话跑完都会挂一个常驻的学习助手，在后台另写一份摘要。它已经并进
+// 上下文压缩，不再存在。留在磁盘上的那些只占子会话名额、从不干活，加载时丢掉。
+// 只丢没有任何消息的：万一用户真的跟它聊过，那就是用户的会话，不动。
+func leftoverLearner(saved *Agent) bool {
+	return saved.ParentID != "" && len(saved.Messages) == 0 &&
+		strings.HasSuffix(saved.Name, "的学习") && strings.Contains(saved.Role, "压成摘要")
 }
 
 // SetProfile 改给人看的名字和简介，并立刻落盘。

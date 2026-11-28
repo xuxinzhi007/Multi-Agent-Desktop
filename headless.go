@@ -151,6 +151,12 @@ func (h *headlessIO) write(event string, data any) {
 					fmt.Fprintf(h.errOut, "▸ %s\n", label)
 				} else if v.Status == "error" || v.Status == "timeout" {
 					fmt.Fprintf(h.errOut, "✗ %s (%s)\n", v.Tool, v.Status)
+				} else if v.Diff != "" {
+					// 没有界面的模式下，这是唯一能看到「到底改了什么」的地方。
+					// 走 stderr：stdout 只留模型的回答，管道下游不会被改动明细污染。
+					raw, _ := data.(map[string]any)
+					via, _ := raw["via"].(string)
+					fmt.Fprint(h.errOut, plainDiffBlock(v.Path, via, v.Diff, plainDiffMaxLines))
 				}
 			}
 			h.mu.Unlock()
@@ -193,6 +199,15 @@ func (h *headlessIO) write(event string, data any) {
 			}
 			h.mu.Unlock()
 		}
+	case "agent.compact":
+		// 一轮当中自动压缩了上下文。没有界面的模式下也要说一声，走 stderr。
+		if mp, ok := data.(map[string]any); ok {
+			if text, _ := mp["text"].(string); text != "" && h.errOut != nil {
+				h.mu.Lock()
+				fmt.Fprintf(h.errOut, "▸ %s\n", text)
+				h.mu.Unlock()
+			}
+		}
 	case "tool.approval":
 		h.decide(data)
 	}
@@ -204,7 +219,21 @@ func (h *headlessIO) decide(data any) {
 		return
 	}
 	h.mu.Lock()
-	fmt.Fprintf(h.out, "\n审批 %s %s\n%s\n[y/n/always] ", v.ID, v.Tool, v.Title)
+	// 放行之前要能看到这次到底要做什么：谁发起的、具体内容、要写进去的改动。
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n审批 %s %s", v.ID, v.Tool)
+	if v.AgentName != "" {
+		fmt.Fprintf(&b, "  （%s）", v.AgentName)
+	}
+	fmt.Fprintf(&b, "\n%s\n", v.Title)
+	if d := strings.TrimSpace(v.Detail); d != "" && d != strings.TrimSpace(v.Title) {
+		fmt.Fprintf(&b, "%s\n", clipLines(d, 12))
+	}
+	if body, _, _, _ := plainDiffBody(v.Diff, plainDiffMaxLines); body != "" {
+		b.WriteString(body)
+	}
+	b.WriteString("[y/n/always] ")
+	fmt.Fprint(h.out, b.String())
 	line, err := h.readLineLocked()
 	h.mu.Unlock()
 	if err != nil {
@@ -217,6 +246,69 @@ func (h *headlessIO) decide(data any) {
 		reason = "终端拒绝"
 	}
 	_ = h.center.Decide(v.ID, allow, remember, reason)
+}
+
+// plainDiffMaxLines 是纯文本模式下一次改动最多打出来的行数。
+// 再长就刷屏了；完整改动在文件里，用 git diff 看。
+const plainDiffMaxLines = 40
+
+// plainDiffBody 把统一 diff 整理成适合直接打到终端的几行：去掉 `--- a/` `+++ b/` 文件头，
+// 最多留 maxLines 行。返回正文、增删行数、没显示的行数。
+func plainDiffBody(diff string, maxLines int) (body string, added, removed, hidden int) {
+	if strings.TrimSpace(diff) == "" {
+		return "", 0, 0, 0
+	}
+	var b strings.Builder
+	shown := 0
+	for _, ln := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if strings.HasPrefix(ln, "--- a/") || strings.HasPrefix(ln, "+++ b/") || ln == "" {
+			continue
+		}
+		switch ln[0] {
+		case '+':
+			added++
+		case '-':
+			removed++
+		}
+		if shown >= maxLines {
+			hidden++
+			continue
+		}
+		shown++
+		b.WriteString("  ")
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	if hidden > 0 {
+		fmt.Fprintf(&b, "  …（还有 %d 行没显示）\n", hidden)
+	}
+	return b.String(), added, removed, hidden
+}
+
+// plainDiffBlock 是一次写入的完整输出：一行标题（路径、增删行数、哪个子任务改的）加正文。
+func plainDiffBlock(path, via, diff string, maxLines int) string {
+	body, added, removed, _ := plainDiffBody(diff, maxLines)
+	if body == "" {
+		return ""
+	}
+	if path == "" {
+		path = "文件"
+	}
+	head := fmt.Sprintf("✎ %s (+%d -%d)", path, added, removed)
+	if via != "" {
+		head += " · 子任务 " + via
+	}
+	return head + "\n" + body
+}
+
+// clipLines 最多留 n 行，多出来的折成一句说明。
+func clipLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[:n], "\n") + fmt.Sprintf("\n…（还有 %d 行）", len(lines)-n)
 }
 
 func headlessDecision(line string) (allow, remember bool) {

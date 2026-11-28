@@ -186,26 +186,17 @@ function TurnChanges({
   )
 }
 
-function LearnProgress({ agent }: { agent: Agent }) {  const total = agent.learnTotal ?? 0
-  if (total <= 0) return null
-  const at = Math.min(agent.learnAt ?? 0, total)
-  const pct = Math.round((at / total) * 100)
-  const who = agent.learnBy || '本会话'
-  const text = agent.learnBusy
-    ? `学习 ${at}/${total} · ${who}整理中`
-    : at >= total
-      ? `更早的 ${total} 条已整理${agent.learnBy ? ` · ${agent.learnBy}` : ''}`
-      : `学习 ${at}/${total}`
+// 更早的对话已经压缩成摘要时，在名字下面说一声：这些消息还在对话里，
+// 只是不再原样发给模型。没压过就什么都不显示。
+function CompactNote({ agent }: { agent: Agent }) {
+  const covered = agent.ctxCovered ?? 0
+  if (covered <= 0) return null
   return (
     <div className="c-learn">
-      <div className="c-learn__text">{text}</div>
-      <div className="c-learn__track">
-        <div className="c-learn__fill" style={{ width: `${pct}%` }} />
-      </div>
+      <div className="c-learn__text">{`更早的 ${covered} 条已压缩成摘要`}</div>
     </div>
   )
 }
-
 function ProfileHead({
   agent,
   onProfile,
@@ -265,7 +256,7 @@ function ProfileHead({
           width: 300,
         }}
       />
-      <LearnProgress agent={agent} />
+      <CompactNote agent={agent} />
       {agent.proposal && !agent.busy && (
         <button
           type="button"

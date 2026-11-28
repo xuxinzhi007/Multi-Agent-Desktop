@@ -1967,18 +1967,6 @@
   max-width: 320px;
 }
 
-.c-learn__track {
-  flex: 1;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--bg-inset);
-  overflow: hidden;
-}
-
-.c-learn__fill {
-  height: 100%;
-  background: var(--accent-bright);
-}
 
 .c-learn__text {
   font-size: var(--text-xs);

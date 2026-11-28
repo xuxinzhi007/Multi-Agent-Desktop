@@ -1274,7 +1274,8 @@ func TestMainstreamCLICommandsSkillsContextAndBangShell(t *testing.T) {
 		t.Fatalf("!<cmd> 快捷本地命令输出未展示在对话流中：\n%s", m.View())
 	}
 
-	// 5. /undo 与 /compact 在多轮历史下正常工作
+	// 5. /undo 在多轮历史下正常工作。/compact 的行为单独在 cli_compact_test.go 里测：
+	// 这里以前断言「没有模型也能压缩成功」，钉住的正是那个拿本地拼凑的文字冒充摘要的毛病。
 	if a, ok := mgr.Get(m.agentID); ok {
 		for i := 0; i < 8; i++ {
 			a.Messages = append(a.Messages,
@@ -1282,10 +1283,6 @@ func TestMainstreamCLICommandsSkillsContextAndBangShell(t *testing.T) {
 				llm.Message{Role: "assistant", Content: fmt.Sprintf("回答 %d", i)},
 			)
 		}
-	}
-	_, _ = m.submit("/compact")
-	if !strings.Contains(m.plainTranscript(), "已压缩上下文") {
-		t.Fatalf("/compact 未成功压缩会话历史：\n%s", m.plainTranscript())
 	}
 	_, _ = m.submit("/undo")
 	if !strings.Contains(m.plainTranscript(), "已撤回") {

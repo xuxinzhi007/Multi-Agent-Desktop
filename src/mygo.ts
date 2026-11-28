@@ -138,14 +138,11 @@ export interface AgentView {
   /** Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。 */
   worktree?: string;
   worktreeBranch?: string;
-  /** LearnAt 是已经收进摘要的消息条数。 */
-  learnAt?: number;
-  /** LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。 */
-  learnTotal?: number;
-  /** LearnBy 是写出摘要的子会话。空表示本会话自己整理。 */
-  learnBy?: string;
-  /** LearnBusy 为真时，摘要还在写。 */
-  learnBusy?: boolean;
+  /**
+   * CtxCovered 是已经压缩成摘要的更早消息条数。这些消息还在对话里，
+   * 只是不再原样发给模型。0 表示没压过。
+   */
+  ctxCovered?: number;
 }
 
 /** ApprovalView 是一张等待用户决定的写操作卡片。 */

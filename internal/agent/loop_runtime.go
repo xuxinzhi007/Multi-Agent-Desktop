@@ -27,6 +27,24 @@ func runtimeEventFromLoop(ev loop.Event) (rt.Event, bool) {
 			Usage: &rt.Usage{Used: ev.CtxUsed, Size: ev.CtxLimit},
 			Meta:  map[string]string{"ctxBudget": fmt.Sprint(ev.CtxBudget)},
 		}, true
+	case "compact.start", "compact":
+		// 自动压缩是一次真实的模型调用，开始和结束都要让界面知道。
+		// 协议里没有专门的事件，借 notice 带过去，Meta["compact"] 标明是哪一步。
+		step := "done"
+		severity := "info"
+		switch {
+		case ev.Kind == "compact.start":
+			step = "start"
+		case ev.Status == tool.StatusError:
+			step = "failed"
+			severity = "warning"
+		}
+		return rt.Event{
+			Kind:   rt.KindNotice,
+			Notice: &rt.Notice{Severity: severity, Title: "上下文压缩", Description: ev.Reason},
+			Text:   ev.Text,
+			Meta:   map[string]string{"compact": step},
+		}, true
 	case "delta":
 		if ev.Text == "" {
 			return rt.Event{}, false

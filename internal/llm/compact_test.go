@@ -19,6 +19,37 @@ func TestContextLimitUsesWindowOrProvider(t *testing.T) {
 	}
 }
 
+// 窗口只有这一张表。状态栏和循环以前各认各的，同一个模型一个说 8192 一个说 128000。
+func TestContextLimitRecognizesModelFamilies(t *testing.T) {
+	cases := []struct {
+		cfg  Config
+		want int
+	}{
+		{Config{Provider: "openai", Model: "qwen3-max"}, 128000},
+		{Config{Provider: "openai", Model: "glm-4.6"}, 128000},
+		{Config{Provider: "openai", Model: "kimi-k2"}, 128000},
+		{Config{Provider: "openai", Model: "gpt-4o-mini"}, 128000},
+		{Config{Provider: "openai", Model: "gpt-5"}, 200000},
+		{Config{Provider: "openai", Model: "gemini-2.5-pro"}, 1000000},
+		{Config{Provider: "claude", Model: "claude-sonnet-4"}, 200000},
+		{Config{Provider: "openai", Model: "deepseek-chat"}, 65536},
+		// 以前接入点 ID 认不出型号，掉进 8192，一个 128k 的模型只用得上 5k。
+		{Config{Provider: "doubao", Model: "ep-20250101-abcde"}, 128000},
+		{Config{Provider: DoubaoCLIProvider, Model: "person-qwen4-max"}, 128000},
+		{Config{Provider: "qoder", Model: "Auto"}, 131072},
+		{Config{Provider: "openai", Model: "某个没见过的型号"}, 32768},
+		// 本地服务不看型号：窗口是启动参数定的。
+		{Config{Provider: "ollama", Model: "qwen2.5-coder"}, 8192},
+		// 显式配置永远优先。
+		{Config{Provider: "ollama", Model: "qwen2.5-coder", ContextWindow: 32768}, 32768},
+	}
+	for _, c := range cases {
+		if got := ContextLimit(c.cfg); got != c.want {
+			t.Errorf("%s/%s = %d，want %d", c.cfg.Provider, c.cfg.Model, got, c.want)
+		}
+	}
+}
+
 func TestCompactKeepsTailAndDropsBulk(t *testing.T) {
 	var msgs []Message
 	msgs = append(msgs, Message{Role: "system", Content: "系统约束"})
@@ -96,5 +127,59 @@ func TestIsContextOverflow(t *testing.T) {
 	}
 	if IsContextOverflow("llm: upstream 401: unauthorized") {
 		t.Fatal("auth is not overflow")
+	}
+}
+
+// 尾巴从哪儿开始：按组切，最近的留下，更早的整组交给摘要。
+func TestTailStartCutsOnGroupBoundary(t *testing.T) {
+	var msgs []Message
+	for i := 0; i < 6; i++ {
+		msgs = append(msgs,
+			Message{Role: "user", Content: strings.Repeat("问", 100)},
+			Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c", Name: "read_file", Input: []byte(`{"path":"a.go"}`)}}},
+			Message{Role: "tool", ToolID: "c", Content: strings.Repeat("文", 100)},
+			Message{Role: "assistant", Content: strings.Repeat("答", 100)},
+		)
+	}
+	cut := TailStart(msgs, 400)
+	if cut <= 0 || cut >= len(msgs) {
+		t.Fatalf("cut=%d，应该落在中间", cut)
+	}
+	if msgs[cut].Role == "tool" {
+		t.Fatalf("尾巴从 tool 结果开始，它的调用被切到摘要那一边了")
+	}
+	if got := estMessages(msgs[cut:]); got > 400 {
+		t.Fatalf("尾巴 %d token，超过 400", got)
+	}
+	// 再往前挪一组就超了：说明尾巴尽量留满了，没有多收。
+	if cut >= 2 && msgs[cut-1].Role != "tool" {
+		if got := estMessages(msgs[cut-1:]); got <= 400 {
+			t.Fatalf("前一条也放得下（%d token），却被收走了", got)
+		}
+	}
+}
+
+func TestTailStartKeepsLastGroupEvenWhenOversized(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "早先的问题"},
+		{Role: "assistant", Content: "早先的回答"},
+		{Role: "user", Content: strings.Repeat("大", 5000)},
+	}
+	if cut := TailStart(msgs, 100); cut != 2 {
+		t.Fatalf("cut=%d，最近一条必须留下，前面两条收走", cut)
+	}
+}
+
+func TestTailStartNothingToDrop(t *testing.T) {
+	if cut := TailStart(nil, 100); cut != 0 {
+		t.Fatalf("空历史 cut=%d", cut)
+	}
+	one := []Message{{Role: "user", Content: strings.Repeat("大", 5000)}}
+	if cut := TailStart(one, 100); cut != 0 {
+		t.Fatalf("只有一条时没有可收的，cut=%d", cut)
+	}
+	small := []Message{{Role: "user", Content: "你好"}, {Role: "assistant", Content: "在"}}
+	if cut := TailStart(small, 1000); cut != 0 {
+		t.Fatalf("全都放得下时不该收，cut=%d", cut)
 	}
 }

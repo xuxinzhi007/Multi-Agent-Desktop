@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,10 @@ type ContextStats struct {
 	SkillCount     int
 	MCPToolCount   int
 	PluginToolCnt  int
+	// Compacted 是已经收进摘要、不再原样发给模型的消息条数。
+	Compacted int
+	// SentMessages 是这一轮真正会带给模型的历史消息条数。
+	SentMessages int
 }
 
 // LoadWorkspaceGuide 按主流约定查找工作区根目录下的项目规范文档（AGENTS.md / CLAUDE.md / .cursorrules），
@@ -55,195 +60,202 @@ func LoadWorkspaceGuide(workDir string) (fileName, content string) {
 	return "", ""
 }
 
-// ContextWindowForModel 估算不同模型族的上下文窗口容量（Token 数）。
-func ContextWindowForModel(cfg llm.Config) int {
-	eff := llm.ApplyDefaults(cfg)
-	mod := strings.ToLower(eff.Model)
-	switch {
-	case strings.Contains(mod, "claude"), strings.Contains(mod, "opus"), strings.Contains(mod, "sonnet"):
-		return 200000
-	case strings.Contains(mod, "gemini"):
-		return 1000000
-	case strings.Contains(mod, "gpt-5"), strings.Contains(mod, "gpt-4.1"):
-		return 200000
-	case strings.Contains(mod, "qwen"), strings.Contains(mod, "deepseek"), strings.Contains(mod, "glm"), strings.Contains(mod, "kimi"), strings.Contains(mod, "doubao"), strings.Contains(mod, "gpt-4"):
-		return 128000
-	case eff.Provider == "ollama" || eff.Provider == "llamacpp":
-		return 32768
-	default:
-		return 128000
-	}
-}
-
-func estimateStringTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	// 中英与代码混合经验估算：ASCII 约 3.8 字节/tok，CJK 约 1.5 字/tok
-	asciiBytes := 0
-	nonASCII := 0
-	for _, r := range s {
-		if r < 128 {
-			asciiBytes++
-		} else {
-			nonASCII++
-		}
-	}
-	return (asciiBytes+3)/4 + (nonASCII*2+2)/3
-}
-
-// EstimateContextUsage 计算当前会话上下文窗口占用估算值，供 CLI 状态栏与 /context 实时展示。
+// EstimateContextUsage 估算下一轮会发给模型多少 token，供 CLI 状态栏与 /context 展示。
+//
+// 口径必须和真正发出去的一致，否则这个数字就是摆设：
+//   - 窗口大小用 llm.ContextLimit，和循环决定何时压缩用的是同一张表；
+//   - 消息用 llm.EstMessages，和循环的预算是同一种算法；
+//   - 已经收进摘要的消息不再计入，只算摘要本身；
+//   - 豆包 CLI 的会话不走我们的循环，发出去的是一段拼好的提示词，就按那段算。
 func (m *Manager) EstimateContextUsage(agentID, workDir string) ContextStats {
 	if m == nil {
 		return ContextStats{WindowLimitTok: 128000}
 	}
-	cfg := m.LLMConfigFor(agentID)
-	limit := ContextWindowForModel(cfg)
-
-	baseTok := 2600 // 系统静态提示词 + 内置工具 Schema 基准开销
+	cfg := llm.ApplyDefaults(m.LLMConfigFor(agentID))
+	limit := llm.ContextLimit(cfg)
 	guideFile, guideBody := LoadWorkspaceGuide(workDir)
-	if guideBody != "" {
-		baseTok += estimateStringTokens(guideBody)
-	}
 	skills := m.ListSkillsFor(workDir)
-	baseTok += len(skills) * 28
+	stats := ContextStats{WindowLimitTok: limit, GuideFile: guideFile, SkillCount: len(skills)}
 
-	mcpTools := 0
-	if mcps := m.MCP(); mcps != nil {
-		mcpTools = mcps.Tools()
-		baseTok += mcpTools * 95
-	}
-	plugCnt := 0
-	m.mu.RLock()
-	plugFn := m.pluginTools
-	m.mu.RUnlock()
-	if plugFn != nil {
-		plugCnt = len(plugFn(workDir, agentID))
-		baseTok += plugCnt * 80
-	}
-
-	msgCnt := 0
-	msgTok := 0
+	var msgs []llm.Message
+	summary, covered, role := "", 0, ""
 	if a, ok := m.Get(agentID); ok {
-		sn := a.Snapshot()
-		msgCnt = len(sn.Messages)
-		for _, msg := range sn.Messages {
-			msgTok += 6 + estimateStringTokens(msg.Content) + estimateStringTokens(msg.Reasoning)
-			for _, tc := range msg.ToolCalls {
-				msgTok += 12 + estimateStringTokens(tc.Name) + len(tc.Input)/4
-			}
+		a.mu.Lock()
+		msgs = append([]llm.Message(nil), a.Messages...)
+		summary, covered, role = a.CtxSummary, a.CtxCovered, a.Role
+		a.mu.Unlock()
+	}
+	stats.Messages = len(msgs)
+	summary, live := contextView(msgs, summary, covered)
+	stats.Compacted = len(msgs) - len(live)
+
+	total := 0
+	if cfg.Provider == llm.DoubaoCLIProvider {
+		prompt, sent := buildDoubaoPrompt(role, workDir, summary, live)
+		total = llm.EstTokens(prompt)
+		stats.SentMessages = sent
+	} else {
+		total = 2600 // 系统静态提示词 + 内置工具 Schema 基准开销
+		total += llm.EstTokens(guideBody)
+		total += len(skills) * 28
+		if mcps := m.MCP(); mcps != nil {
+			stats.MCPToolCount = mcps.Tools()
+			total += stats.MCPToolCount * 95
 		}
+		m.mu.RLock()
+		plugFn := m.pluginTools
+		m.mu.RUnlock()
+		if plugFn != nil {
+			stats.PluginToolCnt = len(plugFn(workDir, agentID))
+			total += stats.PluginToolCnt * 80
+		}
+		if summary != "" {
+			total += llm.EstMessages([]llm.Message{{Role: "system", Content: summary}})
+		}
+		total += llm.EstMessages(live)
+		stats.SentMessages = len(live)
 	}
-	total := baseTok + msgTok
-	pct := (total * 100) / max(1, limit)
-	if pct > 100 {
-		pct = 100
+	stats.EstimatedTok = total
+	stats.Percent = (total * 100) / max(1, limit)
+	if stats.Percent > 100 {
+		stats.Percent = 100
 	}
-	return ContextStats{
-		Messages:       msgCnt,
-		EstimatedTok:   total,
-		WindowLimitTok: limit,
-		Percent:        pct,
-		GuideFile:      guideFile,
-		SkillCount:     len(skills),
-		MCPToolCount:   mcpTools,
-		PluginToolCnt:  plugCnt,
-	}
+	return stats
 }
 
-// CompactSession 显式执行对话上下文摘要压缩（保留最近 6 条消息，把更早历史压成 1 条结构化摘要）。
-func (m *Manager) CompactSession(ctx context.Context, agentID, focus string) (beforeCount, afterCount int, summary string, err error) {
+// CompactResult 是一次手动压缩的结果。
+type CompactResult struct {
+	Before  int    // 压缩前的消息条数
+	After   int    // 压缩后的消息条数
+	Dropped int    // 这次收进摘要的消息条数
+	Summary string // 摘要全文
+	Backup  string // 压缩前完整历史的备份文件。空表示没有可写的数据目录。
+}
+
+// CompactSession 是手动压缩：把较早的对话交给模型写成一份接续摘要，
+// 用「摘要 + 最近一小段原文」替换掉历史。
+//
+// 这是一次真实的模型调用，长对话要几十秒。摘要没写出来就报错，历史一个字不动——
+// 压缩是不可逆的，绝不能拿凑出来的几行字顶替原文。替换之前还会把完整历史
+// 另存一份，摘要写坏了也找得回来。
+func (m *Manager) CompactSession(ctx context.Context, agentID, focus string) (CompactResult, error) {
+	var res CompactResult
 	if m == nil {
-		return 0, 0, "", errors.New("没有会话内核")
+		return res, errors.New("没有会话内核")
 	}
 	a, ok := m.Get(agentID)
 	if !ok {
-		return 0, 0, "", errors.New("会话不存在")
+		return res, errors.New("会话不存在")
 	}
 	a.mu.Lock()
 	if a.Status == StatusRunning {
 		a.mu.Unlock()
-		return 0, 0, "", errors.New("当前会话正在运行中，请先停止再压缩")
+		return res, errors.New("当前会话正在运行中，请先停止再压缩")
 	}
 	msgs := append([]llm.Message(nil), a.Messages...)
-	prevLearn := a.LearnText
+	oldSummary, oldCovered := a.CtxSummary, a.CtxCovered
 	a.mu.Unlock()
+	res.Before, res.After = len(msgs), len(msgs)
 
-	beforeCount = len(msgs)
-	const keepTail = 6
-	if beforeCount <= keepTail {
-		return beforeCount, beforeCount, "", fmt.Errorf("当前仅 %d 条消息，无需压缩", beforeCount)
+	// 已经压过的部分不重读：自动压缩留下的摘要、上一次 /compact 留在最前面的
+	// 摘要消息，都直接当作「已有摘要」，只把后面新增的对话并进去。
+	previous, live := contextView(msgs, oldSummary, oldCovered)
+	if previous == "" && len(live) > 0 && isCompactSummary(live[0]) {
+		previous = compactSummaryText(live[0])
+		live = live[1:]
 	}
-	// 确保切分点不会把 assistant.ToolCalls 与紧随其后的 tool 消息劈开
-	split := beforeCount - keepTail
-	for split > 0 && msgs[split].Role == "tool" {
-		split--
-	}
-	if split <= 1 {
-		return beforeCount, beforeCount, "", errors.New("可压缩的前序消息不足")
-	}
-	dropped := msgs[:split]
-	kept := msgs[split:]
 
 	cfg := llm.ApplyDefaults(m.LLMConfigFor(agentID))
-	cfg.Thinking = "off"
-	if cfg.Provider == "" || cfg.Provider == "mock" {
-		summary = fallbackLocalSummary(dropped)
-	} else {
-		ask := learnAsk(prevLearn, dropped)
-		if strings.TrimSpace(focus) != "" {
-			ask += "\n\n用户要求重点保留的方向：" + strings.TrimSpace(focus)
-		}
-		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		turn, terr := llm.NewChatModel(cfg).Turn(cctx, []llm.Message{
-			{Role: "system", Content: compactSystem},
-			{Role: "user", Content: ask},
-		}, nil)
-		cancel()
-		if terr == nil && strings.TrimSpace(turn.Text) != "" {
-			summary = clipRunes(strings.TrimSpace(turn.Text), 1500)
-		} else {
-			summary = fallbackLocalSummary(dropped)
-		}
+	window := llm.ContextLimit(cfg)
+	// 最近的一小段原样留下，模型接着干活时不用全靠摘要回忆刚才那几步。
+	cut := llm.TailStart(live, clampInt(window/10, 1000, 8000))
+	if cut <= 0 {
+		return res, fmt.Errorf("没有可压缩的更早对话（最近这段只有约 %d token，会原样保留）", llm.EstMessages(live))
 	}
 
-	compacted := make([]llm.Message, 0, 1+len(kept))
+	ask, err := m.summaryCompleter(cfg)
+	if err != nil {
+		return res, err
+	}
+	job := newSummaryJob(ask, cfg, clampInt(window/16, 600, 3000))
+	job.focus = focus
+	summary, err := job.run(ctx, previous, live[:cut])
+	if err != nil {
+		return res, fmt.Errorf("摘要没有写出来，历史原样保留：%w", err)
+	}
+
+	compacted := make([]llm.Message, 0, 1+len(live)-cut)
 	compacted = append(compacted, llm.Message{
 		Role:      "user",
-		Content:   "[前序上下文压缩摘要]\n" + summary,
+		Content:   compactMark + "\n" + summary,
 		Timestamp: time.Now().Unix(),
 	})
-	compacted = append(compacted, kept...)
+	compacted = append(compacted, live[cut:]...)
 
+	res.Backup = m.backupTranscript(agentID, msgs, oldSummary, oldCovered)
+
+	// 写摘要的这段时间锁是放开的。会话要是又收到了消息，就不能拿旧快照盖回去。
 	a.mu.Lock()
+	if a.Status == StatusRunning || len(a.Messages) != len(msgs) {
+		a.mu.Unlock()
+		return res, errors.New("压缩期间会话有了新消息，这次没有替换历史，请再试一次")
+	}
 	a.Messages = compacted
-	a.LearnText = summary
-	a.LearnAt = len(compacted)
+	a.CtxSummary, a.CtxCovered = "", 0
 	a.mu.Unlock()
-	_ = m.saveNow()
+	if err := m.saveNow(); err != nil {
+		return res, fmt.Errorf("已压缩，但没能写盘：%w", err)
+	}
 
-	return beforeCount, len(compacted), summary, nil
+	res.After = len(compacted)
+	res.Dropped = len(msgs) - len(live) + cut
+	res.Summary = summary
+	return res, nil
 }
 
-func fallbackLocalSummary(dropped []llm.Message) string {
-	var parts []string
-	for _, msg := range dropped {
-		if msg.Role != "user" && msg.Role != "assistant" {
-			continue
-		}
-		txt := strings.TrimSpace(msg.Content)
-		if txt == "" {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("- [%s] %s", msg.Role, clipRunes(strings.Join(strings.Fields(txt), " "), 120)))
-		if len(parts) >= 8 {
-			break
-		}
+// backupTranscript 把压缩前的完整历史另存一份，返回文件路径。写不了就返回空串。
+func (m *Manager) backupTranscript(agentID string, msgs []llm.Message, summary string, covered int) string {
+	m.mu.RLock()
+	store := m.store
+	m.mu.RUnlock()
+	if store == "" {
+		return ""
 	}
-	if len(parts) == 0 {
-		return fmt.Sprintf("已归档前序 %d 条工具与对话记录。", len(dropped))
+	dir := filepath.Join(filepath.Dir(store), "compact-backup")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
 	}
-	return strings.Join(parts, "\n")
+	buf, err := json.MarshalIndent(map[string]any{
+		"agentId":    agentID,
+		"savedAt":    time.Now().Format(time.RFC3339),
+		"ctxSummary": summary,
+		"ctxCovered": covered,
+		"messages":   msgs,
+	}, "", " ")
+	if err != nil {
+		return ""
+	}
+	name := strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return r
+		}
+		return '_'
+	}, agentID)
+	path := filepath.Join(dir, name+"-"+time.Now().Format("20060102-150405")+".json")
+	if err := os.WriteFile(path, buf, 0o600); err != nil {
+		return ""
+	}
+	return path
+}
+
+func clampInt(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 // UndoLastTurn 撤回当前会话的最后一轮用户提问及其后续工具/回复消息。
@@ -271,6 +283,10 @@ func (m *Manager) UndoLastTurn(agentID string) (int, error) {
 	}
 	removed := n - cut
 	a.Messages = append([]llm.Message(nil), a.Messages[:cut]...)
+	// 撤回撤到了摘要覆盖的范围里：摘要讲的事有一部分已经不在历史里了，不能再用。
+	if a.CtxCovered > cut {
+		a.CtxSummary, a.CtxCovered = "", 0
+	}
 	a.mu.Unlock()
 	_ = m.saveNow()
 	return removed, nil

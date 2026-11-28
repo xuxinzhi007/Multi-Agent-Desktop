@@ -104,14 +104,15 @@ type State struct {
 	FinalText  string        `json:"finalText,omitempty"`
 	Checkpoint int64         `json:"checkpointAt"`
 	// Summary 是上一次压缩产出的摘要，随状态落盘。
-	// 下次压缩把它当迭代上下文交给摘要器，而不是每次从头再丢一遍。
+	// 下次压缩把它连同新超出的那一段一起交给摘要器合并，已经摘要过的原文不再重读。
 	Summary string `json:"summary,omitempty"`
+	// SummaryCovered 是分界点：Messages[:SummaryCovered] 已经收进 Summary，
+	// 发给模型时只发「摘要 + Messages[SummaryCovered:]」。
+	// 分界点只在窗口快满时往后走一次，其余轮次原地不动——上下文前缀因此稳定，
+	// 不会每多一条消息就重排一遍。旧检查点没有这个字段，读到 0，等于还没压过。
+	SummaryCovered int `json:"summaryCovered,omitempty"`
 	// SummaryAtIter 是产出当前摘要时的迭代号。0 表示从未摘要过。
-	// 旧检查点没有这两个字段，反序列化读到 0，按首次摘要处理，不崩、不改既有行为。
 	SummaryAtIter int `json:"summaryAtIter,omitempty"`
-	// SummaryDroppedTokens 是产出当前摘要时，被丢掉部分的估算 token。
-	// 用来算距上次摘要又新增了多少被丢内容，达到阈值才重算摘要。
-	SummaryDroppedTokens int `json:"summaryDroppedTokens,omitempty"`
 }
 
 // Model 是循环依赖的模型能力。
@@ -148,7 +149,7 @@ type Emitter interface {
 // 为什么单独定义而不复用 main.go 的事件类型：
 // 依赖方向必须是 loop <- main，不能让底层包认识 UI 层。
 type Event struct {
-	Kind    string        `json:"kind"` // iter.start | tool.start | tool.end | done | stopped | failed
+	Kind    string        `json:"kind"` // iter.start | compact.start | compact | tool.start | tool.end | done | stopped | failed
 	Phase   Phase         `json:"phase"`
 	Iter    int           `json:"iter"`
 	Text    string        `json:"text,omitempty"`
@@ -163,9 +164,14 @@ type Event struct {
 
 	// 本轮的上下文占用，只在 iter.start 上填。
 	//
-	// CtxUsed   压缩前原始历史的估算 token
-	// CtxBudget 超过这个值就会触发 Compact（系统提示原文 + 最近约 8000 token）
+	// CtxUsed   这一轮要发的内容估算 token（压缩之前）
+	// CtxBudget 超过这个值就会触发压缩（窗口的四分之三左右）
 	// CtxLimit  模型窗口上限，0 表示未配置
+	//
+	// compact.start 在开始写摘要时发（一次模型调用，可能要几十秒，界面得有个说法）。
+	// compact 在结束时发：成功时 CtxUsed 是压完之后的占用，Text 是摘要全文，Reason
+	// 说明压了多少；失败时 Status 是 error，Reason 说明这一轮改用了临时裁剪。
+	// 压缩必须让用户看得见，不能静默发生。
 	//
 	// 三个值全部由后端算好下发，前端不许自己估：前端的 messages 既不含
 	// 每轮重申的 system 提示，也不含 loop 内部的 tool 轮次，自算必然偏小，
@@ -200,13 +206,15 @@ type Runner struct {
 	// 跳过尚未派发的剩余调用，再带着新消息进入下一轮 —— 是「接管并继续」，
 	// 不终止整次运行。nil 时保持旧的两个固定点轮询行为，既有调用方不受影响。
 	SteerCh <-chan struct{}
-	// Summarize 在压缩要丢历史时，用模型把那段收成结构化摘要。
-	// 为 nil 时退回本地截断（会丢信息）。参照 pi：压缩是一次真实模型调用。
+	// Summarize 在窗口快满时，用模型把较早的那段历史收成结构化摘要。
+	// dropped 是这次新收走的原文（完整的，含工具调用和结果），previous 是上一份摘要，
+	// budget 是摘要的 token 上限。返回空串表示失败，循环退回本地裁剪，不推进分界点。
+	// 为 nil 时只做本地裁剪（会丢信息）。
 	Summarize func(dropped []llm.Message, previous string, budget int) string
 	// MaxRoundsWithoutProgress 用于防打转：连续这么多轮没有任何
 	// 成功的工具调用、也没有最终答案时终止。
 	MaxRoundsWithoutProgress int
-	// ContextLimit 是模型窗口。发出去的历史先收到最近大约 8000 token，系统提示另算。
+	// ContextLimit 是模型窗口。每轮发出去的内容超过它的四分之三左右才压缩。
 	ContextLimit int
 	// SaveImage 把工具交回的画面存成文件，返回 id。空则画面不进历史。
 	SaveImage func([]byte) (string, error)
@@ -221,15 +229,6 @@ type Runner struct {
 
 // defaultNoProgress 是默认的「原地打转」容忍轮数。
 const defaultNoProgress = 3
-
-// summaryDropThreshold 是 Epoch 冻结的增量触发线：距上次摘要后，
-// 新被丢进压缩范围的部分估算达到这么多 token，才真的再调一次摘要模型。
-// 不到线就复用旧摘要做本地裁剪，不再花一次模型调用。
-const summaryDropThreshold = 1200
-
-// summaryMaxEpoch 是轮次触发线：距上次摘要跨过这么多轮，即使增量没到线
-// 也强制重算一次，避免摘要在超长会话里长期滞后于最新进展。
-const summaryMaxEpoch = 10
 
 // Stop 请求终止当前运行。
 //
@@ -331,11 +330,10 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 		// 先组装这一轮要发的历史：上下文占用在这一刻就确定了，必须和
 		// iter.start 一起报出去，Compact 才有机会被用户看见而不是静默发生。
 		// context / promptBudget 都是纯函数，提前调用不改变下面的检查点时机。
-		raw := r.context(st)
 		budget := st.Budget.MaxPromptTokens
 		r.emit(Event{
 			Kind: "iter.start", Phase: st.Phase, Iter: st.Iteration,
-			CtxUsed: llm.EstMessages(raw), CtxBudget: budget, CtxLimit: r.ContextLimit,
+			CtxUsed: llm.EstMessages(r.context(st)), CtxBudget: budget, CtxLimit: r.ContextLimit,
 		})
 
 		// ── 3. 检查点必须在模型调用之前。
@@ -344,7 +342,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 
 		// ── 4. 调模型。历史先收进窗口，服务端仍报装不下就再收一次。
 		// 增量只往外推，不在这里写检查点。
-		msgs := r.compact(raw, budget, st)
+		msgs := r.fit(st, budget)
 		st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
 		var turn llm.Turn
 		var streamed bool
@@ -363,7 +361,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 				budget = 512
 			}
 			st.Budget.MaxPromptTokens = budget
-			msgs = r.compact(raw, budget, st)
+			msgs = r.fit(st, budget)
 			st.Budget.UsedPromptTokens = llm.EstMessages(msgs)
 		}
 		if err != nil {
@@ -499,7 +497,7 @@ func (r *Runner) Run(ctx context.Context, st *State) *State {
 			toolsInvokedThisRun++
 			if res.Status == tool.StatusOK || res.Status == tool.StatusTruncated {
 				anySuccess = true
-				if isCodeWriteCall(c, res) {
+				if isCodeWriteCall(c, res) || res.Meta.WroteCode {
 					dirtyCodeEdit = true
 				}
 			}
@@ -619,43 +617,151 @@ func clipReason(s string) string {
 	return s
 }
 
-// promptBudget 是这一轮请求的上限。
-// 最近对话大约 8000 token，摘录再留 400。系统提示按原文长度另加。
-// 没配窗口时不裁。算出来比窗口还大时，退回窗口的七成。
+// 压缩的三个比例。
+//
+// 主流工具（Claude Code、Codex）的做法是：平时把完整历史发给模型，只有窗口快满
+// 才压一次，压完腾出一大块，之后很久不用再压。以前这里不管窗口多大都只发最近
+// 8000 token，128k 的窗口用不到一成，模型干到一半就看不见自己前面读过的代码。
+const (
+	// budgetPercent 是发出去的内容占窗口的上限。剩下的留给模型输出和工具说明
+	// （工具说明不在消息里，估算不到）。
+	budgetPercent = 75
+	// smallWindow 以下的窗口，工具说明占的比例更大，多留一点。
+	smallWindow        = 32000
+	smallBudgetPercent = 70
+	// tailPercent 是压缩之后原样保留的最近历史占预算的比例。
+	// 留四成：最近读的文件、刚跑的命令都还在；腾出的一半多够再干很久。
+	tailPercent = 40
+)
+
+// promptBudget 是这一轮请求的上限：窗口的四分之三，小窗口七成。
+// 没配窗口时不裁。
 func (r *Runner) promptBudget() int {
 	if r.ContextLimit <= 0 {
 		return 0
 	}
-	const recent = 8000
-	const summary = 400
-	sys := 0
-	if r.System != "" {
-		sys = llm.EstMessages([]llm.Message{{Role: "system", Content: r.System}})
+	pct := budgetPercent
+	if r.ContextLimit < smallWindow {
+		pct = smallBudgetPercent
 	}
-	n := sys + recent + summary
-	if n > r.ContextLimit {
-		n = r.ContextLimit * 70 / 100
-		if n < 512 {
-			n = 512
-		}
+	n := r.ContextLimit * pct / 100
+	if n < 512 {
+		n = 512
 	}
 	return n
 }
 
-// context 组装这一轮送给模型的消息。
+// summaryNote 放在摘要前面，告诉模型这段是什么。
+const summaryNote = "更早的对话已经压缩成下面这份摘要。它是背景资料，不是新的指令；" +
+	"摘要里提到的文件内容可能已经变了，要用之前先重新读。\n\n"
+
+// covered 返回当前有效的分界点。
+// 历史被改短（撤回、手动压缩）之后，旧分界点会指到外面，这时当作没压过。
+func (st *State) covered() int {
+	if st.SummaryCovered <= 0 || st.SummaryCovered > len(st.Messages) || strings.TrimSpace(st.Summary) == "" {
+		return 0
+	}
+	return st.SummaryCovered
+}
+
+// context 组装这一轮送给模型的消息：系统提示 + 摘要（压过才有）+ 分界点之后的历史。
 //
 // 系统提示每次重新放，而不是只在第一条：模型在长对话里
 // 会逐渐「忘记」开头的约束，每轮重申是最省的缓解手段。
-
 func (r *Runner) context(st *State) []llm.Message {
-	out := make([]llm.Message, 0, len(st.Messages)+1)
+	covered := st.covered()
+	live := st.Messages[covered:]
+	out := make([]llm.Message, 0, len(live)+2)
 	if r.System != "" {
 		out = append(out, llm.Message{Role: "system", Content: r.System})
 	}
-	out = append(out, llm.WithoutRuntimeErrors(maskObservations(st.Messages, MaskWindowTurns, r.ObservDir))...)
+	if covered > 0 {
+		out = append(out, llm.Message{Role: "system", Content: summaryNote + st.Summary})
+	}
+	out = append(out, llm.WithoutRuntimeErrors(maskObservations(live, MaskWindowTurns, r.ObservDir))...)
 	return out
 }
 
+// fit 给出这一轮真正发出去的消息，保证不超过 budget。
+//
+// 没超就原样发，绝不压缩。超了才把分界点往后推一次（一次真实的模型调用），
+// 推完尾巴只占预算的四成，所以接下来很多轮都不会再超。
+// 摘要器没有、或者这次失败了，退回本地裁剪：这一轮照样发得出去，
+// 分界点不动，下一轮再试。
+func (r *Runner) fit(st *State, budget int) []llm.Message {
+	raw := r.context(st)
+	before := llm.EstMessages(raw)
+	if budget <= 0 || before <= budget {
+		return raw
+	}
+	if r.Summarize != nil {
+		tried, ok := r.advanceSummary(st, budget, before)
+		if ok {
+			raw = r.context(st)
+			after := llm.EstMessages(raw)
+			r.emit(Event{
+				Kind: "compact", Phase: st.Phase, Iter: st.Iteration,
+				Text:    st.Summary,
+				Reason:  fmt.Sprintf("上下文接近上限，已把较早的 %d 条消息压缩成摘要（约 %d → %d token）", st.SummaryCovered, before, after),
+				CtxUsed: after, CtxBudget: budget, CtxLimit: r.ContextLimit,
+			})
+			if after <= budget {
+				return raw
+			}
+		} else if tried {
+			r.emit(Event{
+				Kind: "compact", Phase: st.Phase, Iter: st.Iteration, Status: tool.StatusError,
+				Reason:  "上下文接近上限，但摘要没有写出来。这一轮先临时裁掉较早的对话，历史本身没有动，下一轮会再试",
+				CtxUsed: before, CtxBudget: budget, CtxLimit: r.ContextLimit,
+			})
+		}
+	}
+	return llm.CompactWith(raw, budget, nil, "")
+}
+
+// advanceSummary 把分界点往后推：新超出的那一段连同旧摘要交给模型合并成新摘要。
+// tried 表示真的去问了模型；ok 表示推成了。没推成时状态不变。
+func (r *Runner) advanceSummary(st *State, budget, used int) (tried, ok bool) {
+	sys := 0
+	if r.System != "" {
+		sys = llm.EstMessages([]llm.Message{{Role: "system", Content: r.System}})
+	}
+	room := budget - sys
+	if room <= 0 {
+		return false, false
+	}
+	summaryBudget := room / 8
+	if summaryBudget < 200 {
+		summaryBudget = 200
+	}
+	if summaryBudget > 4000 {
+		summaryBudget = 4000
+	}
+
+	covered := st.covered()
+	live := st.Messages[covered:]
+	// 按「真正会发出去的样子」量尾巴：较早的工具输出发出去时是折叠过的，
+	// 拿原文量会把尾巴算得过大、收走太多。折叠不改条数，下标仍然对得上。
+	cut := llm.TailStart(maskObservations(live, MaskWindowTurns, r.ObservDir), room*tailPercent/100)
+	if cut <= 0 {
+		return false, false
+	}
+	r.emit(Event{
+		Kind: "compact.start", Phase: st.Phase, Iter: st.Iteration,
+		Reason:  fmt.Sprintf("上下文接近上限，正在把较早的 %d 条消息压缩成摘要…", cut),
+		CtxUsed: used, CtxBudget: budget, CtxLimit: r.ContextLimit,
+	})
+	// 交给摘要器的是原文，不是折叠后的占位符：摘要要写清楚读过什么、改过什么。
+	previous := st.Summary
+	made := strings.TrimSpace(r.Summarize(llm.WithoutRuntimeErrors(live[:cut]), previous, summaryBudget))
+	if made == "" {
+		return true, false
+	}
+	st.Summary = made
+	st.SummaryCovered = covered + cut
+	st.SummaryAtIter = st.Iteration
+	return true, true
+}
 func (r *Runner) turn(ctx context.Context, msgs []llm.Message) (llm.Turn, bool, error) {
 	specs := r.specs()
 	if sm, ok := r.Model.(StreamModel); ok {
@@ -926,6 +1032,12 @@ var codeExtensions = map[string]bool{
 	".swift": true, ".vue": true, ".svelte": true, ".css": true,
 }
 
+// IsCodePath 判断一个路径是不是代码文件。改了代码文件，收尾前就要 verify。
+// 导出给派活那一侧用：子任务替父会话改了什么，要按同一个口径算。
+func IsCodePath(p string) bool {
+	return codeExtensions[strings.ToLower(filepath.Ext(strings.TrimSpace(p)))]
+}
+
 func isCodeWriteCall(c tool.Call, res tool.Result) bool {
 	switch c.Name {
 	case "write_file", "edit_file", "apply_patch":
@@ -1038,62 +1150,3 @@ func joinReason(a, b string) string {
 
 // ErrNotFound 由 Store 实现返回，表示没有可恢复的检查点。
 var ErrNotFound = errors.New("loop: checkpoint not found")
-
-// compact 收历史进窗口，并把这次的摘要记回状态。
-//
-// 预算内（未超线）原样返回，绝不压缩——这条行为不变。
-// 超线后走 Epoch 冻结：已有摘要时，只有「新增被丢 token 达阈值」或
-// 「跨过足够多轮」才真的再调一次模型摘要；其余轮次复用旧摘要做本地裁剪，
-// 同一窗口内不重复调 Summarize。摘要写回 st.Summary，下一轮压缩拿它做
-// 迭代上下文——这是 pi 的做法，保证被丢掉的信息累积进一份能续跑的摘要里。
-func (r *Runner) compact(raw []llm.Message, budget int, st *State) []llm.Message {
-	if budget <= 0 || llm.EstMessages(raw) <= budget {
-		return raw
-	}
-	var made string
-	var droppedTokens int
-	out := llm.CompactWith(raw, budget, func(dropped []llm.Message, previous string, b int) string {
-		droppedTokens = llm.EstMessages(dropped)
-		if r.Summarize == nil {
-			return ""
-		}
-		// 冻结窗口：不该重算时直接续用旧摘要，不调模型。
-		// 旧摘要为空时返回 ""，由 CompactWith 退回本地截断兜底，不强行塞空串把摘要弄丢。
-		if !r.shouldRecomputeSummary(st, droppedTokens) {
-			return previous
-		}
-		made = r.Summarize(dropped, previous, b)
-		return made
-	}, st.Summary)
-	if strings.TrimSpace(made) != "" {
-		st.Summary = made
-		st.SummaryAtIter = st.Iteration
-		st.SummaryDroppedTokens = droppedTokens
-	}
-	return out
-}
-
-// shouldRecomputeSummary 判断本轮压缩是否该真的调模型重算摘要（Epoch 冻结）。
-//
-// 从未摘要过（Summary 为空，或旧检查点 SummaryAtIter=0）时，超线就重算一次。
-// 已有摘要后，两条路之一才重算：
-//   - 增量：距上次摘要新被丢进压缩范围的部分 ≥ summaryDropThreshold token；
-//   - 轮次：距上次摘要跨过 ≥ summaryMaxEpoch 轮。
-//
-// 两条都不满足就复用旧摘要，本轮不再花一次模型调用。
-func (r *Runner) shouldRecomputeSummary(st *State, droppedTokens int) bool {
-	if strings.TrimSpace(st.Summary) == "" || st.SummaryAtIter <= 0 {
-		return true
-	}
-	newDropped := droppedTokens - st.SummaryDroppedTokens
-	if newDropped < 0 {
-		newDropped = 0
-	}
-	if newDropped >= summaryDropThreshold {
-		return true
-	}
-	if st.Iteration-st.SummaryAtIter >= summaryMaxEpoch {
-		return true
-	}
-	return false
-}

@@ -338,14 +338,9 @@ type AgentView struct {
 	// Worktree 非空时，这个会话在独立 git 工作树里工作（路径 + 分支）。
 	Worktree       string `json:"worktree,omitempty"`
 	WorktreeBranch string `json:"worktreeBranch,omitempty"`
-	// LearnAt 是已经收进摘要的消息条数。
-	LearnAt int `json:"learnAt,omitempty"`
-	// LearnTotal 是应该被摘要覆盖的更早消息条数。最近几条留在当前窗口，不计入。
-	LearnTotal int `json:"learnTotal,omitempty"`
-	// LearnBy 是写出摘要的子会话。空表示本会话自己整理。
-	LearnBy string `json:"learnBy,omitempty"`
-	// LearnBusy 为真时，摘要还在写。
-	LearnBusy bool `json:"learnBusy,omitempty"`
+	// CtxCovered 是已经压缩成摘要的更早消息条数。这些消息还在对话里，
+	// 只是不再原样发给模型。0 表示没压过。
+	CtxCovered int `json:"ctxCovered,omitempty"`
 }
 
 func toAgentView(a *agent.Agent) AgentView {
@@ -380,10 +375,7 @@ func toAgentView(a *agent.Agent) AgentView {
 		WorktreeBranch: s.WorktreeBranch,
 		SeesImages:     seesModel(s.LLMCfg),
 		Proposal:       s.Proposal,
-		LearnAt:        s.LearnAt,
-		LearnTotal:     agent.LearnEnd(len(s.Messages)),
-		LearnBy:        s.LearnBy,
-		LearnBusy:      s.LearnBusy,
+		CtxCovered:     s.Compacted(),
 	}
 }
 
@@ -452,10 +444,7 @@ func agentViewFromMap(m map[string]any) AgentView {
 	v.Proposal, _ = m["proposal"].(string)
 	v.ParentID, _ = m["parentId"].(string)
 	v.Depth = mapInt(m["depth"])
-	v.LearnBy, _ = m["learnBy"].(string)
-	v.LearnBusy, _ = m["learnBusy"].(bool)
-	v.LearnAt = mapInt(m["learnAt"])
-	v.LearnTotal = mapInt(m["learnTotal"])
+	v.CtxCovered = mapInt(m["ctxCovered"])
 	switch lc := m["llmCfg"].(type) {
 	case *llm.Config:
 		v.LLM = llm.RedactedPtr(lc)

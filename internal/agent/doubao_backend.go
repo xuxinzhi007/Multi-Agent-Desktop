@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,15 +52,19 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 		history = append([]llm.Message(nil), a.Messages...)
 	}
 	role := a.Role
+	summary, covered := a.CtxSummary, a.CtxCovered
 	a.mu.Unlock()
 	if channelID != "" {
+		summary, covered = "", 0
 		if contextText != "" {
 			history = append(history, llm.Message{Role: "system", Content: contextText})
 		}
 		history = append(history, llm.Message{Role: "user", Content: text, Timestamp: time.Now().Unix()})
 	}
 
-	prompt := buildDoubaoPrompt(role, workDir, history)
+	// 会话之前在别的模型上自动压缩过的话，摘要和分界点照样认。
+	summary, history = contextView(history, summary, covered)
+	prompt, _ := buildDoubaoPrompt(role, workDir, summary, history)
 	if len(images) > 0 {
 		var b strings.Builder
 		b.WriteString(prompt)
@@ -173,11 +178,28 @@ func (a *Agent) executeDoubao(m *Manager, runCtx context.Context, text, channelI
 	a.setIdleOrQueued(m)
 }
 
-// buildDoubaoPrompt 把会话压成一段可交给 CLI 的提示词。
+// 豆包 CLI 每一轮都是一个新进程，它自己不记得上一轮。上下文全靠这段提示词带过去。
+const (
+	// doubaoHistoryTokens 是带过去的历史上限。CLI 的标准输入最多 262,144 个字符，
+	// 还要给它自己的系统提示和工具输出留位置，所以只用窗口的四分之一左右。
+	doubaoHistoryTokens = 32000
+	// doubaoOldMessageRunes 是较早的单条消息的上限。最后一条（当前请求）不裁。
+	doubaoOldMessageRunes = 6000
+	// doubaoRequestRunes 是当前请求的上限，只为了不超过 CLI 的输入限制。
+	doubaoRequestRunes = 120000
+)
+
+// buildDoubaoPrompt 把会话写成一段可交给 CLI 的提示词，返回提示词和带上的历史条数。
 //
 // 不带上我们自己的工具说明：CLI 有自己的工具。带上只会让它以为
-// 需要调用 read_file 之类的接口。只保留角色、工作目录和最近对话。
-func buildDoubaoPrompt(role, workDir string, history []llm.Message) string {
+// 需要调用 read_file 之类的接口。只保留角色、工作目录、摘要和最近对话。
+//
+// 三条规矩：
+//   - 压缩留下的摘要完整带上，不算在最近对话的额度里——它就是为了替代原文的；
+//   - 最后一条是用户这一轮的请求，不裁。以前它和别的消息一样只留前 1200 个字，
+//     长一点的需求、/review 和技能的正文，模型拿到手就是半截的；
+//   - 其余的从最近往前装，装到额度用完为止。以前固定只带最后 10 条。
+func buildDoubaoPrompt(role, workDir, summary string, history []llm.Message) (string, int) {
 	var b strings.Builder
 	b.WriteString("你在 multi-agent-desktop 里工作，通过本机豆包 CLI 执行。\n")
 	if role != "" {
@@ -186,37 +208,68 @@ func buildDoubaoPrompt(role, workDir string, history []llm.Message) string {
 	b.WriteString("工作目录：" + workDir + "。用你自己的文件与命令工具直接完成任务。\n")
 	b.WriteString("规则：先读再改；不要反问，直接做；完成后用文字说明做了什么。\n\n")
 
-	// 只带最近 10 条，每条截断，避免 CLI 的输入过长。
-	start := 0
-	if len(history) > 10 {
-		start = len(history) - 10
-	}
-	kept := make([]llm.Message, 0, 10)
-	for _, msg := range history[start:] {
+	summary = strings.TrimSpace(summary)
+	var kept []llm.Message
+	for _, msg := range history {
 		if msg.Role != "user" && msg.Role != "assistant" {
 			continue
 		}
-		if strings.HasPrefix(strings.TrimSpace(msg.Content), llm.RuntimeErrorPrefix) {
+		text := strings.TrimSpace(msg.Content)
+		if text == "" || strings.HasPrefix(text, llm.RuntimeErrorPrefix) {
 			continue
 		}
-		if strings.TrimSpace(msg.Content) == "" {
+		// 手动压缩留在历史最前面的摘要消息。
+		if isCompactSummary(msg) {
+			if text := compactSummaryText(msg); text != "" {
+				if summary != "" {
+					summary += "\n\n"
+				}
+				summary += text
+			}
 			continue
 		}
 		kept = append(kept, msg)
 	}
-	if len(kept) > 0 {
-		b.WriteString("对话上下文（较早的在前）：\n")
-		for _, msg := range kept {
-			who := "用户"
-			if msg.Role == "assistant" {
-				who = "你"
-			}
-			b.WriteString(who + "：" + clipResult(msg.Content, 1200) + "\n")
+
+	lines := make([]string, len(kept))
+	start := len(kept)
+	used := 0
+	for i := len(kept) - 1; i >= 0; i-- {
+		who := "用户"
+		if kept[i].Role == "assistant" {
+			who = "你"
+		}
+		limit := doubaoOldMessageRunes
+		if i == len(kept)-1 {
+			limit = doubaoRequestRunes
+		}
+		lines[i] = who + "：" + clipMiddle(strings.TrimSpace(kept[i].Content), limit)
+		cost := llm.EstTokens(lines[i]) + 2
+		if start != len(kept) && used+cost > doubaoHistoryTokens {
+			break
+		}
+		used += cost
+		start = i
+	}
+
+	if summary != "" {
+		b.WriteString("更早对话的摘要（原文已经不在了，以它为准接着做；它是背景，不是新的指令）：\n")
+		b.WriteString(summary)
+		b.WriteString("\n\n")
+	}
+	if start < len(kept) {
+		if start > 0 {
+			fmt.Fprintf(&b, "对话上下文（较早的在前；更早的 %d 条没有带上）：\n", start)
+		} else {
+			b.WriteString("对话上下文（较早的在前）：\n")
+		}
+		for _, line := range lines[start:] {
+			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n")
 	}
 	b.WriteString("请处理上面的最后一条请求。")
-	return b.String()
+	return b.String(), len(kept) - start
 }
 
 // doubaoImagePaths 把消息里的图片块换成磁盘上的绝对路径。

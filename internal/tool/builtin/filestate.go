@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,6 +100,27 @@ func forgetRead(scope, abs string) {
 	readStates.Lock()
 	delete(readStates.m, stateKey(scope, abs))
 	readStates.Unlock()
+}
+
+// ForgetScope 丢掉一个作用域的全部读写记录。
+//
+// 给跑完就扔的临时子任务用：它的作用域不会再出现，记录留着只会让这两张表
+// 在一个长时间不退出的进程里一直涨。空作用域不动——那是无会话调用方共用的。
+func ForgetScope(scope string) {
+	if scope == "" {
+		return
+	}
+	prefix := scope + "\x00"
+	readStates.Lock()
+	for k := range readStates.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(readStates.m, k)
+		}
+	}
+	readStates.Unlock()
+	writtenFiles.Lock()
+	delete(writtenFiles.m, scope)
+	writtenFiles.Unlock()
 }
 
 func remembered(scope, abs string) (readState, bool) {
